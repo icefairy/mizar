@@ -116,6 +116,7 @@ Mizar 的能力扩展分三层，各司其职：
 ```go
 // 注册给 JS 插件的全局函数（一次性写好，之后插件随便组合）
 vm.Set("http_get", httpGet)       // HTTP GET/POST（可选内网代理）
+vm.Set("http_post", httpPost)
 vm.Set("json_decode", jsonDecode) // JSON 解析
 vm.Set("json_encode", jsonEncode)
 vm.Set("fs_read", fsRead)         // 文件读写（限定在项目目录内）
@@ -125,6 +126,11 @@ vm.Set("shell_exec", shellExec)   // 执行命令（白名单 + 超时 + 输出�
 vm.Set("llm_chat", llmChat)       // 调 LLM —— 自举闭环的钥匙
 vm.Set("log", log)                // 日志
 vm.Set("sleep", sleep)
+vm.Set("ws_emit", wsEmit)         // 向所有 WS 客户端推送自定义事件（Server 模式）
+vm.Set("ws_connect", ...)         // WS 客户端桥：连外部 WS 服务（如飞书长连接）
+vm.Set("ws_send", ...)
+vm.Set("ws_onmessage", ...)
+vm.Set("ws_close", ...)
 ```
 
 ```ts
@@ -232,7 +238,7 @@ Agent 规划：需要新能力吗？
 - [x] Agent 循环：规划 → 工具调用 → 错误修复
 - [x] 手写插件 + Agent 写插件双路径验证（17*23=391 端到端通过）
 
-### v0.2 —— 三层扩展 + 缓存友好循环（进行中）
+### v0.2 —— 三层扩展 + 缓存友好循环（已完成 v0.2.4）
 - [x] SKILL.md 加载器（解析 frontmatter → 注入 system prompt）
 - [x] MCP 客户端（stdio + HTTP）
 - [x] 会话管理（JSONL）
@@ -240,6 +246,13 @@ Agent 规划：需要新能力吗？
 - [x] 会话压缩器 Compactor（pi 参考：触发/切点/结构化摘要）
 - [x] Hook 挂载点系统（11 挂载点 + 缓存影响分级）
 - [x] 缓存友好：system 前缀稳定 + 工具列表稳定 + 摘要隔离
+- [x] 初始化向导（--init + ~/.mizar/config.json + 自动探测）
+- [x] 斜杠命令注册表（内置 /reload /reset /quit + 插件 command_*）
+- [x] Server 模式：OpenAI 兼容 HTTP + JSON-RPC 2.0 + WebSocket + 动态开关
+- [x] 快速插入（steer/abort）——WS 实时纠正
+- [x] 插件 WS 能力（rpc_* 自定义方法 + ws_emit 推送 + WS 客户端桥）
+- [x] 内置工具集（bash/grep/find/read/write/edit/ls，pi 对齐）
+- [x] AGENTS.md 自动读取（全局 + 局部相加）
 - [ ] 自举沉淀端到端验证
 
 ### v0.3 —— 内网产品化
@@ -377,9 +390,69 @@ export function rpc_notify(params) {
 - `GET /admin/status`：查询三服务开关状态
 - `POST /admin/switch` `{"service":"http|jsonrpc|ws","enabled":true|false}`：动态开关，即时生效，重启后回到启动配置
 
-## 11. 技术选型实测（Go GC 与二进制体积）
+## 11. 初始化向导与配置
 
-### 11.1 Go GC 对 Agent 的影响：可忽略（实测）
+### 11.1 交互式初始化（--init）
+
+新机器首次运行：`./mizar --init` 进入 REPL 引导（命令式，与交互对话共用斜杠命令机制）：
+
+| 命令 | 功能 |
+|---|---|
+| `/provider` | 输入 OpenAI 兼容端点 + API Key，自动 GET /v1/models 验证连接并列出模型 |
+| `/model` | 列出供应商全部模型（真实探测），输入序号或模型名选择 |
+| `/think` | 思考模式：`on`/`off`/空=自动探测（发请求试 thinking 参数，不支持则关闭） |
+| `/context` | 上下文窗口：数字 / `auto`=自动探测（优先模型元数据 → 内置窗口表 → 默认 128000） |
+| `/save` | 保存到 `~/.mizar/config.json` |
+| `/quit` `/help` | 退出 / 帮助 |
+
+### 11.2 配置存储（~/.mizar/）
+
+```
+~/.mizar/
+├── config.json    # 供应商 + 模型 + 思考模式 + 上下文窗口
+└── AGENTS.md      # 全局指令（可选）
+```
+
+- **启动自动加载**：无 `--init` 启动时读 `~/.mizar/config.json`，覆盖默认 flag（`flag.Visit` 判断显式 flag 优先）
+- **thinking 透传**：配置开启时请求体带 `"thinking":{"type":"enabled"}`，关闭带 `disabled`（deepseek 等模型支持）
+- **路径统一**：`config.ConfigDir()` 是唯一路径来源（配置 + 全局 AGENTS.md 同目录，杜绝漂移）
+
+### 11.3 内置斜杠命令
+
+| 命令 | 功能 | 实现 |
+|---|---|---|
+| `/reload` | 重载配置 + 插件热重载 + 同步插件命令 | `ReloadAll()` 强制重载（非增量） |
+| `/reset` | 重置会话上下文（参照 pi 的 /new） | `agent.Reset()` 清 Initial/steer/abort |
+| `/quit` | 退出交互模式 | |
+
+## 12. 内置工具集（pi 式）
+
+`internal/builtins/` 提供 7 个 Go 实现的内置工具，**与插件 `tool_*` 同一通道**（`plugins.Manager.RegisterBuiltin()`，来源标记 `<builtin>`，不受插件热重载影响）。签名对齐 pi：
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `bash` | command, timeout | 执行 shell 命令（超时 + 输出上限） |
+| `grep` | pattern, path, glob, ignoreCase, literal, context | 内容搜索（regex/字面量 + 上下文行） |
+| `find` | pattern, path, limit | 文件查找（glob 模式） |
+| `read` | path, offset, limit | 读文件（行号分页） |
+| `write` | path, content | 写文件（自动建父目录） |
+| `edit` | path, oldText/newText 或 edits[] | 精准替换（唯一匹配校验，支持批量） |
+| `ls` | path, limit | 列目录（排序 + 目录标记） |
+
+实测：真实 LLM 自主规划 `ls → bash → grep → edit → read → bash → reply` 完成文件修改任务，工具链路闭环。
+
+## 13. AGENTS.md 自动读取
+
+`internal/context/` 实现全局 + 局部相加注入：
+
+- **全局**：`~/.mizar/AGENTS.md`（与配置文件同目录，所有项目共享）
+- **局部**：从 `--workdir`（默认 cwd）向上递归查找 AGENTS.md（git 风格，最近者优先）
+- **相加**：全局在前 + 局部在后拼接，注入 System prompt（缓存友好：启动时一次读取，运行期稳定）
+- 启动日志：`AGENTS.md 注入: /root/.mizar/AGENTS.md, /path/to/proj/AGENTS.md`
+
+## 14. 技术选型实测（Go GC 与二进制体积）
+
+### 14.1 Go GC 对 Agent 的影响：可忽略（实测）
 
 | 指标 | 实测值 |
 |---|---|
@@ -390,7 +463,7 @@ export function rpc_notify(params) {
 
 **建议**：`GOMEMLIMIT` 设上限（如 2GiB），防止内存充裕机器上 GC 懒惰堆涨。
 
-### 11.2 二进制体积实测对比
+### 14.2 二进制体积实测对比
 
 | 方案 | 体积 | 备注 |
 |---|---|---|
@@ -401,7 +474,7 @@ export function rpc_notify(params) {
 
 **结论**：Go 是 Rust 的 ~10 倍体积（静态链接完整运行时），但 5~20M 在现代机器无体感；Go 是 Bun 的 **1/5**（后者要扛完整 JS 引擎）。Mizar 的 19M 主要来自 goja（JS 引擎）+ esbuild（TS 编译器）——换取插件系统零依赖，对"个人用、单二进制分发"定位正确。
 
-## 12. 参考
+## 15. 参考
 
 - [Pi Agent](https://github.com/mariozechner/pi) —— 极简 + 自举的灵感，compaction/loop/RPC(steer) 设计参考
 - [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust) —— Rust 移植，extensions_js.rs 的插件系统参考
