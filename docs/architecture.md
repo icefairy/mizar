@@ -349,7 +349,29 @@ Mizar 支持 `-serve` 持久运行（daemon），对外提供三种接入方式�
 - `Abort()`：原子标志，循环在下一个检查点停止，返回 `ErrAborted`
 - **缓存影响 🟡**：steer 注入发生在消息序列**末尾**（插入点之后缓存失效，但 system 前缀 + 早期历史仍可命中）——用户主动纠正，接受此 trade-off；abort 不影响缓存
 
-### 10.5 认证与动态开关
+### 10.5 插件接入 WS（注册自定义事件/方法）
+
+插件导出函数即注册（与 tool_* / command_* 同机制，热重载支持）：
+
+| 导出 | 能力 | 第三方调用方式 |
+|---|---|---|
+| `rpc_<name>(params)` | 注册自定义 JSON-RPC 方法 | HTTP `POST /rpc` + WS 均可调 `name` 方法 |
+| `ws_emit(event, dataJSON)` | 主动向所有 WS 客户端广播自定义事件 | 客户端收到 `{"type":"event","event":"<自定义>","data":...}` |
+| `command_<name>(args)` | 注册交互式斜杠命令 | CLI interactive 输入 `/name args` |
+
+插件示例（notify.ts）：
+
+```ts
+export function rpc_notify(params) {
+  const p = JSON.parse(params || "{}");
+  ws_emit("notify", JSON.stringify({level: p.level || "info", msg: "实时通知"}));
+  return JSON.stringify({ok: true});
+}
+```
+
+注意：`ws_emit` 宿主函数在 Server 启动后注入，插件需经 `ReloadAll()` 强制重载才能拿到（`LoadAll` 是增量重载，modTime 未变不会重新执行）。
+
+### 10.6 认证与动态开关
 
 - Bearer token（`--token`）：所有端点统一校验，无 token 返回 401
 - `GET /admin/status`：查询三服务开关状态
