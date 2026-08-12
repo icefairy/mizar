@@ -31,6 +31,8 @@ type HostFuncs struct {
 	Sleep      func(ms int)
 	// WSEmit 向所有 WS 客户端广播自定义事件（event + JSON 数据）。
 	WSEmit func(event, dataJSON string)
+	// WSClient 插件 WS 客户端桥（连外部 WS 服务，如飞书长连接）。
+	WSClient *WSClientBridge
 }
 
 // cjsShim 让 esbuild 的 CommonJS 输出能在 goja 中运行。

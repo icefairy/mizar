@@ -10,7 +10,9 @@ import (
 	"strings"
 
 	"mizar/internal/agent"
+	"mizar/internal/builtins"
 	"mizar/internal/config"
+	"mizar/internal/context"
 	"mizar/internal/engine"
 	"mizar/internal/llm"
 	"mizar/internal/plugins"
@@ -28,6 +30,7 @@ func main() {
 		model   = flag.String("model", "deepseek-v4-flash", "模型名")
 		extDir  = flag.String("ext", "extensions", "插件目录")
 		skillDir = flag.String("skills", "skills", "技能目录")
+		workDir = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
 		sessDir = flag.String("sessions", "sessions", "会话目录")
 		sessionID = flag.String("session", "", "会话 ID (续接对话)")
 		history = flag.Int("history", 50, "会话恢复的最大历史消息数")
@@ -126,6 +129,10 @@ func main() {
 	}
 
 	pm := plugins.NewManager(extAbs, host)
+	// 注册 pi 式内置工具（bash/grep/find/read/write/edit/ls）
+	for _, t := range builtins.All() {
+		pm.RegisterBuiltin(t)
+	}
 	loaded, failed := pm.LoadAll()
 	for _, f := range loaded {
 		log.Printf("插件加载: %s", f)
@@ -153,12 +160,21 @@ func main() {
 	if skPrompt != "" {
 		log.Printf("技能注入 %d 个", len(skLoaded))
 	}
+	// AGENTS.md 自动读取（全局 ~/.mizar/AGENTS.md + 局部向上查找，相加注入）
+	wd := *workDir
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
+	agentsPrompt := context.Load(wd)
+	if agentsPrompt != "" {
+		log.Printf("AGENTS.md 注入: %s", strings.Join(context.AGENTSFiles(wd), ", "))
+	}
 
 	// 会话存储
 	st := session.New(*sessDir)
 
 	a := agent.New(client, pm)
-	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt
+	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt + agentsPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
 
 	// 内置 /reload 命令：重载 ~/.mizar/config.json + 插件热重载

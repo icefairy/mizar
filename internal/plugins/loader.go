@@ -249,3 +249,20 @@ func (m *Manager) PluginNames() []string {
 	sort.Strings(out)
 	return out
 }
+
+// RegisterBuiltin 注册内置工具（Go 侧实现，来源标记 <builtin>，不受插件热重载影响）。
+func (m *Manager) RegisterBuiltin(t Tool) {
+	if t.PluginFile == "" {
+		t.PluginFile = "<builtin>"
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tools[t.Name] = t
+}
+
+// RemoveBuiltin 移除内置工具。
+func (m *Manager) RemoveBuiltin(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.tools, name)
+}

@@ -25,13 +25,18 @@ type Config struct {
 	ContextWindow int    `json:"context_window"` // 上下文窗口（token）
 }
 
-// DefaultPath 默认配置文件路径（~/.mizar/config.json）。
-func DefaultPath() string {
+// ConfigDir 返回配置目录（~/.mizar/），配置文件与全局 AGENTS.md 都放这里。
+func ConfigDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".mizar-config.json"
+		return ".mizar"
 	}
-	return filepath.Join(home, ".mizar", "config.json")
+	return filepath.Join(home, ".mizar")
+}
+
+// DefaultPath 默认配置文件路径（~/.mizar/config.json）。
+func DefaultPath() string {
+	return filepath.Join(ConfigDir(), "config.json")
 }
 
 // Save 保存配置（自动建目录）。

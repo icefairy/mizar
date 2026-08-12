@@ -1,0 +1,76 @@
+// Package builtins 提供 pi 式内置工具（Go 实现，注册为 Agent 可直接调用的工具）。
+//
+// 与插件导出的 tool_* 同一通道（plugins.Manager），LLM 循环中可直接使用：
+//
+//	| 工具   | 参数                                            | 说明               |
+//	|--------|-------------------------------------------------|--------------------|
+//	| bash   | command, timeout(可选)                          | 执行 shell 命令    |
+//	| grep   | pattern, path, glob, ignoreCase, literal, context | 内容搜索           |
+//	| find   | pattern, path, limit                            | 文件查找（glob）   |
+//	| read   | path, offset, limit                             | 读文件             |
+//	| write  | path, content                                   | 写文件             |
+//	| edit   | path, oldText, newText                          | 精准替换（可多次） |
+//	| ls     | path, limit                                     | 列目录             |
+//
+// 每个工具 Run(args string) 接收 JSON 参数（与插件 tool_* 一致）。
+package builtins
+
+import (
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
+
+	"mizar/internal/plugins"
+)
+
+// All 返回全部内置工具。
+func All() []plugins.Tool {
+	return []plugins.Tool{
+		toolBash(),
+		toolGrep(),
+		toolFind(),
+		toolRead(),
+		toolWrite(),
+		toolEdit(),
+		toolLS(),
+	}
+}
+
+// toolBash 执行 shell 命令（对齐 pi 的 bash 工具）。
+func toolBash() plugins.Tool {
+	return plugins.Tool{
+		Name:        "bash",
+		Description: "Execute a bash/shell command. Args: {command: string, timeout?: number(seconds)}. Returns combined stdout+stderr. Use for building, running tests, git, package managers.",
+		Run: func(args string) (string, error) {
+			var p struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Command == "" {
+				return "", fmt.Errorf("bash: args {command} required")
+			}
+			timeout := p.Timeout
+			if timeout <= 0 {
+				timeout = 120
+			}
+			cmd := exec.Command("bash", "-c", p.Command)
+			var out strings.Builder
+			cmd.Stdout = &out
+			cmd.Stderr = &out
+			if err := cmd.Start(); err != nil {
+				return "", err
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case <-done:
+			case <-time.After(time.Duration(timeout) * time.Second):
+				_ = cmd.Process.Kill()
+				return "", fmt.Errorf("bash: timeout after %ds", timeout)
+			}
+			return strings.TrimSpace(out.String()), nil
+		},
+	}
+}
