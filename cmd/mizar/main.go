@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"mizar/internal/agent"
 	"mizar/internal/config"
@@ -159,6 +160,73 @@ func main() {
 	a := agent.New(client, pm)
 	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
+
+	// 内置 /reload 命令：重载 ~/.mizar/config.json + 插件热重载
+	a.Commands.Register(agent.Command{
+		Name:        "reload",
+		Description: "重载 ~/.mizar/config.json 与插件（/reload）",
+		Run: func(args string) (string, error) {
+			cfg, err := config.Load(config.DefaultPath())
+			if err != nil || cfg.BaseURL == "" {
+				return "", fmt.Errorf("重载失败: %v（先运行 --init 或检查 %s）", err, config.DefaultPath())
+			}
+			// 应用配置到客户端
+			client.BaseURL = cfg.BaseURL
+			client.APIKey = cfg.APIKey
+			client.Model = cfg.Model
+			if cfg.Thinking {
+				thinking := true
+				client.Thinking = &thinking
+			} else {
+				client.Thinking = nil
+			}
+			// 应用上下文窗口
+			if cfg.ContextWindow > 0 {
+				*ctxWindow = cfg.ContextWindow
+				if a.Compactor != nil {
+					a.Compactor.ContextWindow = cfg.ContextWindow
+				}
+			}
+			// 插件热重载
+			loaded, failed := pm.ReloadAll()
+			// 同步插件命令到注册表
+			cmds := make([]agent.Command, 0)
+			for _, c := range pm.Commands() {
+				cc := c
+				cmds = append(cmds, agent.Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
+			}
+			a.Commands.SyncFromPlugins(cmds)
+			// 汇总
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%v\n", cfg.Model, cfg.ContextWindow, cfg.Thinking)
+			if len(loaded) > 0 {
+				fmt.Fprintf(&sb, "✓ 插件重载: %s\n", strings.Join(loaded, ", "))
+			}
+			for f, e := range failed {
+				fmt.Fprintf(&sb, "✗ 插件失败: %s: %v\n", f, e)
+			}
+			return sb.String(), nil
+		},
+	})
+	// 内置 /reset 命令：清空会话上下文（参照 pi 的 /new）
+	a.Commands.Register(agent.Command{
+		Name:        "reset",
+		Description: "重置会话上下文（清空历史，保留配置/插件）",
+		Run: func(args string) (string, error) {
+			a.Reset()
+			return "✓ 会话已重置（历史已清空）", nil
+		},
+	})
+	// 内置 /quit 命令：退出交互模式
+	a.Commands.Register(agent.Command{
+		Name:        "quit",
+		Description: "退出交互模式",
+		Run: func(args string) (string, error) {
+			fmt.Println("再见")
+			os.Exit(0)
+			return "", nil
+		},
+	})
 	if !*noCompact {
 		client2 := client // SummarizeMessages 用同一客户端
 		a.Compactor = agent.DefaultCompactor(func(msgs []agent.Message) (string, error) {

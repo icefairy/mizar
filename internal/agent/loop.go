@@ -78,7 +78,7 @@ func New(llm LLM, pm *plugins.Manager) *Agent {
 	// 插件导出的 command_* 函数注册为斜杠命令
 	for _, c := range pm.Commands() {
 		cc := c
-		a.Commands.Register(Command{Name: cc.Name, Description: cc.Description, Run: cc.Run})
+		a.Commands.Register(Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
 	}
 	return a
 }

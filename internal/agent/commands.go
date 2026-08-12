@@ -22,6 +22,7 @@ import (
 type Command struct {
 	Name        string // 如 provider（调用为 /provider）
 	Description string // 帮助文本
+	PluginFile  string // 来源插件文件（空=内置命令）
 	Run         func(args string) (string, error)
 }
 
@@ -55,6 +56,22 @@ func (r *CommandRegistry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.commands, name)
+}
+
+// SyncFromPlugins 全量同步插件命令：先移除所有插件来源命令，再注册最新一批。
+func (r *CommandRegistry) SyncFromPlugins(cmds []Command) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, c := range r.commands {
+		if c.PluginFile != "" {
+			delete(r.commands, name)
+		}
+	}
+	for _, c := range cmds {
+		if c.Name != "" {
+			r.commands[c.Name] = c
+		}
+	}
 }
 
 // Get 取命令。

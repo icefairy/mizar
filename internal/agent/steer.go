@@ -68,6 +68,18 @@ func (a *Agent) Aborted() bool {
 	return a.aborted.Load()
 }
 
+// Reset 重置会话上下文（参照 pi 的 /new 命令）：
+// 清空 Initial 历史、pending steer 槽位、abort 标志；
+// 保留 System / 插件 / Compactor 配置。线程安全。
+func (a *Agent) Reset() {
+	a.steerMu.Lock()
+	a.steer = nil
+	a.steerSeq++
+	a.steerMu.Unlock()
+	a.aborted.Store(false)
+	a.Initial = nil
+}
+
 // resetAbort 清空 abort 标志（每次 Run 开始时调用）。
 func (a *Agent) resetAbort() {
 	a.aborted.Store(false)
