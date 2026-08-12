@@ -29,6 +29,16 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		if line == "" {
 			return
 		}
+		// 斜杠命令分发：插件注册的 command_* 与内置命令
+		if handled, out, err := a.Commands.Dispatch(line); handled {
+			if err != nil {
+				fmt.Printf("命令错误: %v\n", err)
+			}
+			if out != "" {
+				fmt.Println(out)
+			}
+			continue
+		}
 		reply, err := a.Run(line)
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)

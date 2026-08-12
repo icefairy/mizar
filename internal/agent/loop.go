@@ -54,6 +54,9 @@ type Agent struct {
 	steer    *steerMsg  // 待插入消息（nil = 无）
 	steerSeq uint64     // 序号，最新覆盖用
 	aborted  atomic.Bool
+
+	// Commands 斜杠命令注册表（内置 + 插件 command_*）
+	Commands *CommandRegistry
 }
 
 type callRequest struct {
@@ -65,12 +68,19 @@ type callRequest struct {
 
 // New 创建 Agent。
 func New(llm LLM, pm *plugins.Manager) *Agent {
-	return &Agent{
+	a := &Agent{
 		LLM:        llm,
 		Plugins:    pm,
 		MaxSteps:   20,
 		callParser: parseCallJSON,
+		Commands:   NewCommandRegistry(),
 	}
+	// 插件导出的 command_* 函数注册为斜杠命令
+	for _, c := range pm.Commands() {
+		cc := c
+		a.Commands.Register(Command{Name: cc.Name, Description: cc.Description, Run: cc.Run})
+	}
+	return a
 }
 
 // Model 返回模型标识（供 OpenAI 兼容端点 /v1/models 使用）。

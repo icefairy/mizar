@@ -41,6 +41,15 @@
 ## 快速开始（目标态）
 
 ```bash
+# 首次运行：交互式初始化向导（配置供应商/模型/思考模式/上下文窗口）
+./mizar --init
+#   /provider       添加供应商（OpenAI 兼容端点，自动列出模型）
+#   /model          选择模型（自动探测 / 手动输入序号）
+#   /think          思考模式开关（空=自动探测是否支持）
+#   /context auto   上下文窗口（auto=自动探测，或手动输入数字）
+#   /save           保存到 ~/.mizar/config.json
+# 之后启动自动加载 ~/.mizar/config.json（命令行 flag 优先）
+
 # 内网服务器，无外网、无 Node、无 Python
 curl -O http://192.168.1.10:8080/mizar-linux-amd64   # 或 scp 一个文件
 chmod +x mizar

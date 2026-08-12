@@ -19,6 +19,10 @@ type OpenAI struct {
 	APIKey  string
 	Model   string
 	Client  *http.Client
+	// Thinking 思考模式（deepseek 等模型支持）。
+	// 开启时请求体带 "thinking": {"type":"enabled"}；
+	// 关闭时带 "thinking": {"type":"disabled"} 抑制思考。
+	Thinking *bool
 }
 
 // NewOpenAI 创建客户端。
@@ -40,6 +44,9 @@ type chatReq struct {
 	Model     string    `json:"model"`
 	Messages  []chatMsg `json:"messages"`
 	MaxTokens int       `json:"max_tokens,omitempty"`
+	Thinking  *struct {
+		Type string `json:"type"`
+	} `json:"thinking,omitempty"`
 }
 
 // SummarizeMessages 生成会话摘要（供 Compactor 使用）。
@@ -107,6 +114,16 @@ func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 	req := chatReq{Model: c.Model}
 	for _, m := range messages {
 		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
+	}
+	// 思考模式：Thinking 非 nil 时透传 thinking 参数（enabled/disabled）
+	if c.Thinking != nil {
+		t := "disabled"
+		if *c.Thinking {
+			t = "enabled"
+		}
+		req.Thinking = &struct {
+			Type string `json:"type"`
+		}{Type: t}
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

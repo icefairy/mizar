@@ -31,6 +31,7 @@ type Manager struct {
 	host     *engine.HostFuncs
 	engines  map[string]*engine.Engine // 每个插件独立引擎（隔离）
 	tools    map[string]Tool
+	commands map[string]Command // 斜杠命令（command_* 导出）
 	modTime  map[string]time.Time
 	maxExec  time.Duration // 单次插件执行超时
 }
@@ -38,12 +39,13 @@ type Manager struct {
 // NewManager 创建插件管理器。
 func NewManager(dir string, host *engine.HostFuncs) *Manager {
 	return &Manager{
-		dir:     dir,
-		host:    host,
-		engines: make(map[string]*engine.Engine),
-		tools:   make(map[string]Tool),
-		modTime: make(map[string]time.Time),
-		maxExec: 30 * time.Second,
+		dir:      dir,
+		host:     host,
+		engines:  make(map[string]*engine.Engine),
+		tools:    make(map[string]Tool),
+		commands: make(map[string]Command),
+		modTime:  make(map[string]time.Time),
+		maxExec:  30 * time.Second,
 	}
 }
 
@@ -107,19 +109,24 @@ func (m *Manager) loadPlugin(filename string) error {
 		vm.Close()
 		return fmt.Errorf("exec %s: %w", filename, err)
 	}
-	// 收集导出的 tool_* 函数
+	// 收集导出的 tool_* 函数与 command_* 命令
 	tools := m.collectTools(filename, vm)
-	if len(tools) == 0 {
+	cmds := m.collectCommands(filename, vm)
+	if len(tools) == 0 && len(cmds) == 0 {
 		vm.Close()
-		return fmt.Errorf("plugin %s: no tool_* exports found", filename)
+		return fmt.Errorf("plugin %s: no tool_* or command_* exports found", filename)
 	}
 	// 原子替换：先收集再提交
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// 移除旧引擎里属于该文件的工具
+	// 移除旧引擎里属于该文件的工具与命令
 	m.removeToolsLocked(filename)
+	m.removeCommandsLocked(filename)
 	for _, t := range tools {
 		m.tools[t.Name] = t
+	}
+	for _, c := range cmds {
+		m.commands[c.Name] = c
 	}
 	if old, ok := m.engines[filename]; ok {
 		old.Close()

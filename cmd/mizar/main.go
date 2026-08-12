@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"mizar/internal/agent"
+	"mizar/internal/config"
 	"mizar/internal/engine"
 	"mizar/internal/llm"
 	"mizar/internal/plugins"
@@ -33,6 +34,7 @@ func main() {
 		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
 		task    = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer = flag.Bool("version", false, "显示版本")
+		initWiz = flag.Bool("init", false, "运行初始化向导（配置供应商/模型）")
 		// Server 模式（持久运行 daemon）
 		serve      = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
 		addr       = flag.String("addr", ":3003", "Server 监听地址")
@@ -46,6 +48,39 @@ func main() {
 	if *showVer {
 		fmt.Println("mizar", version)
 		return
+	}
+
+	// 初始化向导：交互式配置供应商/模型/思考/上下文
+	if *initWiz {
+		cfg, err := config.RunWizard(config.DefaultPath())
+		if err != nil {
+			log.Fatalf("初始化失败: %v", err)
+		}
+		if cfg.BaseURL == "" {
+			fmt.Println("未配置供应商，退出。")
+			return
+		}
+		fmt.Printf("初始化完成，配置已保存到 %s\n", config.DefaultPath())
+		return
+	}
+
+	// 自动加载 ~/.mizar/config.json（显式 flag 优先）
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.BaseURL != "" {
+		explicit := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		if !explicit["base-url"] {
+			*baseURL = cfg.BaseURL
+		}
+		if !explicit["api-key"] {
+			*apiKey = cfg.APIKey
+		}
+		if !explicit["model"] {
+			*model = cfg.Model
+		}
+		if !explicit["ctx-window"] && cfg.ContextWindow > 0 {
+			*ctxWindow = cfg.ContextWindow
+		}
+		log.Printf("已加载配置 %s: model=%s thinking=%v window=%d", config.DefaultPath(), *model, cfg.Thinking, *ctxWindow)
 	}
 
 	// 宿主函数集
@@ -67,6 +102,10 @@ func main() {
 	}
 	// 提供真实 LLM 给插件 llm_chat
 	client := llm.NewOpenAI(*baseURL, *apiKey, *model)
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.Thinking {
+		thinking := true
+		client.Thinking = &thinking
+	}
 	host.LLMChat = func(messagesJSON string) (string, error) {
 		var msgs []agent.Message
 		if err := jsonUnmarshal(messagesJSON, &msgs); err != nil {

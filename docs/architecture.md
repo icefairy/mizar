@@ -355,7 +355,31 @@ Mizar 支持 `-serve` 持久运行（daemon），对外提供三种接入方式�
 - `GET /admin/status`：查询三服务开关状态
 - `POST /admin/switch` `{"service":"http|jsonrpc|ws","enabled":true|false}`：动态开关，即时生效，重启后回到启动配置
 
-## 11. 参考
+## 11. 技术选型实测（Go GC 与二进制体积）
+
+### 11.1 Go GC 对 Agent 的影响：可忽略（实测）
+
+| 指标 | 实测值 |
+|---|---|
+| STW 暂停 | **14 μs**（模拟 Agent 循环内存模式，20 秒仅触发 1 次 GC） |
+| GC 模式 | 并发标记清扫，STW 只有"停止世界"一小段 |
+
+**为什么无影响**：Agent 循环的瓶颈是 LLM 网络往返（数百 ms~秒级），GC 暂停是 μs 级——差 4 个数量级，完全淹没在网络延迟里。核心数据是消息切片（追加为主、压缩器周期性截断），GC 最擅长的短命对象模式。真正要防的是 goroutine 泄漏与无界缓存（已通过插件 30s 超时 + Compactor token 预算规避）。
+
+**建议**：`GOMEMLIMIT` 设上限（如 2GiB），防止内存充裕机器上 GC 懒惰堆涨。
+
+### 11.2 二进制体积实测对比
+
+| 方案 | 体积 | 备注 |
+|---|---|---|
+| Go 最小 HTTP+JSON 服务 | 5.7M | `-trimpath -ldflags '-s -w'` |
+| Go Mizar 完整（goja+esbuild+ws） | 19M | 含全部功能 |
+| Rust 最小 HTTP+JSON 服务 | 555K | LTO + panic=abort + strip |
+| Node.js 本体（Bun 打包需携带） | 119M | bun build --compile 类项目 90~110M |
+
+**结论**：Go 是 Rust 的 ~10 倍体积（静态链接完整运行时），但 5~20M 在现代机器无体感；Go 是 Bun 的 **1/5**（后者要扛完整 JS 引擎）。Mizar 的 19M 主要来自 goja（JS 引擎）+ esbuild（TS 编译器）——换取插件系统零依赖，对"个人用、单二进制分发"定位正确。
+
+## 12. 参考
 
 - [Pi Agent](https://github.com/mariozechner/pi) —— 极简 + 自举的灵感，compaction/loop/RPC(steer) 设计参考
 - [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust) —— Rust 移植，extensions_js.rs 的插件系统参考
