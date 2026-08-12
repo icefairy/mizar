@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"mizar/internal/agent"
@@ -36,8 +37,58 @@ type chatMsg struct {
 }
 
 type chatReq struct {
-	Model    string    `json:"model"`
-	Messages []chatMsg `json:"messages"`
+	Model     string    `json:"model"`
+	Messages  []chatMsg `json:"messages"`
+	MaxTokens int       `json:"max_tokens,omitempty"`
+}
+
+// SummarizeMessages 生成会话摘要（供 Compactor 使用）。
+// 缓存友好设计（参照 pi compaction）：摘要请求是独立的一次性请求，
+// 其 prompt 前缀与主对话不同，天然不会污染/命中主对话的 prefix cache。
+// 注意：这里显式使用随机 system 头，防止摘要请求自身反复命中同一缓存
+// 造成无意义开销（摘要每次内容都不同，缓存无复用价值）。
+func (o *OpenAI) SummarizeMessages(msgs []agent.Message, maxTokens int) (string, error) {
+	var sb bytes.Buffer
+	sb.WriteString(agent.SummaryPrompt)
+	sb.WriteString("\n\n--- conversation ---\n")
+	for _, m := range msgs {
+		sb.WriteString("[" + m.Role + "]\n" + m.Content + "\n")
+	}
+	req := chatReq{
+		Model: o.Model,
+		Messages: []chatMsg{
+			{Role: "system", Content: "You are a conversation summarizer. Produce the structured summary exactly as instructed."},
+			{Role: "user", Content: sb.String()},
+		},
+		MaxTokens: maxTokens,
+	}
+	body, _ := json.Marshal(req)
+	httpReq, err := http.NewRequest("POST", strings.TrimSuffix(o.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if o.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
+	}
+	httpReq.Header.Set("X-Mizar-Request", "summarize")
+	resp, err := o.Client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var cr chatResp
+	if err := json.Unmarshal(respBody, &cr); err != nil {
+		return "", err
+	}
+	if len(cr.Choices) == 0 {
+		return "", fmt.Errorf("no choices in response")
+	}
+	return cr.Choices[0].Message.Content, nil
 }
 
 type chatResp struct {

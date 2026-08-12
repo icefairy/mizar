@@ -56,6 +56,36 @@ ls extensions/
 #   disk_watch.ts
 ```
 
+### Server 模式（持久运行 + 三种接入协议）
+
+```bash
+# 持久运行 daemon：OpenAI 兼容 HTTP + JSON-RPC + WebSocket
+./mizar --serve --addr :3003 --token your-token \
+  --base-url http://127.0.0.1:3002/v1 --model deepseek-v4-flash
+```
+
+| 接入方式 | 端点 | 用法 |
+|---|---|---|
+| OpenAI 兼容 | `POST /v1/chat/completions` | 任意 OpenAI SDK 改 `base_url` 即可 |
+| JSON-RPC 2.0 | `POST /rpc` | `agent.run` / `agent.steer` / `agent.abort` / `tools.list` / `system.ping` |
+| WebSocket | `GET /ws` | 实时事件流 + 中途快速纠正（steer） |
+
+```bash
+# 动态开关（运行期即时生效，无需重启）
+curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' -H "Authorization: Bearer your-token"
+curl localhost:3003/admin/status -H "Authorization: Bearer your-token"
+```
+
+```python
+# WebSocket 快速纠正示例：看到输出不对立刻纠正（类似 pi 的 steer）
+import websocket, json
+ws = websocket.create_connection("ws://localhost:3003/ws", header=["Authorization: Bearer your-token"])
+ws.send(json.dumps({"jsonrpc": "2.0", "id": "r1", "method": "agent.run", "params": {"task": "..."}}))
+# 收到事件流，发现不对 →
+ws.send(json.dumps({"jsonrpc": "2.0", "id": "s1", "method": "agent.steer", "params": {"message": "方向错了，改成..."}}))
+# ack 秒回，纠正注入下一轮循环
+```
+
 ---
 
 ## 项目结构（目标态）

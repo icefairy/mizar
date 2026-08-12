@@ -225,31 +225,144 @@ Agent 规划：需要新能力吗？
 
 ## 8. 路线图
 
-### v0.1 —— 验证自举闭环（1-2 周）
-- [ ] Go 骨架 + goja 引擎 + esbuild 编译管线
-- [ ] 宿主函数集（http/json/fs/shell/llm_chat）
-- [ ] 插件加载器：扫描 extensions/ → 编译 → 注册
-- [ ] Agent 循环：规划 → 工具调用 → 错误修复
-- [ ] 手写一个插件 + 让 Agent 写一个插件，双路径验证
+### v0.1 —— 验证自举闭环（已完成）
+- [x] Go 骨架 + goja 引擎 + esbuild 编译管线
+- [x] 宿主函数集（http/json/fs/shell/llm_chat）
+- [x] 插件加载器：扫描 extensions/ → 编译 → 注册
+- [x] Agent 循环：规划 → 工具调用 → 错误修复
+- [x] 手写插件 + Agent 写插件双路径验证（17*23=391 端到端通过）
 
-### v0.2 —— 三层扩展打通（2-4 周）
-- [ ] SKILL.md 加载器（解析 frontmatter → 注入 system prompt）
-- [ ] MCP 客户端（stdio + HTTP）
-- [ ] 自举沉淀：Agent 写完插件自动写 SKILL.md 文档
-- [ ] 会话管理（JSONL 树形，参考 pi）
+### v0.2 —— 三层扩展 + 缓存友好循环（进行中）
+- [x] SKILL.md 加载器（解析 frontmatter → 注入 system prompt）
+- [x] MCP 客户端（stdio + HTTP）
+- [x] 会话管理（JSONL）
+- [x] 自举沉淀：SkillWriter 自动写 SKILL.md
+- [x] 会话压缩器 Compactor（pi 参考：触发/切点/结构化摘要）
+- [x] Hook 挂载点系统（11 挂载点 + 缓存影响分级）
+- [x] 缓存友好：system 前缀稳定 + 工具列表稳定 + 摘要隔离
+- [ ] 自举沉淀端到端验证
 
-### v0.3 —— 内网产品化（1-2 月）
+### v0.3 —— 内网产品化
 - [ ] 弱模型宽容循环调优（错误修复、逐步降级）
 - [ ] 安全沙箱加固（限额、白名单、审计日志）
 - [ ] 与璇玑网关深度集成（缓存命中感知、成本控制）
 - [ ] 三平台交叉编译 + 发布（GitHub + Gitee）
 
-## 9. 参考
+## 9. Hook 挂载点与缓存影响
 
-- [Pi Agent](https://github.com/mariozechner/pi) —— 极简 + 自举的灵感
+### 9.1 设计原则
+
+1. **全环节可挂载**：Agent 循环每个关键环节都有挂载点，从 Run 开始到结束。
+2. **列表多挂载**：每个挂载点是 `[]HookFunc`，多个插件可同时挂载同一挂载点，按注册顺序执行；单个挂载函数返回 error 不中断链（观察者模式，错误仅记录）。
+3. **缓存影响分级**：每个挂载点标注 CacheImpact——这是本框架最重要的约束之一。
+   - 🔴 **严重**：在 LLM 请求前触发且能修改消息列表 → 任何改动都会让整个 prefix cache 失效，命中率暴跌
+   - 🟡 **中等**：在工具结果/回复之后触发，可能影响后续消息 → 影响有限
+   - 🟢 **安全**：只读/事后观察，不影响发给 LLM 的消息序列
+
+### 9.2 挂载点总表
+
+| 挂载点 | 时机 | 缓存影响 | 可修改 | 说明 |
+|---|---|---|---|---|
+| RunStart | Run 开始、task 已就绪 | 🟢 安全 | - | 任务开始：计时、初始化状态 |
+| RunEnd | Run 结束、reply 已生成 | 🟢 安全 | - | 任务结束：统计、上报 |
+| StepStart | 每步循环开始 | 🟡 中等 | Messages(不建议) | 进度上报、外部熔断 |
+| StepEnd | 每步循环结束 | 🟡 中等 | - | 步骤计数、状态持久化 |
+| **LLMRequest** | **LLM 调用前、messages 即将发送** | **🔴 严重** | **Messages** | **⚠️ 注入动态上下文会破坏缓存，默认禁用** |
+| LLMResponse | LLM 调用后、reply 已返回 | 🟢 安全 | - | 日志、流式转发 |
+| ToolCall | 工具调用前 | 🟢 安全 | Tool/Args | 参数校验、权限检查 |
+| ToolResult | 工具结果产生后 | 🟡 中等 | - | 结果过滤、错误上报 |
+| CompactionBefore | 压缩执行前 | 🟢 安全 | - | 压缩预检查 |
+| CompactionAfter | 压缩执行后 | 🟢 安全 | Messages(不建议) | 摘要后处理、更新外部记忆 |
+| Error | 任何错误发生 | 🟢 安全 | - | 错误告警、降级策略 |
+
+### 9.3 缓存警告（必须阅读）
+
+- **LLMRequest 是唯一 🔴 挂载点**：它把动态内容注入 LLM 消息流。一旦注入的内容在多次请求间变化，系统前缀缓存（system + 工具列表 + 历史）全部失效。**不要在 LLMRequest 注入逐次变化的内容**（时间戳、随机数、计数器）。需要动态上下文时：
+  1. 内容静态（如用户配置文件）→ 放 system（构建时注入一次）
+  2. 内容逐次变化（如工作记忆）→ 放**用户消息末尾**（ProjectDiscovery 实测：动态工作记忆放 system 使缓存命中率跌到 7%；移到 user 末尾后恢复）
+  3. 禁用所有带随机性的注入
+- **插件热加载（ReloadTools）会破坏缓存一次**：工具列表是 system prompt 的一部分，新增工具改变 system 字节。这是显式 trade-off，仅在确实新增工具时调用，禁止轮询调用。
+- **压缩（Compaction）设计为低频**：只在超限时触发，压缩后摘要作为稳定前缀插入 system 之后，重新建立可缓存前缀。摘要请求用独立请求（X-Mizar-Request: summarize），prompt 前缀与主对话不同，天然不污染主对话缓存。
+
+### 9.4 插件挂载示例
+
+```go
+h := agent.NewHooks()
+// 多个插件可同时挂载 RunStart
+h.OnRunStart(pluginA.OnRunStart)  // 插件 A：计时
+h.OnRunStart(pluginB.OnRunStart)  // 插件 B：审计日志
+// 只读观察 LLM 响应
+h.OnLLMResponse(func(ctx *agent.HookContext) error {
+    log.Printf("step %d: %s", ctx.Step, truncate(ctx.Reply, 100))
+    return nil
+})
+```
+
+## 10. Server 模式与快速插入
+
+### 10.1 三种接入协议
+
+Mizar 支持 `-serve` 持久运行（daemon），对外提供三种接入方式，均可用 `--http/--rpc/--ws` 启动开关控制，运行期可用 `/admin/switch` 动态开关（即时生效，关后对应端点返回 503）：
+
+| 协议 | 端点 | 用途 | 第三方示例 |
+|---|---|---|---|
+| OpenAI 兼容 HTTP | `POST /v1/chat/completions` `GET /v1/models` | 直接当 OpenAI API 用，零改造成本接入 | `openai` SDK 改 base_url |
+| JSON-RPC 2.0 | `POST /rpc` | pi 式 RPC 命令集 | 脚本/CLI 调用 |
+| WebSocket | `GET /ws` | 实时事件流 + 快速纠正（steer） | 交互式前端 |
+
+### 10.2 JSON-RPC 方法集
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `agent.run` | `{task}` | 执行任务（HTTP 同步；WS 异步，结果推回） |
+| `agent.steer` | `{message}` | 快速插入纠正（不阻塞，立即注入当前循环） |
+| `agent.abort` | - | 中止当前循环，返回 ErrAborted |
+| `agent.running` | - | 查询运行状态 |
+| `tools.list` | - | 列出可用工具 |
+| `system.ping` | - | 健康检查 |
+
+### 10.3 WebSocket 事件流（快速插入的可视化基础）
+
+服务端 → 客户端实时推送（Agent 循环的 Hook 广播）：
+
+```
+{"type":"event","event":"llm_response","step":0,"content":"..."}
+{"type":"event","event":"tool_call","step":0,"tool":"calc","args":"..."}
+{"type":"event","event":"tool_result","step":0,"tool":"calc","result":"..."}
+{"type":"ack","method":"agent.steer","id":"..."}   // 纠正已受理
+{"jsonrpc":"2.0","id":"run1","result":{"reply":"..."}}  // run 完成
+```
+
+**典型交互**（用户看到中间输出不对立刻纠正）：
+1. 客户端发 `agent.run`（异步执行，读循环不阻塞）
+2. 收到 `tool_call` / `llm_response` 事件 → 发现与预期有差距
+3. 立即发 `agent.steer {message}` → ack 秒回
+4. 纠正消息注入下一轮 LLM 调用（带 `【用户快速纠正】` 前缀）
+5. 后续事件体现纠正效果（实测：steer 后模型把第二个计算从 9*9 改为 3*4，并按指令直接收尾）
+
+### 10.4 快速插入机制（steer/abort）设计
+
+参照 pi 的 steer 命令，实现为 Agent 层的线程安全槽位：
+
+- `Steer(msg)`：外部随时调用（HTTP/WS/JSON-RPC/同进程），**最新覆盖**（多条纠正只保留最新，用户最新意图优先）
+- 循环在**下一次 LLM 调用前** drain 槽位，注入为 `Message{Role: RoleUser, Content: "【用户快速纠正】"+msg}`，优先级高于压缩
+- `Abort()`：原子标志，循环在下一个检查点停止，返回 `ErrAborted`
+- **缓存影响 🟡**：steer 注入发生在消息序列**末尾**（插入点之后缓存失效，但 system 前缀 + 早期历史仍可命中）——用户主动纠正，接受此 trade-off；abort 不影响缓存
+
+### 10.5 认证与动态开关
+
+- Bearer token（`--token`）：所有端点统一校验，无 token 返回 401
+- `GET /admin/status`：查询三服务开关状态
+- `POST /admin/switch` `{"service":"http|jsonrpc|ws","enabled":true|false}`：动态开关，即时生效，重启后回到启动配置
+
+## 11. 参考
+
+- [Pi Agent](https://github.com/mariozechner/pi) —— 极简 + 自举的灵感，compaction/loop/RPC(steer) 设计参考
 - [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust) —— Rust 移植，extensions_js.rs 的插件系统参考
 - [goja](https://github.com/dop251/goja) —— 纯 Go JS 引擎
 - [esbuild Go API](https://pkg.go.dev/github.com/evanw/esbuild/pkg/api) —— 内嵌 TS 编译器
 - [Agent Skills (Anthropic)](https://www.anthropic.com/engineering/agent-skills) —— SKILL.md 标准
 - [Model Context Protocol](https://modelcontextprotocol.io) —— 工具协议标准
+- [Don't Break the Cache (arXiv 2601.06007)](https://arxiv.org/abs/2601.06007) —— LLM 缓存策略研究
+- [ProjectDiscovery Cache Hacks](https://projectdiscovery.io/blog) —— 动态工作记忆缓存陷阱案例
 - [tsgo (TypeScript Go 重写)](https://github.com/microsoft/typescript-go) —— 未来嵌入式类型检查

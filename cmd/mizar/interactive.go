@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"mizar/internal/agent"
+	"mizar/internal/session"
 )
 
 func jsonUnmarshal(s string, v any) error {
@@ -15,7 +16,7 @@ func jsonUnmarshal(s string, v any) error {
 }
 
 // interactive 运行交互式对话。
-func interactive(a *agent.Agent) {
+func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("输入任务，空行退出。Ctrl-D 也可退出。")
 	for {
@@ -34,5 +35,9 @@ func interactive(a *agent.Agent) {
 			continue
 		}
 		fmt.Println(reply)
+		if sessionID != "" {
+			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: line})
+			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+		}
 	}
 }

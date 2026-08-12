@@ -12,6 +12,9 @@ import (
 	"mizar/internal/engine"
 	"mizar/internal/llm"
 	"mizar/internal/plugins"
+	"mizar/internal/server"
+	"mizar/internal/session"
+	"mizar/internal/skills"
 )
 
 var version = "v0.1.0"
@@ -22,8 +25,21 @@ func main() {
 		apiKey  = flag.String("api-key", "", "API Key (可选)")
 		model   = flag.String("model", "deepseek-v4-flash", "模型名")
 		extDir  = flag.String("ext", "extensions", "插件目录")
+		skillDir = flag.String("skills", "skills", "技能目录")
+		sessDir = flag.String("sessions", "sessions", "会话目录")
+		sessionID = flag.String("session", "", "会话 ID (续接对话)")
+		history = flag.Int("history", 50, "会话恢复的最大历史消息数")
+		ctxWindow = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
+		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
 		task    = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer = flag.Bool("version", false, "显示版本")
+		// Server 模式（持久运行 daemon）
+		serve      = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
+		addr       = flag.String("addr", ":3003", "Server 监听地址")
+		token      = flag.String("token", "", "Server Bearer token (空=不认证)")
+		httpOn     = flag.Bool("http", true, "Server: 启用 OpenAI 兼容 HTTP")
+		rpcOn      = flag.Bool("rpc", true, "Server: 启用 JSON-RPC")
+		wsOn       = flag.Bool("ws", true, "Server: 启用 WebSocket")
 	)
 	flag.Parse()
 
@@ -83,8 +99,57 @@ func main() {
 		fmt.Printf("  - %s\n", t.Name)
 	}
 
+	// 技能加载
+	skAbs, _ := filepath.Abs(*skillDir)
+	skm := skills.NewManager(skAbs)
+	skLoaded, skFailed := skm.LoadAll()
+	for _, f := range skLoaded {
+		log.Printf("技能加载: %s", f)
+	}
+	for f, e := range skFailed {
+		log.Printf("技能失败: %s: %v", f, e)
+	}
+	skPrompt := skm.RenderAll()
+	if skPrompt != "" {
+		log.Printf("技能注入 %d 个", len(skLoaded))
+	}
+
+	// 会话存储
+	st := session.New(*sessDir)
+
 	a := agent.New(client, pm)
-	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。`
+	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt
+	a.VerboseLog = func(msg string) { log.Print(msg) }
+	if !*noCompact {
+		client2 := client // SummarizeMessages 用同一客户端
+		a.Compactor = agent.DefaultCompactor(func(msgs []agent.Message) (string, error) {
+			return client2.SummarizeMessages(msgs, 1500)
+		})
+		a.Compactor.ContextWindow = *ctxWindow
+		// 小窗口兜底（参照 auto_offload 教训）：reserve/keep 不能超过窗口的合理比例，
+		// 否则压缩恒触发或永不触发。
+		if a.Compactor.ReserveTokens > *ctxWindow/5 {
+			a.Compactor.ReserveTokens = *ctxWindow / 5
+		}
+		if a.Compactor.KeepRecentTokens > *ctxWindow/3 {
+			a.Compactor.KeepRecentTokens = *ctxWindow / 3
+		}
+		if a.Compactor.KeepRecentTokens < 500 {
+			a.Compactor.KeepRecentTokens = 500
+		}
+		log.Printf("会话压缩开启 (window=%d, reserve=%d, keep=%d)", a.Compactor.ContextWindow, a.Compactor.ReserveTokens, a.Compactor.KeepRecentTokens)
+	}
+
+	if *sessionID != "" {
+		msgs, err := st.Load(*sessionID)
+		if err == nil && len(msgs) > 0 {
+			if len(msgs) > *history {
+				msgs = msgs[len(msgs)-*history:]
+			}
+			a.Initial = msgs
+			log.Printf("恢复会话 %s: %d 条历史", *sessionID, len(msgs))
+		}
+	}
 
 	if *task != "" {
 		reply, err := a.Run(*task)
@@ -93,9 +158,30 @@ func main() {
 		}
 		fmt.Println("\n=== 最终回答 ===")
 		fmt.Println(reply)
+		if *sessionID != "" {
+			st.Append(*sessionID, agent.Message{Role: agent.RoleUser, Content: *task})
+			st.Append(*sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+			log.Printf("会话 %s 已保存", *sessionID)
+		}
+		return
+	}
+
+	// Server 模式（持久运行 daemon）
+	if *serve {
+		cfg := server.NewConfig(*addr, *token)
+		cfg.SetAll(*httpOn, *rpcOn, *wsOn)
+		srv := server.New(cfg, a, st)
+		log.Printf("Server 模式启动: %s (http=%v rpc=%v ws=%v)", *addr, *httpOn, *rpcOn, *wsOn)
+		log.Printf("  OpenAI 兼容:   POST %s/v1/chat/completions", *addr)
+		log.Printf("  JSON-RPC 2.0:   POST %s/rpc (agent.run/steer/abort)", *addr)
+		log.Printf("  WebSocket:      %s/ws (实时事件 + 快速纠正)", *addr)
+		log.Printf("  admin:          GET %s/admin/status  POST %s/admin/switch", *addr, *addr)
+		if err := srv.Start(); err != nil {
+			log.Fatalf("Server 启动失败: %v", err)
+		}
 		return
 	}
 
 	// 交互模式
-	interactive(a)
+	interactive(a, st, *sessionID)
 }
