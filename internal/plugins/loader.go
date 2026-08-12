@@ -32,6 +32,7 @@ type Manager struct {
 	engines  map[string]*engine.Engine // 每个插件独立引擎（隔离）
 	tools    map[string]Tool
 	commands map[string]Command // 斜杠命令（command_* 导出）
+	rpcMethods map[string]RPCMethod // 自定义 JSON-RPC 方法（rpc_* 导出）
 	modTime  map[string]time.Time
 	maxExec  time.Duration // 单次插件执行超时
 }
@@ -44,6 +45,7 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 		engines:  make(map[string]*engine.Engine),
 		tools:    make(map[string]Tool),
 		commands: make(map[string]Command),
+		rpcMethods: make(map[string]RPCMethod),
 		modTime:  make(map[string]time.Time),
 		maxExec:  30 * time.Second,
 	}
@@ -54,6 +56,15 @@ func (m *Manager) SetMaxExec(d time.Duration) { m.maxExec = d }
 
 // LoadAll 扫描目录，加载/重载所有 .ts 插件。返回新增与失败的插件名。
 func (m *Manager) LoadAll() (loaded []string, failed map[string]error) {
+	return m.loadAll(false)
+}
+
+// ReloadAll 强制重载所有插件（忽略 modTime，用于 host 函数注入后同步）。
+func (m *Manager) ReloadAll() (loaded []string, failed map[string]error) {
+	return m.loadAll(true)
+}
+
+func (m *Manager) loadAll(force bool) (loaded []string, failed map[string]error) {
 	failed = make(map[string]error)
 	entries, err := os.ReadDir(m.dir)
 	if err != nil {
@@ -79,7 +90,7 @@ func (m *Manager) LoadAll() (loaded []string, failed map[string]error) {
 		m.mu.Lock()
 		old := m.modTime[f]
 		m.mu.Unlock()
-		if !info.ModTime().After(old) && old.IsZero() == false {
+		if !force && !info.ModTime().After(old) && old.IsZero() == false {
 			continue // 未变化
 		}
 		if err := m.loadPlugin(f); err != nil {
@@ -109,12 +120,13 @@ func (m *Manager) loadPlugin(filename string) error {
 		vm.Close()
 		return fmt.Errorf("exec %s: %w", filename, err)
 	}
-	// 收集导出的 tool_* 函数与 command_* 命令
+	// 收集导出的 tool_* 函数与 command_* 命令、rpc_* 方法
 	tools := m.collectTools(filename, vm)
 	cmds := m.collectCommands(filename, vm)
-	if len(tools) == 0 && len(cmds) == 0 {
+	rpcs := m.collectRPC(filename, vm)
+	if len(tools) == 0 && len(cmds) == 0 && len(rpcs) == 0 {
 		vm.Close()
-		return fmt.Errorf("plugin %s: no tool_* or command_* exports found", filename)
+		return fmt.Errorf("plugin %s: no tool_*, command_* or rpc_* exports found", filename)
 	}
 	// 原子替换：先收集再提交
 	m.mu.Lock()
@@ -122,11 +134,15 @@ func (m *Manager) loadPlugin(filename string) error {
 	// 移除旧引擎里属于该文件的工具与命令
 	m.removeToolsLocked(filename)
 	m.removeCommandsLocked(filename)
+	m.removeRPCLocked(filename)
 	for _, t := range tools {
 		m.tools[t.Name] = t
 	}
 	for _, c := range cmds {
 		m.commands[c.Name] = c
+	}
+	for _, r := range rpcs {
+		m.rpcMethods[r.Name] = r
 	}
 	if old, ok := m.engines[filename]; ok {
 		old.Close()

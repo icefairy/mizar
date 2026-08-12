@@ -94,3 +94,14 @@ func errJSON(w http.ResponseWriter, status int, msg string) {
 func (s *Server) logf(format string, args ...any) {
 	fmt.Printf("[mizar-server] "+format+"\n", args...)
 }
+
+// EmitToWS 向所有 WS 客户端广播自定义事件（插件 ws_emit 能力）。
+func (s *Server) EmitToWS(event, dataJSON string) {
+	var data any
+	if dataJSON != "" {
+		if err := json.Unmarshal([]byte(dataJSON), &data); err != nil {
+			data = dataJSON
+		}
+	}
+	s.hub.broadcast(map[string]any{"type": "event", "event": event, "data": data})
+}

@@ -89,6 +89,14 @@ func (s *Server) dispatch(req *rpcRequest) rpcResponse {
 	case "system.ping":
 		return s.rpcPing(req)
 	default:
+		// 插件注册的自定义 RPC 方法（rpc_<name> 导出）
+		if out, err := s.agent.Plugins.CallRPC(method, string(req.Params)); err == nil {
+			var result any
+			if err := json.Unmarshal([]byte(out), &result); err == nil {
+				return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
+			}
+			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"result": out}}
+		}
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcMethodNotFound, Message: "method not found: " + method}}
 	}
 }

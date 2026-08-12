@@ -210,6 +210,10 @@ func main() {
 		cfg := server.NewConfig(*addr, *token)
 		cfg.SetAll(*httpOn, *rpcOn, *wsOn)
 		srv := server.New(cfg, a, st)
+		// 插件 ws_emit 能力：注入 Server 广播
+		host.WSEmit = func(event, dataJSON string) { srv.EmitToWS(event, dataJSON) }
+		// 强制重载使 ws_emit 对已加载插件生效
+		pm.ReloadAll()
 		log.Printf("Server 模式启动: %s (http=%v rpc=%v ws=%v)", *addr, *httpOn, *rpcOn, *wsOn)
 		log.Printf("  OpenAI 兼容:   POST %s/v1/chat/completions", *addr)
 		log.Printf("  JSON-RPC 2.0:   POST %s/rpc (agent.run/steer/abort)", *addr)

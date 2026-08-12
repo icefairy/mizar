@@ -29,6 +29,8 @@ type HostFuncs struct {
 	LLMChat  func(messagesJSON string) (string, error)
 	Log        func(msg string)
 	Sleep      func(ms int)
+	// WSEmit 向所有 WS 客户端广播自定义事件（event + JSON 数据）。
+	WSEmit func(event, dataJSON string)
 }
 
 // cjsShim 让 esbuild 的 CommonJS 输出能在 goja 中运行。
@@ -88,6 +90,9 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.Sleep != nil {
 		reg("sleep", h.Sleep)
+	}
+	if h.WSEmit != nil {
+		reg("ws_emit", h.WSEmit)
 	}
 	return nil
 }

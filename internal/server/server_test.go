@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +50,121 @@ func testPluginManager(t *testing.T) *plugins.Manager {
 	t.Helper()
 	// 空宿主函数集（server 测试不需要插件能力，只测协议层）
 	return plugins.NewManager(t.TempDir(), &engine.HostFuncs{})
+}
+
+// TestPluginRPCOverWS 插件注册的 rpc_<name> 方法应经 WS 可达。
+func TestPluginRPCOverWS(t *testing.T) {
+	t.Helper()
+	// 带 rpc_* 导出的插件管理器
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "myext.ts"), []byte(`
+export function rpc_echo(params) {
+  return "echo:" + (params || "");
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pm := plugins.NewManager(dir, &engine.HostFuncs{})
+	if _, failed := pm.LoadAll(); len(failed) > 0 {
+		t.Fatalf("load failed: %v", failed)
+	}
+	llm := &mockLLM{}
+	a := agent.New(llm, pm)
+	cfg := NewConfig("127.0.0.1:0", "test-token")
+	cfg.SetAll(true, true, true)
+	srv := New(cfg, a, session.New(t.TempDir()))
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	// WS 连接后调用自定义方法 rpc.echo
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	hdr := http.Header{"Authorization": []string{"Bearer test-token"}}
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": "p1", "method": "echo", "params": map[string]any{"x": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]any
+	ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if err := ws.ReadJSON(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["error"] != nil {
+		t.Fatalf("rpc error: %v", resp["error"])
+	}
+	// 非 JSON 字符串返回走 {"result": <string>} 兜底
+	inner, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result type=%T val=%v", resp["result"], resp["result"])
+	}
+	if got := inner["result"]; got != "echo:{\"x\":1}" {
+		t.Fatalf("result=%v", got)
+	}
+}
+
+// TestPluginWSEmit 插件 ws_emit 应广播自定义事件给所有 WS 客户端。
+func TestPluginWSEmit(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "emit.ts"), []byte(`
+export function rpc_boom(params) {
+  ws_emit("my_event", JSON.stringify({level: "warn", msg: "hello"}));
+  return "sent";
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	host := &engine.HostFuncs{}
+	pm := plugins.NewManager(dir, host)
+	if _, failed := pm.LoadAll(); len(failed) > 0 {
+		t.Fatalf("load failed: %v", failed)
+	}
+	llm := &mockLLM{}
+	a := agent.New(llm, pm)
+	cfg := NewConfig("127.0.0.1:0", "test-token")
+	cfg.SetAll(true, true, true)
+	srv := New(cfg, a, session.New(t.TempDir()))
+	// 注入 ws_emit → Server 广播，并强制重载使插件引擎拿到该函数
+	host.WSEmit = func(event, dataJSON string) { srv.EmitToWS(event, dataJSON) }
+	pm.ReloadAll()
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	hdr := http.Header{"Authorization": []string{"Bearer test-token"}}
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": "b1", "method": "boom", "params": map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	// 第一条是 ack/result，随后应收到 my_event 广播
+	seen := map[string]bool{}
+	ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for i := 0; i < 3; i++ {
+		var resp map[string]any
+		if err := ws.ReadJSON(&resp); err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if resp["type"] == "event" {
+			if resp["event"] != "my_event" {
+				t.Fatalf("unexpected event: %v", resp)
+			}
+			seen["event"] = true
+		}
+		if resp["id"] == "b1" {
+			seen["result"] = true
+			break
+		}
+	}
+	if !seen["event"] {
+		t.Fatal("did not receive my_event broadcast")
+	}
 }
 
 // TestOpenAICompat 验证 /v1/models + /v1/chat/completions。
