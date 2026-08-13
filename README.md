@@ -2,22 +2,24 @@
 
 > 北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可
 
-**开阳 (Mizar)** 是一个极简、零依赖、单文件、可自举的 AI Agent 框架。
+**开阳 (Mizar)** is a minimal, zero-dependency, single-file, self-bootstrapping AI Agent framework.
 
-- **核心**：Go 静态二进制（~20-30MB，无运行时依赖）
-- **插件**：TypeScript 文件（esbuild 内嵌编译 → goja 执行，免编译热加载）
-- **技能**：SKILL.md 纯文本（兼容 Anthropic/Hermes 第三方技能生态）
-- **工具**：MCP 协议（连接任何语言实现的 MCP 服务器）
-- **自举**：Agent 自己写插件、自己扩展自己
+- **Core**: A single static Go binary (~20-30MB, no runtime deps, no npm, no Python, no Docker)
+- **Plugins**: TypeScript / JavaScript files — embedded esbuild compiles TS, JS runs directly on goja (no compile step), hot-reload
+- **Skills**: Plain-text SKILL.md files (compatible with Anthropic/Hermes third-party skill ecosystem)
+- **Tools**: MCP protocol — connect any MCP server implemented in any language
+- **Self-bootstrapping**: The agent writes its own plugins and extends itself
 
-**生态位**：内网/离线/私有化部署环境下的 AI Agent——一个文件拷进去就能跑，零依赖、零 npm、零外网。
+**Where it shines**: air-gapped / offline / private deployment — copy one file onto the box and it runs. Zero dependencies, zero npm, zero internet.
 
 ```
-安装 = 下载一个文件
-插件 = 一个 .ts 文件
-技能 = 一个 .md 文件
-工具 = 一个 MCP 服务器
+Install = download one file
+Plugin  = one .ts/.js file
+Skill   = one .md file
+Tool    = one MCP server
 ```
+
+**中文简介**：**开阳 (Mizar)** 是一个极简、零依赖、单文件、可自举的 AI Agent 框架。单文件二进制（~20-30MB，无运行时依赖）；插件用 TS/JS 文件（TS 走 esbuild 内嵌编译，JS 免编译直跑 goja，热重载）；技能用 SKILL.md 纯文本（兼容第三方技能生态）；工具走 MCP 协议。适合内网/离线/私有化部署——一个文件拷进去就能跑，零依赖、零 npm、零外网。
 
 ---
 
