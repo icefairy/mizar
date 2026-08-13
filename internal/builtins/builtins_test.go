@@ -19,7 +19,7 @@ func tmpFile(t *testing.T, content string) string {
 
 func call(t *testing.T, tool string, args string) (string, error) {
 	t.Helper()
-	for _, bt := range All() {
+	for _, bt := range All("") {
 		if bt.Name == tool {
 			return bt.Run(args)
 		}

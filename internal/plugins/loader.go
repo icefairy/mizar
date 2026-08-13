@@ -35,6 +35,8 @@ type Manager struct {
 	rpcMethods map[string]RPCMethod // 自定义 JSON-RPC 方法（rpc_* 导出）
 	modTime  map[string]time.Time
 	maxExec  time.Duration // 单次插件执行超时
+	onTool   func(name string) // 工具调用回调（技能统计用）
+	disabled map[string]bool // 禁用的工具（不注册、不可调用，不影响提示词）
 }
 
 // NewManager 创建插件管理器。
@@ -46,8 +48,9 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 		tools:    make(map[string]Tool),
 		commands: make(map[string]Command),
 		rpcMethods: make(map[string]RPCMethod),
-		modTime:  make(map[string]time.Time),
-		maxExec:  30 * time.Second,
+		modTime:    make(map[string]time.Time),
+		disabled:   make(map[string]bool),
+		maxExec:    30 * time.Second,
 	}
 }
 
@@ -195,24 +198,48 @@ func (m *Manager) removeToolsLocked(filename string) {
 	}
 }
 
-// Tools 返回当前所有工具（按名排序）。
+// Tools 返回当前所有工具（按名排序，排除禁用的）。
 func (m *Manager) Tools() []Tool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]Tool, 0, len(m.tools))
 	for _, t := range m.tools {
+		if m.disabled[t.Name] {
+			continue
+		}
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-// Get 按名取工具。
+// SetDisabledTools 设置禁用的工具集合。
+// 禁用只影响工具注册表（LLM 看不到、调不到），不影响 System prompt ——
+// 提示词保持字节稳定，前缀缓存不破坏。
+func (m *Manager) SetDisabledTools(names []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, n := range names {
+		m.disabled[n] = true
+	}
+}
+
+// Get 按名取工具（禁用的返回 false）。
 func (m *Manager) Get(name string) (Tool, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	t, ok := m.tools[name]
+	if ok && m.disabled[name] {
+		return t, false
+	}
 	return t, ok
+}
+
+// SetOnToolCall 注册工具调用回调（每次工具被调用都会触发，用于技能统计）。
+func (m *Manager) SetOnToolCall(fn func(name string)) {
+	m.mu.Lock()
+	m.onTool = fn
+	m.mu.Unlock()
 }
 
 // Call 执行工具（带超时）。
@@ -220,6 +247,13 @@ func (m *Manager) Call(name, args string) (string, error) {
 	t, ok := m.Get(name)
 	if !ok {
 		return "", fmt.Errorf("tool %q not found", name)
+	}
+	// 统计回调（技能每次使用 +1）
+	m.mu.RLock()
+	cb := m.onTool
+	m.mu.RUnlock()
+	if cb != nil {
+		cb(name)
 	}
 	type res struct {
 		out string

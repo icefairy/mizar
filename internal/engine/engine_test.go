@@ -9,6 +9,9 @@ import (
 func mockHost() *HostFuncs {
 	return &HostFuncs{
 		HTTPGet: func(url string) (string, error) { return "HTTP:" + url, nil },
+		HTTPRequest: func(method, url, body, headersJSON string) (string, error) {
+			return "REQ:" + method + ":" + url + ":" + body + ":" + headersJSON, nil
+		},
 		JSONDecode: func(s string) (map[string]any, error) {
 			return map[string]any{"parsed": s}, nil
 		},
@@ -86,6 +89,27 @@ func TestHostFuncsVisible(t *testing.T) {
 		t.Fatalf("call: %v", err)
 	}
 	want := "HTTP:/probe|file:/x|mock-llm-reply"
+	if res != want {
+		t.Fatalf("want %q got %q", want, res)
+	}
+}
+
+// TestHTTPRequestHost 验证统一 http_request(method,url,body) 可用。
+func TestHTTPRequestHost(t *testing.T) {
+	e, err := New(mockHost())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer e.Close()
+	js, _ := CompileTS("h.ts", `export function tool_req(): string { return http_request("PUT", "http://x/api", "{\"a\":1}", "{\"X-Test\":\"v\"}"); }`)
+	if err := e.RunScript("h.ts", js); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	res, err := e.Call("tool_req")
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	want := `REQ:PUT:http://x/api:{"a":1}:{"X-Test":"v"}`
 	if res != want {
 		t.Fatalf("want %q got %q", want, res)
 	}

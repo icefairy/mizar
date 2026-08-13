@@ -20,6 +20,9 @@ type Engine struct {
 type HostFuncs struct {
 	HTTPGet    func(url string) (string, error)
 	HTTPPost   func(url, body string) (string, error)
+	// HTTPRequest 统一 HTTP 请求：method 任意（GET/POST/PUT/DELETE/PATCH...），
+	// headersJSON 形如 {"Authorization":"Bearer xxx","X-Custom":"v"}（可空）。
+	HTTPRequest func(method, url, body, headersJSON string) (string, error)
 	JSONDecode func(s string) (map[string]any, error)
 	JSONEncode func(v any) (string, error)
 	FSRead     func(path string) (string, error)
@@ -65,6 +68,9 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.HTTPPost != nil {
 		reg("http_post", h.HTTPPost)
+	}
+	if h.HTTPRequest != nil {
+		reg("http_request", h.HTTPRequest)
 	}
 	if h.JSONDecode != nil {
 		reg("json_decode", h.JSONDecode)

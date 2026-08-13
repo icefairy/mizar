@@ -4,10 +4,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"mizar/internal/agent"
 	"mizar/internal/builtins"
@@ -104,6 +107,40 @@ func main() {
 		},
 		Log: func(msg string) { log.Print(msg) },
 	}
+	// 插件 HTTP 能力：统一 http_request(method,url,body,headers) + 薄封装 http_get/http_post
+	httpDo := func(method, url, body, headersJSON string) (string, error) {
+		req, err := http.NewRequest(method, url, strings.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if headersJSON != "" {
+			var hdr map[string]string
+			if err := jsonUnmarshal(headersJSON, &hdr); err != nil {
+				return "", fmt.Errorf("http headers: %w", err)
+			}
+			for k, v := range hdr {
+				req.Header.Set(k, v)
+			}
+		}
+		hc := &http.Client{Timeout: 30 * time.Second}
+		resp, err := hc.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+		if resp.StatusCode >= 400 {
+			return string(b), fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		}
+		return string(b), nil
+	}
+	host.HTTPRequest = httpDo
+	host.HTTPGet = func(url string) (string, error) { return httpDo("GET", url, "", "") }
+	host.HTTPPost = func(url, body string) (string, error) { return httpDo("POST", url, body, "") }
 	// 提供真实 LLM 给插件 llm_chat
 	client := llm.NewOpenAI(*baseURL, *apiKey, *model)
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.Thinking {
@@ -128,9 +165,24 @@ func main() {
 		}
 	}
 
+	skAbs, _ := filepath.Abs(*skillDir)
+	// 技能目录默认 ~/.mizar/skills（与全局 AGENTS.md/config.json 同根，避免相对路径漂移）
+	if *skillDir == "skills" {
+		skAbs = filepath.Join(config.ConfigDir(), "skills")
+	}
+	if _, err := os.Stat(skAbs); os.IsNotExist(err) {
+		if err := os.MkdirAll(skAbs, 0o755); err != nil {
+			log.Fatal(err)
+		}
+	}
+	// 技能使用统计（默认开启，全局配置 skill_stats_enabled=false 关闭）
+	stats := skills.LoadStats(filepath.Join(config.ConfigDir(), "skill_stats.json"))
+
 	pm := plugins.NewManager(extAbs, host)
-	// 注册 pi 式内置工具（bash/grep/find/read/write/edit/ls）
-	for _, t := range builtins.All() {
+	// 禁用工具（来自技能统计周报，用户确认后记录）——只影响工具注册表，不动 System prompt
+	pm.SetDisabledTools(stats.DisabledNames())
+	// 注册 pi 式内置工具（bash/grep/find/read/write/edit/ls/skill_manage）
+	for _, t := range builtins.All(skAbs) {
 		pm.RegisterBuiltin(t)
 	}
 	loaded, failed := pm.LoadAll()
@@ -146,10 +198,25 @@ func main() {
 		fmt.Printf("  - %s\n", t.Name)
 	}
 
-	// 技能加载
-	skAbs, _ := filepath.Abs(*skillDir)
+	// 技能使用统计回调（每次工具调用 +1；周报每周提示，距上次 ≥7 天触发）
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillStatsOn() {
+		pm.SetOnToolCall(func(name string) { stats.Incr(name) })
+		// 每周提示使用情况（距上次 ≥7 天触发）
+		if stats.DueReport(time.Now()) {
+			fmt.Printf("\n%s\n", stats.Report(cfg.SkillStatsTop()))
+			stats.MarkReported(time.Now())
+		}
+	} else if err != nil {
+		log.Printf("统计配置读取失败（默认开启）: %v", err)
+	}
+
+	// 技能加载（全量渲染，System prompt 字节稳定——禁用只影响工具注册表）
 	skm := skills.NewManager(skAbs)
 	skLoaded, skFailed := skm.LoadAll()
+	// 技能注册进统计（0 次使用也计入周报最低活跃）
+	for _, s := range skm.All() {
+		stats.Ensure(s.Name)
+	}
 	for _, f := range skLoaded {
 		log.Printf("技能加载: %s", f)
 	}

@@ -23,6 +23,33 @@ type Config struct {
 	Model         string `json:"model"`          // 模型名
 	Thinking      bool   `json:"thinking"`       // 思考模式
 	ContextWindow int    `json:"context_window"` // 上下文窗口（token）
+	SkillEvolution *bool `json:"skill_evolution"` // 技能自动沉淀（nil=默认开启）
+	SkillStatsEnabled *bool `json:"skill_stats_enabled"` // 技能使用统计+周报（nil=默认开启）
+	SkillStatsTopN int `json:"skill_stats_top_n"` // 周报建议禁用数（0=默认10）
+}
+
+// SkillStatsOn 统计周报默认开启（nil 或 true 均开启，显式 false 关闭）。
+func (c *Config) SkillStatsOn() bool {
+	if c.SkillStatsEnabled == nil {
+		return true
+	}
+	return *c.SkillStatsEnabled
+}
+
+// SkillStatsTop 返回建议禁用技能数（默认 10）。
+func (c *Config) SkillStatsTop() int {
+	if c.SkillStatsTopN <= 0 {
+		return 10
+	}
+	return c.SkillStatsTopN
+}
+
+// SkillEvolutionEnabled 技能自动沉淀默认开启（nil 或 true 均开启，显式 false 关闭）。
+func (c *Config) SkillEvolutionEnabled() bool {
+	if c.SkillEvolution == nil {
+		return true
+	}
+	return *c.SkillEvolution
 }
 
 // ConfigDir 返回配置目录（~/.mizar/），配置文件与全局 AGENTS.md 都放这里。
