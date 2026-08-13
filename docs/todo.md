@@ -44,6 +44,17 @@
 - **接入点**：`cmd/mizar/main.go` → `--lsp <binary>` 启动 + `pm.RegisterBuiltin()` 注册工具；未配置时工具优雅降级提示
 - **参考**：openclaude LSPTool
 
+### 5. [x] LSP 服务器实现（mizar 自身作为 LSP server）
+
+- **文件**：`internal/lsp/server.go`
+- **说明**：
+  - 通过 stdio 接收 JSON-RPC 请求，`jsonrpc2.HandlerServer` 处理
+  - 生命周期：`initialize` / `initialized` / `shutdown` / `exit`
+  - 查询方法：`textDocument/diagnostic` / `textDocument/completion`
+  - 插件扩展：`RegisterProvider` 接口 + `GlobalServer` 全局实例
+  - 便捷函数：`ServeStdio(ctx, cfg)` 一行启动
+- **参考**：openclaude LSP server
+
 ### 7. [x] 顺序执行包装器 sequential
 
 - **文件**：`internal/utils/sequential.go`
@@ -76,28 +87,38 @@
 
 ### 12. [x] 结构化操作跟踪（QueryLifecycleOperationTracker）
 
-- **文件**：`internal/utils/lifecycle.go`
-- **说明**：`QueryLifecycle` 查询级生命周期跟踪：`GenerateQueryID()` / `BeginStep()` / `BeginOperation`/`EndOperation` / `Snapshot()` / `FormatLog()` / `ContextWithQuery`（context 注入）
+- **文件**：`internal/lifecycle/lifecycle.go`
+- **说明**：
+  - `QueryLifecycle` 查询级生命周期跟踪：`GenerateQueryID()` / `BeginStep()` / `BeginOperation`/`EndOperation` / `Snapshot()` / `FormatLog()` / `ContextWithQuery`（context 注入）
+  - ✅ 已接入 `internal/agent/loop.go`：所有 `HookContext.RunID` 使用 queryID，`Step`/`Operation` 结构化跟踪
+  - `Agent.Run()` 中：LLM 调用 `BeginOperation("llm")`/`EndOperation("llm")`；工具调用 `BeginOperation("tool:")`；压缩 `BeginOperation("compact")`；终止路径 `q.Complete(err)`
 - **参考**：openclaude `QueryLifecycleOperationTracker`
-- **工作量估算**：~120 行
-- **状态**：✅ 基础工具完成；❌ 尚未接入 `internal/agent/loop.go`（接线为后续项）
 
 ### 13. [x] RepoMap（文件依赖关系图）
 
 - **文件**：`internal/repo/repo_map.go`
 - **说明**：`Build(root)` 遍历生成文件级仓库地图（目录/文件/语言/大小）；`Render(maxFiles)` 生成可读文本，按目录分组 + 超限截断
 - **参考**：openclaude `RepoMapTool`
-- **状态**：✅ 完成
+
+### 14. [x] 弱模型宽容循环调优
+
+- **文件**：`internal/agent/weakmodel.go`
+- **说明**：`WeakModelTuner` 弱模型宽容策略
+  - `ParseFailed` — 连续解析失败检测，逐级升级提示（简单→严格→放弃）
+  - `RecordToolCall` — 死循环检测（同工具同参数连续 N 次→强制中断）
+  - `LLMFailed`/`LLMSucceeded` — LLM 临时错误自动重试 + 指数退避
+  - `RemainingSteps` — 步数上限限制，防止无限循环
+- **参考**：openclaude 弱模型调优模式
 
 ---
 
 ## 🔧 进行中
 
-### 6. [ ] LSP 插件扩展（插件通过 JS 注册 Provider）
+### 6. [ ] LSP 插件扩展（JS 插件层注册 Provider）
 
-- **目标**：`internal/lsp/providers/provider.go` — 插件通过 `lsp.RegisterDiagnosticProvider()` 注册自定义能力（JS 插件接口）
+- **目标**：`internal/lsp/providers/provider.go` — 插件通过 JS 注册自定义 diagnostic/completion Provider
 - **现状**：`internal/lsp/server.go` 已有 `RegisterProvider` Go 接口 + `GlobalServer` 全局实例
-- **剩余**：JS 插件层暴露 `diagnosticProviders`/`completionProviders` 注册点
+- **剩余**：JS 插件层暴露 `diagnosticProviders`/`completionProviders` 注册点，让插件可用 JS 定义能力
 - **工作量估算**：~50 行
 - **优先级**：P2
 
@@ -106,6 +127,6 @@
 ## 📊 统计
 
 - **总项**：14
-- **已完成**：11（1-4、7-13）
-- **进行中**：3（5、6、14）
-- **完成度**：79%
+- **已完成**：13（1-5、7-14）
+- **进行中**：1（6）
+- **完成度**：93%
