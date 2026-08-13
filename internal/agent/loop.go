@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
+	"mizar/internal/lifecycle"
 	"mizar/internal/plugins"
 )
 
@@ -135,8 +135,9 @@ func (a *Agent) Run(task string) (string, error) {
 		a.Hooks = NewHooks()
 	}
 	a.resetAbort()
+	q := lifecycle.NewQuery("cli")
 	runCtx := &HookContext{
-		RunID:     fmt.Sprintf("run-%d", time.Now().UnixNano()),
+		RunID:     string(q.QueryID()),
 		Task:      task,
 		AgentName: "mizar",
 	}
@@ -148,18 +149,22 @@ func (a *Agent) Run(task string) (string, error) {
 	msgs = append(msgs, Message{Role: RoleUser, Content: task})
 
 	step := 0
+	var qc lifecycle.QueryContext
 	for step < a.MaxSteps {
-		stepCtx := &HookContext{RunID: runCtx.RunID, Step: step, Task: task, Messages: msgs}
+		q.BeginStep()
+		qc = q.Context()
+		stepCtx := &HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}
 		// StepStart 挂载点（🟡 中等：可读，不建议改 Messages）
 		a.Hooks.fireStepStart(stepCtx, a.logf)
 
 		// 快速插入检查
 		if sm := a.drainSteer(); sm != nil {
-			a.log("step %d: 快速插入纠正: %s", step, truncate(sm.content, 120))
+			a.log("%s", q.FormatLog("steer", "step=", fmt.Sprintf("%d", qc.Step), " content=", truncate(sm.content, 80)))
 			msgs = append(msgs, Message{Role: RoleUser, Content: "【用户快速纠正】" + sm.content})
 		}
 		if a.Aborted() {
-			a.Hooks.fireError(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Err: errors.New("aborted by user")}, a.logf)
+			q.Complete(errors.New("aborted by user"))
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
 			return "", ErrAborted
 		}
 
@@ -167,63 +172,71 @@ func (a *Agent) Run(task string) (string, error) {
 		if a.Compactor != nil {
 			est := EstimateMessages(msgs)
 			if a.Compactor.ShouldCompact(est) {
-				a.log("step %d: 触发压缩 (est=%d tokens > window=%d-reserve=%d)", step, est, a.Compactor.ContextWindow, a.Compactor.ReserveTokens)
-				a.Hooks.fireCompactionBefore(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, EstTokens: est, Messages: msgs}, a.logf)
+			a.log("%s", q.FormatLog("compact", "est=", fmt.Sprintf("%d", est), " step=", fmt.Sprintf("%d", qc.Step)))
+				a.Hooks.fireCompactionBefore(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, EstTokens: est, Messages: msgs}, a.logf)
 				var err error
 				msgs, err = a.Compactor.Compact(msgs)
 				if err != nil {
-					a.log("step %d: 压缩失败（继续未压缩执行）: %v", step, err)
+					a.log("%s", q.FormatLog("compact_fail", "err=", err.Error()))
 				} else {
-					a.log("step %d: 压缩完成 -> %d 条消息 (est=%d tokens)", step, len(msgs), EstimateMessages(msgs))
+					a.log("%s", q.FormatLog("compact", "result=", fmt.Sprintf("%d msgs, %d tokens", len(msgs), EstimateMessages(msgs))))
 				}
-				a.Hooks.fireCompactionAfter(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Compacted: true, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
+				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Compacted: true, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
 			}
 		}
 
 		// LLMRequest 挂载点（🔴 严重）
-		llmCtx := &HookContext{RunID: runCtx.RunID, Step: step, Task: task, Messages: msgs}
+		q.BeginOperation("llm")
+		llmCtx := &HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}
 		a.Hooks.fireLLMRequest(llmCtx, a.logf)
 		msgs = llmCtx.Messages
 
 		reply, err := a.LLM.Chat(msgs)
+		q.EndOperation("llm")
 		if err != nil {
-			a.Hooks.fireError(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Err: err}, a.logf)
+			q.Complete(err)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: err}, a.logf)
 			return "", fmt.Errorf("llm chat: %w", err)
 		}
-		a.Hooks.fireLLMResponse(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Reply: reply}, a.logf)
-		a.log("step %d: model: %s", step, truncate(reply, 200))
+		a.Hooks.fireLLMResponse(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: reply}, a.logf)
+		a.log("%s", q.FormatLog("model_reply", "step=", fmt.Sprintf("%d", qc.Step), " len=", fmt.Sprintf("%d", len(reply))))
 
 		req, err := a.callParser(reply)
 		if err != nil {
-			a.Hooks.fireError(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Err: fmt.Errorf("parse: %w", err)}, a.logf)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: fmt.Errorf("parse: %w", err)}, a.logf)
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: "解析你的回复失败：" + err.Error() + "。请严格按格式输出 JSON。"})
-			a.Hooks.fireStepEnd(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			step++
 			continue
 		}
 
 		if req.Action == "reply" {
-			a.Hooks.fireStepEnd(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
-			a.Hooks.fireRunEnd(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Reply: req.Text}, a.logf)
+			q.Complete(nil)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
+			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text}, a.logf)
 			return req.Text, nil
 		}
 
-		a.Hooks.fireToolCall(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Tool: req.Tool, Args: req.Args}, a.logf)
+		// 工具调用
+		q.BeginOperation("tool:" + req.Tool)
+		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args}, a.logf)
 		out, err := a.Plugins.Call(req.Tool, req.Args)
+		q.EndOperation("tool:" + req.Tool)
 		tr := ToolResult{ToolName: req.Tool, Args: req.Args, Output: out}
 		if err != nil {
 			tr.Error = err.Error()
-			a.Hooks.fireError(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Tool: req.Tool, Args: req.Args, Err: err}, a.logf)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Err: err}, a.logf)
 		}
 		b, _ := json.Marshal(tr)
 		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
 		msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult})
-		a.Hooks.fireToolResult(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Tool: req.Tool, Args: req.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
-		a.Hooks.fireStepEnd(&HookContext{RunID: runCtx.RunID, Step: step, Task: task, Messages: msgs}, a.logf)
+		a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		step++
 	}
-	a.Hooks.fireError(&HookContext{RunID: runCtx.RunID, Task: task, Err: errors.New("max steps exceeded")}, a.logf)
+	q.Complete(errors.New("max steps exceeded"))
+	a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Task: task, Err: errors.New("max steps exceeded")}, a.logf)
 	return "", ErrMaxSteps
 }
 

@@ -2,7 +2,7 @@
 //
 // 参考 openclaude 的 QueryLifecycleOperationTracker，在 Agent 循环中注入
 // queryId/step/source 等结构化上下文，方便诊断和审计。
-package utils
+package lifecycle
 
 import (
 	"context"
