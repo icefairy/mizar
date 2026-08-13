@@ -220,6 +220,26 @@ func (s *Server) RegisterProvider(p any) {
 	}
 }
 
+// RemoveProvider 按名字移除提供者（Diagnostic 与 Completion 同名都移除）。
+func (s *Server) RemoveProvider(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	diags := s.diagnosticProviders[:0]
+	for _, p := range s.diagnosticProviders {
+		if p.Name() != name {
+			diags = append(diags, p)
+		}
+	}
+	s.diagnosticProviders = diags
+	comps := s.completionProviders[:0]
+	for _, p := range s.completionProviders {
+		if p.Name() != name {
+			comps = append(comps, p)
+		}
+	}
+	s.completionProviders = comps
+}
+
 // --- 全局服务器实例（供插件注册使用） ---
 
 var (
@@ -275,6 +295,40 @@ func RegisterCompletionProvider(p CompletionProvider) error {
 	}
 	globalServer.RegisterProvider(p)
 	return nil
+}
+
+// UnregisterDiagnosticProvider 按名字移除诊断提供者（插件热重载时用）。
+// 同名 provider 全部移除。
+func UnregisterDiagnosticProvider(name string) {
+	globalServerMu.Lock()
+	defer globalServerMu.Unlock()
+	// 清 pending
+	kept := pendingDiag[:0]
+	for _, p := range pendingDiag {
+		if p.Name() != name {
+			kept = append(kept, p)
+		}
+	}
+	pendingDiag = kept
+	if globalServer != nil {
+		globalServer.RemoveProvider(name)
+	}
+}
+
+// UnregisterCompletionProvider 按名字移除补全提供者（插件热重载时用）。
+func UnregisterCompletionProvider(name string) {
+	globalServerMu.Lock()
+	defer globalServerMu.Unlock()
+	kept := pendingComp[:0]
+	for _, p := range pendingComp {
+		if p.Name() != name {
+			kept = append(kept, p)
+		}
+	}
+	pendingComp = kept
+	if globalServer != nil {
+		globalServer.RemoveProvider(name)
+	}
 }
 
 // --- stdio 模式便捷函数 ---

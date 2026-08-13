@@ -177,6 +177,8 @@ func main() {
 	host.LSPRegisterCompletion = func(name string, fn func(uri string, line, col int) string) error {
 		return lsp.RegisterCompletionProvider(lsp.NewJSCompletionProvider(name, fn))
 	}
+	host.LSPUnregisterDiagnostic = lsp.UnregisterDiagnosticProvider
+	host.LSPUnregisterCompletion = lsp.UnregisterCompletionProvider
 
 	extAbs, err := filepath.Abs(*extDir)
 	if err != nil {

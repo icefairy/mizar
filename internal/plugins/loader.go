@@ -37,11 +37,19 @@ type Manager struct {
 	maxExec  time.Duration // 单次插件执行超时
 	onTool   func(name string) // 工具调用回调（技能统计用）
 	disabled map[string]bool // 禁用的工具（不注册、不可调用，不影响提示词）
+
+	// LSP 提供者注册跟踪（按文件名，热重载时清理用）
+	lspDiagNames map[string][]string // filename → registered diagnostic provider names
+	lspCompNames map[string][]string // filename → registered completion provider names
+	// 当前正在加载的插件（供 host func 包装使用）
+	loadFile string
+	// 当前加载的 LSP 注册计数（用于判定 LSP-only 插件）
+	lspRegCount int
 }
 
 // NewManager 创建插件管理器。
 func NewManager(dir string, host *engine.HostFuncs) *Manager {
-	return &Manager{
+	m := &Manager{
 		dir:      dir,
 		host:     host,
 		engines:  make(map[string]*engine.Engine),
@@ -51,7 +59,35 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 		modTime:    make(map[string]time.Time),
 		disabled:   make(map[string]bool),
 		maxExec:    30 * time.Second,
+		lspDiagNames: make(map[string][]string),
+		lspCompNames: make(map[string][]string),
 	}
+	// 包装 LSP 宿主函数，跟踪文件名
+	if host != nil {
+		origD := host.LSPRegisterDiagnostic
+		origC := host.LSPRegisterCompletion
+		host.LSPRegisterDiagnostic = func(name string, fn func(uri string) string) error {
+			m.mu.Lock()
+			m.lspDiagNames[m.loadFile] = append(m.lspDiagNames[m.loadFile], name)
+			m.lspRegCount++
+			m.mu.Unlock()
+			if origD != nil {
+				return origD(name, fn)
+			}
+			return nil
+		}
+		host.LSPRegisterCompletion = func(name string, fn func(uri string, line, col int) string) error {
+			m.mu.Lock()
+			m.lspCompNames[m.loadFile] = append(m.lspCompNames[m.loadFile], name)
+			m.lspRegCount++
+			m.mu.Unlock()
+			if origC != nil {
+				return origC(name, fn)
+			}
+			return nil
+		}
+	}
+	return m
 }
 
 // SetMaxExec 设置插件单次执行超时（默认 30s）。
@@ -106,7 +142,6 @@ func (m *Manager) loadAll(force bool) (loaded []string, failed map[string]error)
 }
 
 // 纯 JS 插件直接执行（跳过 esbuild 编译），TS 才需要转译。
-// 要求：JS 文件本身是 goja 可执行的 ES 语法（避免最新的 ESNext 语法）。
 func (m *Manager) loadPlugin(filename string) error {
 	path := filepath.Join(m.dir, filename)
 	src, err := os.ReadFile(path)
@@ -120,32 +155,48 @@ func (m *Manager) loadPlugin(filename string) error {
 			return err
 		}
 	} else {
-		// .js：免编译直喂 goja（少一道 esbuild 转译）
 		js = string(src)
 	}
 	vm, err := engine.New(m.host)
 	if err != nil {
 		return err
 	}
-	if err := vm.RunScript(filename, js); err != nil {
+
+	// 设置当前加载文件名，以便 LSP 宿主函数跟踪注册
+	m.mu.Lock()
+	m.loadFile = filename
+	m.lspRegCount = 0
+	m.mu.Unlock()
+
+	err = vm.RunScript(filename, js)
+
+	m.mu.Lock()
+	m.loadFile = ""
+	lspRegs := m.lspRegCount
+	m.mu.Unlock()
+
+	if err != nil {
 		vm.Close()
 		return fmt.Errorf("exec %s: %w", filename, err)
 	}
+
 	// 收集导出的 tool_* 函数与 command_* 命令、rpc_* 方法
 	tools := m.collectTools(filename, vm)
 	cmds := m.collectCommands(filename, vm)
 	rpcs := m.collectRPC(filename, vm)
-	if len(tools) == 0 && len(cmds) == 0 && len(rpcs) == 0 {
+
+	if len(tools) == 0 && len(cmds) == 0 && len(rpcs) == 0 && lspRegs == 0 {
 		vm.Close()
-		return fmt.Errorf("plugin %s: no tool_*, command_* or rpc_* exports found", filename)
+		return fmt.Errorf("plugin %s: no tool_*, command_*, rpc_* exports or LSP providers found", filename)
 	}
 	// 原子替换：先收集再提交
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// 移除旧引擎里属于该文件的工具与命令
+	// 移除旧引擎里属于该文件的工具、命令、RPC、LSP 提供者
 	m.removeToolsLocked(filename)
 	m.removeCommandsLocked(filename)
 	m.removeRPCLocked(filename)
+	m.removeLSPLocked(filename)
 	for _, t := range tools {
 		m.tools[t.Name] = t
 	}
@@ -204,6 +255,22 @@ func (m *Manager) removeToolsLocked(filename string) {
 			delete(m.tools, k)
 		}
 	}
+}
+
+// removeLSPLocked 移除某插件注册的所有 LSP 提供者。
+func (m *Manager) removeLSPLocked(filename string) {
+	for _, name := range m.lspDiagNames[filename] {
+		if m.host != nil && m.host.LSPUnregisterDiagnostic != nil {
+			m.host.LSPUnregisterDiagnostic(name)
+		}
+	}
+	for _, name := range m.lspCompNames[filename] {
+		if m.host != nil && m.host.LSPUnregisterCompletion != nil {
+			m.host.LSPUnregisterCompletion(name)
+		}
+	}
+	delete(m.lspDiagNames, filename)
+	delete(m.lspCompNames, filename)
 }
 
 // Tools 返回当前所有工具（按名排序，排除禁用的）。

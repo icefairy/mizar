@@ -35,7 +35,10 @@ type HostFuncs struct {
 	FSWrite    func(path, content string) error
 	FSList     func(dir string) ([]string, error)
 	ShellExec  func(cmd string) (string, error)
-	// LSPRegisterDiagnostic 注册 LSP 诊断提供者（JS 插件用）。
+	// LSPUnregisterDiagnostic 插件热重载时按名字移除诊断提供者
+	LSPUnregisterDiagnostic func(name string)
+	// LSPUnregisterCompletion 插件热重载时按名字移除补全提供者
+	LSPUnregisterCompletion func(name string)
 	// name: 提供者名称；fn: (uri string) => jsonString（诊断数组）
 	LSPRegisterDiagnostic func(name string, fn func(uri string) string) error
 	// LSPRegisterCompletion 注册 LSP 补全提供者（JS 插件用）。

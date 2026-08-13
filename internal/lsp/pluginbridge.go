@@ -115,12 +115,16 @@ func parseDiagnostics(raw string) ([]protocol.Diagnostic, error) {
 		case 4:
 			severity = protocol.DiagnosticSeverityHint
 		}
-		out = append(out, protocol.Diagnostic{
-			Range:    protocol.Range{Start: protocol.Position{Line: uint32(d.StartLine), Character: uint32(d.StartChar)}, End: protocol.Position{Line: uint32(d.EndLine), Character: uint32(d.EndChar)}},
-			Severity: severity,
-			Message:  protocol.String(d.Message),
-			Source:   protocol.NewOptional[string](d.Source),
-		})
+			source := protocol.Optional[string]{}
+			if d.Source != "" {
+				source = protocol.NewOptional[string](d.Source)
+			}
+			out = append(out, protocol.Diagnostic{
+				Range:    protocol.Range{Start: protocol.Position{Line: uint32(d.StartLine), Character: uint32(d.StartChar)}, End: protocol.Position{Line: uint32(d.EndLine), Character: uint32(d.EndChar)}},
+				Severity: severity,
+				Message:  protocol.String(d.Message),
+				Source:   source,
+			})
 	}
 	return out, nil
 }
