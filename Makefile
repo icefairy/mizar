@@ -3,9 +3,12 @@
 #   make           本机构建（strip）
 #   make debug     本机构建（带调试信息，未 strip）
 #   make test      全量测试
-#   make release   三平台 strip 构建到 dist/
-#   make upx       release + UPX 压缩（需要 upx 已安装）
+#   make release   三平台 strip 构建到 dist/（默认发布流程）
+#   make upx       UPX 压缩（仅在明确要求压缩时用，平时不用）
 #   make clean     清理 dist/
+#
+# 发布策略：默认只 strip（-s -w + -trimpath），不压 UPX。
+# UPX 压缩会显著拖慢构建且压缩产物不利于符号调试，除非显式要求否则不做。
 
 BINARY  := mizar
 PKG     := ./cmd/mizar
