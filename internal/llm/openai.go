@@ -84,7 +84,7 @@ func (o *OpenAI) SummarizeMessages(msgs []agent.Message, maxTokens int) (string,
 		return "", err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -142,7 +142,7 @@ func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 		return "", fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
 	}

@@ -301,10 +301,10 @@ func (t *HTTPTransport) Call(ctx context.Context, req rpcRequest) (json.RawMessa
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 		return nil, fmt.Errorf("mcp http %d: %s", resp.StatusCode, truncate(string(body), 300))
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return nil, err
 	}

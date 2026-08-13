@@ -92,7 +92,17 @@ func main() {
 
 	// 宿主函数集
 	host := &engine.HostFuncs{
-		FSRead:  func(p string) (string, error) { b, e := os.ReadFile(p); return string(b), e },
+		FSRead: func(p string) (string, error) {
+			fi, err := os.Stat(p)
+			if err != nil {
+				return "", err
+			}
+			if fi.Size() > 10*1024*1024 {
+				return "", fmt.Errorf("FSRead: %s is %.1fMB (limit 10MB)", p, float64(fi.Size())/1024/1024)
+			}
+			b, err := os.ReadFile(p)
+			return string(b), err
+		},
 		FSWrite: func(p, c string) error { return os.WriteFile(p, []byte(c), 0o644) },
 		FSList:  func(dir string) ([]string, error) {
 			es, e := os.ReadDir(dir)
@@ -129,7 +139,7 @@ func main() {
 			return "", err
 		}
 		defer resp.Body.Close()
-		b, err := io.ReadAll(resp.Body)
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 		if err != nil {
 			return "", err
 		}
