@@ -115,8 +115,9 @@ Mizar 的能力扩展分三层，各司其职：
 
 ```go
 // 注册给 JS 插件的全局函数（一次性写好，之后插件随便组合）
-vm.Set("http_get", httpGet)       // HTTP GET/POST（可选内网代理）
-vm.Set("http_post", httpPost)
+vm.Set("http_request", httpRequest) // 统一 HTTP：method 任意 GET/POST/PUT/DELETE/PATCH，headers JSON 可选
+vm.Set("http_get", httpGet)         // 薄封装：http_request("GET", url, "", "")，保留兼容
+vm.Set("http_post", httpPost)       // 薄封装：http_request("POST", url, body, "")
 vm.Set("json_decode", jsonDecode) // JSON 解析
 vm.Set("json_encode", jsonEncode)
 vm.Set("fs_read", fsRead)         // 文件读写（限定在项目目录内）
@@ -133,13 +134,25 @@ vm.Set("ws_onmessage", ...)
 vm.Set("ws_close", ...)
 ```
 
+**HTTP 统一化**（v0.2.4+）：早期只有 `http_get`/`http_post` 两个固定方法，无法覆盖 PUT/DELETE/PATCH 等场景，且 `main.go` 里 host 实际未实现这两个函数（架构文档画饼）。现统一为 `http_request(method, url, body, headersJSON)`：
+
+```ts
+// headersJSON 为 JSON 字符串，可选（空字符串 = 不带自定义头）
+const r1 = http_request("GET", "https://api.example.com/status", "", "");
+const r2 = http_request("POST", "https://api.example.com/data", JSON.stringify({a: 1}), JSON.stringify({"Content-Type": "application/json"}));
+const r3 = http_request("PUT", "https://api.example.com/items/1", "body...", "");
+const r4 = http_request("DELETE", "https://api.example.com/items/1", "", "");
+```
+
+`http_get`/`http_post` 保留为薄封装（兼容旧插件），新代码一律用 `http_request`。
+
 ```ts
 // extensions/disk_watch.ts —— Agent 自写插件示例
 export function tool_disk_watch(): string {
   const out = shell_exec("df -h / | tail -1");
   const pct = parseInt(out.split(/\s+/)[4]);  // "80%"
   if (pct > 80) {
-    http_post("http://notify.internal/feishu", json_encode({ msg: "磁盘占用 " + pct + "%" }));
+    http_request("POST", "http://notify.internal/feishu", json_encode({ msg: "磁盘占用 " + pct + "%" }), "");
     return "已告警";
   }
   return "正常 (" + pct + "%)";
