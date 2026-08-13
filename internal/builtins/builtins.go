@@ -39,11 +39,12 @@ func All(skillsDir string) []plugins.Tool {
 	}
 }
 
-// toolBash 执行 shell 命令（对齐 pi 的 bash 工具）。
+// toolBash 执行 shell 命令（对齐 pi 的 bash 工具：timeout 可选，无默认超时）。
+// 需要限制执行时间时，由模型自行传 timeout 或在命令前加 `timeout` 命令。
 func toolBash() plugins.Tool {
 	return plugins.Tool{
 		Name:        "bash",
-		Description: "Execute a bash/shell command. Args: {command: string, timeout?: number(seconds)}. Returns combined stdout+stderr. Use for building, running tests, git, package managers.",
+		Description: "Execute a bash/shell command. Args: {command: string, timeout?: number(seconds)}. Returns combined stdout+stderr. No default timeout; pass timeout if the command may hang, or prefix the command with `timeout <sec>`. Use for building, running tests, git, package managers.",
 		Run: func(args string) (string, error) {
 			var p struct {
 				Command string `json:"command"`
@@ -51,10 +52,6 @@ func toolBash() plugins.Tool {
 			}
 			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Command == "" {
 				return "", fmt.Errorf("bash: args {command} required")
-			}
-			timeout := p.Timeout
-			if timeout <= 0 {
-				timeout = 120
 			}
 			cmd := exec.Command("bash", "-c", p.Command)
 			var out strings.Builder
@@ -65,11 +62,15 @@ func toolBash() plugins.Tool {
 			}
 			done := make(chan error, 1)
 			go func() { done <- cmd.Wait() }()
-			select {
-			case <-done:
-			case <-time.After(time.Duration(timeout) * time.Second):
-				_ = cmd.Process.Kill()
-				return "", fmt.Errorf("bash: timeout after %ds", timeout)
+			if p.Timeout > 0 {
+				select {
+				case <-done:
+				case <-time.After(time.Duration(p.Timeout) * time.Second):
+					_ = cmd.Process.Kill()
+					return "", fmt.Errorf("bash: timeout after %ds", p.Timeout)
+				}
+			} else {
+				<-done
 			}
 			return strings.TrimSpace(out.String()), nil
 		},
