@@ -137,6 +137,13 @@ vm.Set("ws_close", ...)
 vm.Set("db_query", dbQuery)       // 内置数据库查询：db_query(driver, dsn, sql) → JSON（v1.2+）
 vm.Set("mcp_call", mcpCall)       // 外部 MCP server：mcp_call(server, tool, argsJSON) → 文本（v1.3+）
 vm.Set("hook_on", hookOn)         // 生命周期挂载点：hook_on(event, cb(ctxJSON)) （v1.3+）
+// —— 纯函数标准库（v1.3+，无 I/O 零副作用，引擎创建时无条件注册）——
+vm.Set("time_now", ...)           // 当前 UTC 时间 RFC3339Nano；time_unix() → 秒
+vm.Set("uuid", ...)               // UUID v4（crypto/rand）
+vm.Set("base64_encode", ...)      // base64_decode(s)
+vm.Set("hash_sha256", ...)        // SHA-256 hex
+vm.Set("path_join", ...)          // path_base(p) / path_dir(p)，POSIX 语义
+vm.Set("url_parse", ...)          // URL → JSON {scheme,host,path,query,fragment,user}
 ```
 
 **HTTP 统一化**（v0.2.4+）：早期只有 `http_get`/`http_post` 两个固定方法，无法覆盖 PUT/DELETE/PATCH 等场景，且 `main.go` 里 host 实际未实现这两个函数（架构文档画饼）。现统一为 `http_request(method, url, body, headersJSON)`：

@@ -89,6 +89,8 @@ func (e *Engine) registerHostFuncs() error {
 	reg := func(name string, fn any) {
 		_ = e.vm.Set(name, fn)
 	}
+	// 纯函数标准库（无 I/O、零副作用），引擎创建时无条件注册
+	registerStdlib(reg)
 	if h.HTTPGet != nil {
 		reg("http_get", h.HTTPGet)
 	}
