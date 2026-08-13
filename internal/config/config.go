@@ -26,6 +26,12 @@ type Config struct {
 	SkillEvolution *bool `json:"skill_evolution"` // 技能自动沉淀（nil=默认开启）
 	SkillStatsEnabled *bool `json:"skill_stats_enabled"` // 技能使用统计+周报（nil=默认开启）
 	SkillStatsTopN int `json:"skill_stats_top_n"` // 周报建议禁用数（0=默认10）
+	SkillInjectMode string `json:"skill_inject_mode"` // 技能注入: index(默认,缓存友好)|full(全量正文)
+}
+
+// SkillInjectIsIndex 技能注入是否索引模式（默认 index；full = 全量正文）。
+func (c *Config) SkillInjectIsIndex() bool {
+	return c.SkillInjectMode != "full"
 }
 
 // SkillStatsOn 统计周报默认开启（nil 或 true 均开启，显式 false 关闭）。

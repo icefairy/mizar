@@ -17,11 +17,19 @@ type Skill struct {
 	Description string
 	Body        string // frontmatter 之后的正文
 	Source      string // 文件名
+	Path        string // 绝对路径（索引注入时供 read 工具加载）
 }
 
 // Render 生成注入 system prompt 的文本。
 func (s *Skill) Render() string {
 	return fmt.Sprintf("[技能:%s]\n%s", s.Name, s.Body)
+}
+
+// RenderIndex 生成索引式注入文本（缓存友好，参照 pi/pi-cache-guardian）：
+// 只列出 name/description/路径，正文由 Agent 用 read 工具按需加载。
+// 技能文件内容变化不会破坏 System prompt 前缀缓存。
+func (s *Skill) RenderIndex() string {
+	return fmt.Sprintf("[技能:%s] %s (路径: %s)", s.Name, s.Description, s.Path)
 }
 
 // Manager 管理技能目录。
@@ -68,6 +76,7 @@ func (m *Manager) LoadAll() (loaded []string, failed map[string]error) {
 			failed[f] = err
 			continue
 		}
+		s.Path = filepath.Join(m.dir, f)
 		m.skills[s.Name] = s
 		loaded = append(loaded, f)
 	}
@@ -101,6 +110,26 @@ func (m *Manager) RenderAll() string {
 	for _, s := range all {
 		sb.WriteString(s.Render())
 		sb.WriteString("\n\n")
+	}
+	return sb.String()
+}
+
+// RenderIndex 渲染索引式技能列表（缓存友好）：
+//   - 只列出 name/description/路径，正文由 read 工具按需加载
+//   - 技能内容变化不破坏 System prompt 前缀缓存
+//
+// 对应 system prompt 中的技能说明段（与 pi 的 skills 注入一致）。
+func (m *Manager) RenderIndex() string {
+	all := m.All()
+	if len(all) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n## 可用技能\n下面列出的技能提供特定任务的专业指令。任务匹配其描述时，用 read 工具读取路径对应的文件来加载完整指令。\n")
+	for _, s := range all {
+		sb.WriteString("- ")
+		sb.WriteString(s.RenderIndex())
+		sb.WriteString("\n")
 	}
 	return sb.String()
 }

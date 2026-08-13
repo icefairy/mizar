@@ -223,9 +223,17 @@ func main() {
 	for f, e := range skFailed {
 		log.Printf("技能失败: %s: %v", f, e)
 	}
-	skPrompt := skm.RenderAll()
+	// 技能注入：默认索引模式（缓存友好，正文 read 按需加载）；配置 full = 全量正文
+	skMode := "index"
+	skPrompt := ""
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillInjectIsIndex() {
+		skPrompt = skm.RenderIndex()
+	} else {
+		skMode = "full"
+		skPrompt = skm.RenderAll()
+	}
 	if skPrompt != "" {
-		log.Printf("技能注入 %d 个", len(skLoaded))
+		log.Printf("技能注入 %d 个 (%s)", len(skLoaded), skMode)
 	}
 	// AGENTS.md 自动读取（全局 ~/.mizar/AGENTS.md + 局部向上查找，相加注入）
 	wd := *workDir
