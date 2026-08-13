@@ -134,6 +134,9 @@ vm.Set("ws_connect", ...)         // WS 客户端桥：连外部 WS 服务（如
 vm.Set("ws_send", ...)
 vm.Set("ws_onmessage", ...)
 vm.Set("ws_close", ...)
+vm.Set("db_query", dbQuery)       // 内置数据库查询：db_query(driver, dsn, sql) → JSON（v1.2+）
+vm.Set("mcp_call", mcpCall)       // 外部 MCP server：mcp_call(server, tool, argsJSON) → 文本（v1.3+）
+vm.Set("hook_on", hookOn)         // 生命周期挂载点：hook_on(event, cb(ctxJSON)) （v1.3+）
 ```
 
 **HTTP 统一化**（v0.2.4+）：早期只有 `http_get`/`http_post` 两个固定方法，无法覆盖 PUT/DELETE/PATCH 等场景，且 `main.go` 里 host 实际未实现这两个函数（架构文档画饼）。现统一为 `http_request(method, url, body, headersJSON)`：
@@ -160,6 +163,63 @@ export function tool_disk_watch(): string {
   return "正常 (" + pct + "%)";
 }
 ```
+
+### 3.6 db_query——内置数据库查询（v1.2+）
+
+插件连接常见数据库用内置驱动，**不需要**额外进程或 MCP server。驱动白名单：`sqlite3`（纯 Go 免 CGO）/ `mysql` / `postgres`。
+
+```
+db_query(driver, dsn, sql) → JSON 字符串
+```
+
+- **查询语句**（SELECT/SHOW/PRAGMA 等）返回 JSON 行数组：`[{"id":1,"name":"zhang"},...]`
+- **非查询语句**（INSERT/UPDATE/DELETE/DDL）返回 `{"rowsAffected":N}`
+- 内置 30s 超时；DSN 长度限制；驱动白名单外直接报错
+- sqlite3 的 DSN 就是文件路径；mysql/postgres 用标准 DSN 格式
+
+```ts
+// 常见关系型——内置，秒连
+export function tool_users(): string {
+  return db_query("sqlite3", "/data/app.db", "SELECT id, name FROM users LIMIT 10");
+}
+
+// 参数化注意：db_query 只接字符串，SQL 拼接时插件自行校验/转义输入
+export function tool_insert(name: string): string {
+  const safe = name.replace(/'/g, "''");   // SQL 注入防护（至少）
+  return db_query("sqlite3", "/data/app.db", "INSERT INTO users (name) VALUES ('" + safe + "')");
+}
+```
+
+**边界**：`db_query` 只覆盖内置驱动的库。连冷门数据库（MongoDB/Redis/ClickHouse 等）时走 MCP server（见 3.7），外部 server 自带驱动，不进主体二进制。
+
+### 3.7 mcp_call——冷门能力的外部通道（v1.3+）
+
+`internal/mcp` 实现 MCP **client**（stdio + HTTP/streamable 传输，支持 `tools/list` / `tools/call`），连外部 MCP server——任何语言实现的协议服务，驱动/能力自带。
+
+- **宿主函数**：`mcp_call(serverName, toolName, argsJSON)` → 结果文本
+- **配置**：`~/.mizar/config.json` 的 `mcp_servers` 数组，每项 `name` +（`command`/`args` 走 stdio 子进程，或 `url` 走 HTTP）
+- **惰性连接**：首次调用才启动/握手，连接按 server 复用；单次调用 30s 超时
+- **典型场景**：MongoDB/Redis/ClickHouse 等 db_query 白名单外的数据库、内部系统 API、专用工具链
+
+```json
+{
+  "mcp_servers": [
+    { "name": "redis", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-redis"] },
+    { "name": "internal", "url": "http://127.0.0.1:9000/mcp" }
+  ]
+}
+```
+
+```ts
+// 插件里一行调用
+export function tool_cache_get(key: string): string {
+  return mcp_call("redis", "get", JSON.stringify({ key }));
+}
+```
+
+**分层总览**：`db_query`（内置关系型）→ `mcp_call`（外部任意服务），插件按场景选，互不阻塞。内置 3 驱动保持主体轻量，长尾能力全部外置，二进制永不膨胀。
+
+
 
 ## 4. 自举闭环（核心卖点）
 

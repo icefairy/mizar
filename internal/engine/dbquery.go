@@ -110,12 +110,58 @@ func queryRows(ctx context.Context, db *sql.DB, query string) (string, error) {
 }
 
 func execStmt(ctx context.Context, db *sql.DB, query string) (string, error) {
-	res, err := db.ExecContext(ctx, query)
-	if err != nil {
-		return "", fmt.Errorf("db_query exec: %w", err)
+	// 支持分号分隔的多语句（DDL + DML 混合，常用场景）。
+	// Query 模式（SELECT 等）不支持多语句——返回行结构无法合并。
+	// rowsAffected 聚合各语句的受影响行数（DDL 为 0，可累加）。
+	stmts := splitStatements(query)
+	total := int64(0)
+	for _, s := range stmts {
+		if strings.TrimSpace(s) == "" {
+			continue
+		}
+		res, err := db.ExecContext(ctx, s)
+		if err != nil {
+			return "", fmt.Errorf("db_query exec: %w", err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
 	}
-	n, _ := res.RowsAffected()
-	return fmt.Sprintf(`{"rowsAffected":%d}`, n), nil
+	return fmt.Sprintf(`{"rowsAffected":%d}`, total), nil
+}
+
+// splitStatements 按分号拆分 SQL，但忽略引号内的分号。
+func splitStatements(s string) []string {
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	quoteChar := rune(0)
+	for _, r := range s {
+		if inQuote {
+			cur.WriteRune(r)
+			if r == quoteChar {
+				inQuote = false
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			inQuote = true
+			quoteChar = r
+			cur.WriteRune(r)
+			continue
+		}
+		if r == ';' {
+			parts = append(parts, cur.String())
+			cur.Reset()
+			continue
+		}
+		cur.WriteRune(r)
+	}
+	rest := cur.String()
+	if strings.TrimSpace(rest) != "" {
+		parts = append(parts, rest)
+	}
+	return parts
 }
 
 // normalizeValue 把数据库值转成可 JSON 序列化的 Go 类型。

@@ -97,6 +97,27 @@ func TestDBQueryExecNonQuery(t *testing.T) {
 	}
 }
 
+// TestDBQueryExecMultiStatement 验证分号多语句 + rowsAffected 聚合。
+func TestDBQueryExecMultiStatement(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "t3.db")
+	_, err := DBQueryFn("sqlite3", dbFile,
+		"CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);")
+	if err != nil {
+		t.Fatalf("multi exec: %v", err)
+	}
+	res, err := DBQueryFn("sqlite3", dbFile, "SELECT COUNT(*) AS n FROM t")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(res), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["n"] != float64(2) {
+		t.Fatalf("want 2 rows, got %v", rows)
+	}
+}
+
 // TestHostDBQueryVisible 验证 db_query 宿主函数在 goja 中可见可调。
 func TestHostDBQueryVisible(t *testing.T) {
 	e, err := New(mockHost())

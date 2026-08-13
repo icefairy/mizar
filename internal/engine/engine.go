@@ -54,6 +54,14 @@ type HostFuncs struct {
 	// DBQuery 内置数据库查询：db_query(driver, dsn, sql) -> JSON。
 	// driver 白名单: sqlite3 / mysql / postgres。nil 时不注册该函数。
 	DBQuery func(driver, dsn, sql string) (string, error)
+	// MCPCall 调用外部 MCP server 工具：mcp_call(server, tool, argsJSON) -> 文本。
+	// 覆盖内置驱动之外的长尾能力（Redis/Kafka/MongoDB/ClickHouse 等）。
+	// nil 时不注册该函数。
+	MCPCall func(server, tool, argsJSON string) (string, error)
+	// HookOn 注册挂载点回调：hook_on(eventName, jsCallback)。
+	// eventName 归一化（大小写/连字符/下划线不敏感）; jsCallback 为 JS 函数 (ctxJSON)=>string。
+	// nil 时不注册该函数。
+	HookOn func(event string, cb func(ctxJSON string) (string, error)) error
 }
 
 // cjsShim 让 esbuild 的 CommonJS 输出能在 goja 中运行。
@@ -131,6 +139,32 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.DBQuery != nil {
 		reg("db_query", h.DBQuery)
+	}
+	if h.MCPCall != nil {
+		reg("mcp_call", h.MCPCall)
+	}
+	if h.HookOn != nil {
+		// hook_on(eventName, jsCallback)：goja 对 (string,error) 多返回值
+		// 自动适配不可靠，手动接收 goja.Value 并 AssertFunction 包装。
+		reg("hook_on", func(event string, cb goja.Value) error {
+			if cb == nil || goja.IsUndefined(cb) || goja.IsNull(cb) {
+				return fmt.Errorf("hook_on: 回调不能为空")
+			}
+			fn, ok := goja.AssertFunction(cb)
+			if !ok {
+				return fmt.Errorf("hook_on: 第二个参数必须是函数")
+			}
+			return h.HookOn(event, func(ctxJSON string) (string, error) {
+				res, err := fn(goja.Undefined(), e.vm.ToValue(ctxJSON))
+				if err != nil {
+					return "", err
+				}
+				if res == nil || goja.IsUndefined(res) || goja.IsNull(res) {
+					return "", nil
+				}
+				return res.String(), nil
+			})
+		})
 	}
 	return nil
 }

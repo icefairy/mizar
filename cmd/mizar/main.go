@@ -137,6 +137,18 @@ func main() {
 		// DBQuery：内置数据库查询（sqlite3/mysql/postgres），插件 db_query() 直达
 		DBQuery: engine.DBQueryFn,
 	}
+	// MCPCall：外部 MCP server 长尾能力（Redis/Kafka/MongoDB 等），插件 mcp_call() 直达
+	mcpReg := engine.NewMCPRegistry(nil)
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && len(cfg.MCPServers) > 0 {
+		mcpReg = engine.NewMCPRegistry(cfg.MCPServers)
+		log.Printf("MCP server 配置 %d 个: %s", len(cfg.MCPServers), mcpNames(cfg.MCPServers))
+	} else if err != nil {
+		log.Printf("MCP 配置读取失败（mcp_call 不可用）: %v", err)
+	} else {
+		log.Printf("未配置 MCP server（mcp_call 不可用，config.json 加 mcp_servers 启用）")
+	}
+	defer mcpReg.Close()
+	host.MCPCall = mcpReg.CallFn()
 	// 插件 HTTP 能力：统一 http_request(method,url,body,headers) + 薄封装 http_get/http_post
 	httpDo := func(method, url, body, headersJSON string) (string, error) {
 		req, err := http.NewRequest(method, url, strings.NewReader(body))
@@ -295,6 +307,30 @@ func main() {
 	a := agent.New(client, pm)
 	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt + agentsPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
+
+	// 桥接 Agent Hooks → 插件 hook_on 回调：所有挂载点转发给插件
+	a.Hooks = agent.NewHooks()
+	bridgeHook := func(evt string) agent.HookFunc {
+		return func(ctx *agent.HookContext) error {
+			_, errs := pm.FireHook(evt, plugins.MarshalCtx(ctx))
+			for _, e := range errs {
+				log.Printf("插件 hook %s: %v", evt, e)
+			}
+			return nil
+		}
+	}
+	a.Hooks.
+		OnRunStart(bridgeHook("RunStart")).
+		OnRunEnd(bridgeHook("RunEnd")).
+		OnStepStart(bridgeHook("StepStart")).
+		OnStepEnd(bridgeHook("StepEnd")).
+		OnLLMRequest(bridgeHook("LLMRequest")).
+		OnLLMResponse(bridgeHook("LLMResponse")).
+		OnToolCall(bridgeHook("ToolCall")).
+		OnToolResult(bridgeHook("ToolResult")).
+		OnCompactionBefore(bridgeHook("CompactionBefore")).
+		OnCompactionAfter(bridgeHook("CompactionAfter")).
+		OnError(bridgeHook("Error"))
 
 	// 内置 /provider 命令：查看/切换 LLM 供应商（baseURL）
 	a.Commands.Register(agent.Command{
@@ -462,4 +498,13 @@ func main() {
 
 	// 交互模式
 	interactive(a, st, *sessionID)
+}
+
+// mcpNames 返回 MCP server 名列表（日志用）。
+func mcpNames(servers []engine.MCPServerConf) string {
+	names := make([]string, 0, len(servers))
+	for _, s := range servers {
+		names = append(names, s.Name)
+	}
+	return strings.Join(names, ", ")
 }
