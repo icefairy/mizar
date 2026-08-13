@@ -34,6 +34,8 @@
 
 主星负责运转，辅星负责扩展；主星定义了辅星的接口，辅星让主星不断变强——这正是"自举"的星象学表达。
 
+> 🎧 项目介绍语音版：[docs/mizar-intro.ogg](docs/mizar-intro.ogg)（TTS 合成，约 20 秒）
+
 姊妹项目 [璇玑 (Xuanji)](https://github.com/icefairy/xuanji) 取北斗一二星（枢纽之意），负责 AI 网关汇聚与路由；Mizar 取北斗第六星（辅星相伴之意），负责 Agent 本体与自举扩展。一枢纽，一自举，同源同构。
 
 ---
