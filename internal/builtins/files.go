@@ -11,11 +11,36 @@ import (
 	"mizar/internal/plugins"
 )
 
-// toolRead 读文件（对齐 pi 的 read：path + offset + limit）。
+// 双限截断常量（对齐 pi：2000 行 / 50KB）
+const (
+	readMaxLines = 2000
+	readMaxBytes = 50_000
+	// bash 输出截断上限（对齐 pi）
+	bashMaxBytes = 50_000
+	// read 文件大小预检：超过 10MB 拒绝全量读（防内存不可预估消耗）
+	readMaxFileBytes = 10 * 1024 * 1024
+)
+
+// dumpToTemp 将超限输出落盘到临时文件，返回路径
+func dumpToTemp(content string) (string, error) {
+	f, err := os.CreateTemp("", "mizar-bash-*.log")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// toolRead 读文件（对齐 pi 的 read：path + offset + limit，双限截断 + 续读提示）。
+// 文件大小预检 >10MB 拒绝全量读，防止内存不可预估消耗。
 func toolRead() plugins.Tool {
 	return plugins.Tool{
 		Name:        "read",
-		Description: "Read a text file. Args: {path: string, offset?: number(1-indexed), limit?: number(lines)}. Returns content with line numbers.",
+		Description: "Read a text file. Args: {path: string, offset?: number(1-indexed), limit?: number(lines)}. Returns content with line numbers, truncated at 2000 lines/50KB with a continue hint. Files over 10MB are rejected (use grep/bash instead).",
 		Run: func(args string) (string, error) {
 			var p struct {
 				Path   string `json:"path"`
@@ -25,33 +50,62 @@ func toolRead() plugins.Tool {
 			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
 				return "", fmt.Errorf("read: args {path} required")
 			}
+			// 大小预检：>10MB 拒绝，防 OOM
+			fi, err := os.Stat(p.Path)
+			if err != nil {
+				return "", err
+			}
+			if fi.Size() > readMaxFileBytes {
+				return "", fmt.Errorf("read: %s is %.1fMB (limit %dMB); use grep/find to search, or bash: sed -n / head -c to read slices",
+					p.Path, float64(fi.Size())/(1024*1024), readMaxFileBytes/(1024*1024))
+			}
 			b, err := os.ReadFile(p.Path)
 			if err != nil {
 				return "", err
 			}
 			lines := strings.Split(string(b), "\n")
-			start, end := 0, len(lines)
+			total := len(lines)
+			start, end := 0, total
 			if p.Offset > 0 {
 				start = p.Offset - 1
 			}
 			if p.Limit > 0 {
 				end = start + p.Limit
-				if end > len(lines) {
-					end = len(lines)
+				if end > total {
+					end = total
 				}
 			}
-			if start >= len(lines) {
-				start = len(lines) - 1
+			if start >= total {
+				start = total - 1
 			}
 			if start < 0 {
 				start = 0
 			}
-			var sb strings.Builder
-			fmt.Fprintf(&sb, "%d lines (total %d)\n", end-start, len(lines))
-			for i := start; i < end; i++ {
-				fmt.Fprintf(&sb, "%d|%s\n", i+1, lines[i])
+			// 行数限
+			if end-start > readMaxLines {
+				end = start + readMaxLines
 			}
-			return strings.TrimRight(sb.String(), "\n"), nil
+			// 拼接显示，同时按字节限（50KB）截断
+			var sb strings.Builder
+			byteUsed := 0
+			shown := 0
+			for i := start; i < end; i++ {
+				line := fmt.Sprintf("%d|%s\n", i+1, lines[i])
+				byteUsed += len(line)
+				if byteUsed > readMaxBytes {
+					break
+				}
+				sb.WriteString(line)
+				shown++
+			}
+			truncated := end < total || byteUsed > readMaxBytes
+			var head strings.Builder
+			if truncated {
+				fmt.Fprintf(&head, "%d lines (total %d, truncated). Use offset=%d to continue.\n", shown, total, start+shown+1)
+			} else {
+				fmt.Fprintf(&head, "%d lines (total %d)\n", shown, total)
+			}
+			return strings.TrimRight(head.String()+sb.String(), "\n"), nil
 		},
 	}
 }

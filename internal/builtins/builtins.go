@@ -75,7 +75,16 @@ func toolBash() plugins.Tool {
 			} else {
 				<-done
 			}
-			return strings.TrimSpace(out.String()), nil
+			full := out.String()
+			// 输出截断（对齐 pi）：50KB 超限截尾 + 落盘 temp + 回传路径
+			if len(full) > bashMaxBytes {
+				path, werr := dumpToTemp(full)
+				if werr != nil {
+					return fmt.Sprintf("%d bytes, truncated at %d (temp dump failed: %v)", len(full), bashMaxBytes, werr), nil
+				}
+				return fmt.Sprintf("%d bytes, truncated at %d. Full output: %s", len(full), bashMaxBytes, path), nil
+			}
+			return strings.TrimSpace(full), nil
 		},
 	}
 }

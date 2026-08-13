@@ -1,6 +1,7 @@
 package builtins
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,6 +77,113 @@ func TestEditNotFound(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("want not-found error, got: %v", err)
 	}
+}
+
+// P1-1: read 双限截断——超 2000 行截断 + 续读提示
+func TestReadTruncatesLines(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "big.txt")
+	var sb strings.Builder
+	for i := 0; i < 2500; i++ {
+		fmt.Fprintf(&sb, "line-%d\n", i)
+	}
+	if err := os.WriteFile(f, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := toolRead().Run(`{"path": "` + f + `"}`)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(out, "truncated") || !strings.Contains(out, "Use offset=") {
+		t.Fatalf("want truncate hint, got: %s", out[:200])
+	}
+	if !strings.Contains(out, "line-0") || !strings.Contains(out, "line-1999") {
+		t.Fatalf("first 2000 lines missing")
+	}
+	if strings.Contains(out, "line-2000") {
+		t.Fatalf("should not include line 2000")
+	}
+}
+
+// P1-1: read 字节截断——50KB 大文件只保留前 50KB
+func TestReadTruncatesBytes(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "big.bin.txt")
+	// 120KB 单行（无换行，行数不会超限，走字节限）
+	content := strings.Repeat("x", 120_000)
+	if err := os.WriteFile(f, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := toolRead().Run(`{"path": "` + f + `"}`)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Fatalf("want truncate hint, got: %s", out[:200])
+	}
+}
+
+// P1-1: read offset 续读能拿到后续行
+func TestReadOffsetContinue(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "t.txt")
+	var sb strings.Builder
+	for i := 0; i < 2100; i++ {
+		fmt.Fprintf(&sb, "line-%d\n", i)
+	}
+	if err := os.WriteFile(f, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := toolRead().Run(`{"path": "` + f + `", "offset": 2001, "limit": 100}`)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(out, "line-2001") {
+		t.Fatalf("offset continue missing: %s", out[:300])
+	}
+}
+
+// P1-1: 超过 10MB 的大文件拒绝全量读（防内存不可预估消耗）
+func TestReadRejectsHugeFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "huge.txt")
+	// 11MB 稀疏文件（不实际写 11MB，用 Truncate 创建空洞文件）
+	fh, err := os.Create(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.Truncate(11 * 1024 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	fh.Close()
+	_, err = toolRead().Run(`{"path": "` + f + `"}`)
+	if err == nil {
+		t.Fatalf("want size-limit error")
+	}
+	if !strings.Contains(err.Error(), "10MB") {
+		t.Fatalf("err: %v", err)
+	}
+}
+
+// P1-2: bash 输出截断——超过 50KB 落盘 temp 并回传路径
+func TestBashOutputTruncates(t *testing.T) {
+	out, err := toolBash().Run(`{"command": "head -c 120000 /dev/zero | tr '\\0' 'x'"}`)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(out, "truncated") || !strings.Contains(out, "Full output:") {
+		t.Fatalf("want truncate + temp path, got: %s", out[:300])
+	}
+	// 提取 temp 路径验证存在
+	idx := strings.Index(out, "Full output: ")
+	if idx < 0 {
+		t.Fatalf("no temp path")
+	}
+	path := strings.TrimSpace(out[idx+len("Full output: "):])
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("temp file missing: %v", err)
+	}
+	os.Remove(path)
 }
 
 // P0-2: bash 超时 kill 整个进程树（含子进程）
