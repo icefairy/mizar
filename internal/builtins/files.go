@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"mizar/internal/plugins"
+	"mizar/internal/utils"
 )
 
 // 双限截断常量（对齐 pi：2000 行 / 50KB）
@@ -35,12 +36,23 @@ func dumpToTemp(content string) (string, error) {
 	return f.Name(), nil
 }
 
+// isDocumentFile 判断是否为文档格式文件（按扩展名）。
+func isDocumentFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".pdf", ".docx", ".xlsx":
+		return true
+	}
+	return false
+}
+
 // toolRead 读文件（对齐 pi 的 read：path + offset + limit，双限截断 + 续读提示）。
+// 支持文本文件 + 文档格式（PDF/DOCX/XLSX）。
 // 文件大小预检 >10MB 拒绝全量读，防止内存不可预估消耗。
 func toolRead() plugins.Tool {
 	return plugins.Tool{
 		Name:        "read",
-		Description: "Read a text file. Args: {path: string, offset?: number(1-indexed), limit?: number(lines)}. Returns content with line numbers, truncated at 2000 lines/50KB with a continue hint. Files over 10MB are rejected (use grep/bash instead).",
+		Description: "Read a text file. Args: {path: string, offset?: number(1-indexed), limit?: number(lines)}. Returns content with line numbers, truncated at 2000 lines/50KB with a continue hint. Files over 10MB are rejected. Supports PDF, DOCX, XLSX.",
 		Run: func(args string) (string, error) {
 			var p struct {
 				Path   string `json:"path"`
@@ -59,6 +71,31 @@ func toolRead() plugins.Tool {
 				return "", fmt.Errorf("read: %s is %.1fMB (limit %dMB); use grep/find to search, or bash: sed -n / head -c to read slices",
 					p.Path, float64(fi.Size())/(1024*1024), readMaxFileBytes/(1024*1024))
 			}
+
+			// 文档格式走专用解析器
+			if isDocumentFile(p.Path) {
+				switch strings.ToLower(filepath.Ext(p.Path)) {
+				case ".pdf":
+					text, err := utils.ExtractPDF(p.Path)
+					if err != nil {
+						return "", fmt.Errorf("read PDF: %w", err)
+					}
+					return text, nil
+				case ".docx":
+					text, err := utils.ExtractDOCX(p.Path)
+					if err != nil {
+						return "", fmt.Errorf("read DOCX: %w", err)
+					}
+					return text, nil
+				case ".xlsx":
+					text, err := utils.ExtractXLSX(p.Path)
+					if err != nil {
+						return "", fmt.Errorf("read XLSX: %w", err)
+					}
+					return text, nil
+				}
+			}
+
 			b, err := os.ReadFile(p.Path)
 			if err != nil {
 				return "", err

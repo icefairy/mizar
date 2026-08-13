@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/peterh/liner"
@@ -45,6 +47,17 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	}
 	names = append(names, "/help")
 	rl.SetCompleter(func(line string) (res []string) {
+		// @ 路径补全：@路径 → 自动提示文件/文件夹
+		if idx := strings.LastIndex(line, "@"); idx >= 0 {
+			prefix := strings.TrimSpace(line[idx+1:])
+			for _, c := range completeAtPath(prefix) {
+				if strings.HasPrefix(c, prefix) {
+					res = append(res, "@"+c)
+				}
+			}
+			return
+		}
+		// 普通命令补全
 		for _, n := range names {
 			if strings.HasPrefix(n, line) {
 				res = append(res, n)
@@ -87,4 +100,59 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 	}
+}
+
+// completeAtPath 根据输入的前缀提示文件/文件夹路径。
+// 支持相对路径和绝对路径：
+//   - prefix = ""       → 无补全（空前缀）
+//   - prefix = "src"    → 从当前工作目录匹配 src* 的条目
+//   - prefix = "src/"   → 列出当前工作目录/src/ 下的所有条目
+//   - prefix = "./src"  → 同上（相对路径）
+//   - prefix = "/etc/"  → 列出 /etc/ 下的所有条目
+// 文件夹返回时带 / 后缀。返回最多 100 个候选。
+func completeAtPath(prefix string) []string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+
+	// 拆分路径：取已存在的父目录 + 当前输入的文件名片段
+	parent := filepath.Dir(prefix)
+	name := filepath.Base(prefix)
+
+	// 解析当前工作目录
+	cdir, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	// 将 parent 解析为绝对路径
+	if parent == "" || parent == "." {
+		parent = cdir
+	} else if !filepath.IsAbs(parent) {
+		parent = filepath.Join(cdir, parent)
+	}
+
+	// 打开父目录
+	es, err := os.ReadDir(parent)
+	if err != nil {
+		return nil
+	}
+
+	var result []string
+	for _, e := range es {
+		entryName := e.Name()
+		if name != "" && !strings.HasPrefix(entryName, name) {
+			continue
+		}
+		entryPath := filepath.Join(parent, entryName)
+		if e.IsDir() {
+			entryPath = entryPath + "/"
+		}
+		result = append(result, entryPath)
+	}
+	if len(result) > 100 {
+		result = result[:100]
+	}
+	return result
 }

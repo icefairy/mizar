@@ -7,6 +7,12 @@ import (
 // ErrAborted 用户中止循环时返回。
 var ErrAborted = errors.New("aborted by user")
 
+// ErrTimeout 操作超时。
+var ErrTimeout = errors.New("operation timed out")
+
+// ErrMaxSteps 循环步数耗尽。
+var ErrMaxSteps = errors.New("max steps exceeded")
+
 // ============================================================================
 // 快速插入机制（steer / abort，参照 pi 的 steer 命令）
 //
