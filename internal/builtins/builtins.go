@@ -35,6 +35,7 @@ func All(skillsDir string) []plugins.Tool {
 		toolWrite(),
 		toolEdit(),
 		toolLS(),
+		toolRepoMap(),
 		skillManage(skillsDir),
 	}
 }
