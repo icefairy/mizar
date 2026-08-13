@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"mizar/internal/lifecycle"
 	"mizar/internal/plugins"
@@ -40,6 +41,7 @@ type Agent struct {
 	VerboseLog func(string) // 可选日志回调
 	Compactor  *Compactor   // 会话压缩器（nil = 不压缩）
 	Hooks      *Hooks       // 挂载点（nil = 无钩子）
+	Tuner      *WeakModelTuner // 弱模型宽容策略（nil = 不启用）
 
 	// 工具调用解析策略
 	callParser func(text string) (*callRequest, error)
@@ -135,6 +137,9 @@ func (a *Agent) Run(task string) (string, error) {
 		a.Hooks = NewHooks()
 	}
 	a.resetAbort()
+	if a.Tuner != nil {
+		a.Tuner.Reset()
+	}
 	q := lifecycle.NewQuery("cli")
 	runCtx := &HookContext{
 		RunID:     string(q.QueryID()),
@@ -194,21 +199,43 @@ func (a *Agent) Run(task string) (string, error) {
 		reply, err := a.LLM.Chat(msgs)
 		q.EndOperation("llm")
 		if err != nil {
+			if a.Tuner != nil {
+				if retry, retryCnt := a.Tuner.LLMFailed(); retry {
+					time.Sleep(a.Tuner.RetryDelay(retryCnt))
+					a.log("%s", q.FormatLog("llm_retry", "cnt=", fmt.Sprintf("%d", retryCnt)))
+					continue
+				}
+			}
 			q.Complete(err)
 			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: err}, a.logf)
 			return "", fmt.Errorf("llm chat: %w", err)
+		}
+		if a.Tuner != nil {
+			a.Tuner.LLMSucceeded()
 		}
 		a.Hooks.fireLLMResponse(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: reply}, a.logf)
 		a.log("%s", q.FormatLog("model_reply", "step=", fmt.Sprintf("%d", qc.Step), " len=", fmt.Sprintf("%d", len(reply))))
 
 		req, err := a.callParser(reply)
 		if err != nil {
+			if a.Tuner != nil {
+				if escalated, msg := a.Tuner.ParseFailed(qc.Step); escalated {
+					msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
+					msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+					step++
+					continue
+				}
+			}
 			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: fmt.Errorf("parse: %w", err)}, a.logf)
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: "解析你的回复失败：" + err.Error() + "。请严格按格式输出 JSON。"})
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			step++
 			continue
+		}
+		if a.Tuner != nil {
+			a.Tuner.ParseSucceeded()
 		}
 
 		if req.Action == "reply" {
@@ -221,6 +248,14 @@ func (a *Agent) Run(task string) (string, error) {
 		// 工具调用
 		q.BeginOperation("tool:" + req.Tool)
 		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args}, a.logf)
+		if a.Tuner != nil && a.Tuner.RecordToolCall(req.Tool, req.Args) {
+			q.EndOperation("tool:" + req.Tool)
+			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+			msgs = append(msgs, Message{Role: RoleUser, Content: "⚠️ 检测到死循环（连续多次相同工具调用），任务已终止。"})
+			q.Complete(errors.New("dead loop detected"))
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			return "", errors.New("dead loop: " + req.Tool)
+		}
 		out, err := a.Plugins.Call(req.Tool, req.Args)
 		q.EndOperation("tool:" + req.Tool)
 		tr := ToolResult{ToolName: req.Tool, Args: req.Args, Output: out}
