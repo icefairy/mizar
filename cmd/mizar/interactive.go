@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
+
+	"github.com/peterh/liner"
 
 	"mizar/internal/agent"
 	"mizar/internal/session"
@@ -15,20 +15,57 @@ func jsonUnmarshal(s string, v any) error {
 	return json.Unmarshal([]byte(s), v)
 }
 
-// interactive 运行交互式对话。
+// banner 启动标语（开阳 = Mizar 的项目代号）。
+func banner() string {
+	return fmt.Sprintf(`
+  __  ___      __  ___        __ 
+ /  |/  /_ ___/ /_/ _ \___ __/ /__
+/ /|_/ / // / __/ // / -_) \ / (_-<
+/_/  /_/\_,_/\__/\___/\__/_//_/___/
+              %s — 开阳 · 自举式 AI Agent
+
+  ◆ 单文件二进制，零依赖安装（无依赖地狱）
+  ◆ 完全离线可用：私有模型网关，数据不出内网
+  ◆ 插件沙箱：goja 隔离执行，TS/JS 双写，热重载
+  ◆ 全链路可审计：每步工具调用留痕，技能用量透明
+  ◆ 轻量自举：一个可执行文件跑通 规划→执行→验证
+`, version)
+}
+
+// interactive 运行交互式对话（readline 支持：退格删除 / 历史上下键 / Tab 补全）。
 func interactive(a *agent.Agent, st *session.Store, sessionID string) {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("输入任务，空行退出。Ctrl-D 也可退出。")
+	rl := liner.NewLiner()
+	defer rl.Close()
+	rl.SetCtrlCAborts(true)
+	// Tab 补全：/ 开头的命令 + 历史
+	cmds := a.Commands.List()
+	names := make([]string, 0, len(cmds))
+	for _, c := range cmds {
+		names = append(names, "/"+c.Name)
+	}
+	names = append(names, "/help")
+	rl.SetCompleter(func(line string) (res []string) {
+		for _, n := range names {
+			if strings.HasPrefix(n, line) {
+				res = append(res, n)
+			}
+		}
+		return
+	})
+
+	fmt.Print(banner())
+	fmt.Println("输入任务，空行退出。Ctrl-D 或 /quit 退出。Tab 补全命令，↑↓ 历史。")
 	for {
-		fmt.Print("\n> ")
-		line, err := reader.ReadString('\n')
+		line, err := rl.Prompt("> ")
 		if err != nil {
-			return
+			fmt.Println()
+			return // EOF / Ctrl-C
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			return
 		}
+		rl.AppendHistory(line)
 		// 斜杠命令分发：插件注册的 command_* 与内置命令
 		if handled, out, err := a.Commands.Dispatch(line); handled {
 			if err != nil {

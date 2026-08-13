@@ -265,6 +265,38 @@ func main() {
 	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt + agentsPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
 
+	// 内置 /provider 命令：查看/切换 LLM 供应商（baseURL）
+	a.Commands.Register(agent.Command{
+		Name:        "provider",
+		Description: "查看当前 LLM 供应商（/provider）或切换（/provider <baseURL>）",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			if args == "" {
+				thinking := "off"
+				if client.Thinking != nil && *client.Thinking {
+					thinking = "on"
+				}
+				return fmt.Sprintf("当前供应商: %s\n模型: %s\n思考模式: %s", client.BaseURL, client.Model, thinking), nil
+			}
+			old := client.BaseURL
+			client.BaseURL = strings.TrimSuffix(args, "/")
+			return fmt.Sprintf("✓ 供应商已切换: %s → %s", old, client.BaseURL), nil
+		},
+	})
+	// 内置 /model 命令：查看/切换模型（对齐 pi 的 /model）
+	a.Commands.Register(agent.Command{
+		Name:        "model",
+		Description: "查看当前模型（/model）或切换（/model <name>）",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			if args == "" {
+				return fmt.Sprintf("当前模型: %s", client.Model), nil
+			}
+			old := client.Model
+			client.Model = args
+			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, args), nil
+		},
+	})
 	// 内置 /reload 命令：重载 ~/.mizar/config.json + 插件热重载
 	a.Commands.Register(agent.Command{
 		Name:        "reload",

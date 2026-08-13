@@ -105,15 +105,23 @@ func (m *Manager) loadAll(force bool) (loaded []string, failed map[string]error)
 	return loaded, failed
 }
 
+// 纯 JS 插件直接执行（跳过 esbuild 编译），TS 才需要转译。
+// 要求：JS 文件本身是 goja 可执行的 ES 语法（避免最新的 ESNext 语法）。
 func (m *Manager) loadPlugin(filename string) error {
 	path := filepath.Join(m.dir, filename)
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	js, err := engine.CompileTS(filename, string(src))
-	if err != nil {
-		return err
+	var js string
+	if strings.HasSuffix(filename, ".ts") {
+		js, err = engine.CompileTS(filename, string(src))
+		if err != nil {
+			return err
+		}
+	} else {
+		// .js：免编译直喂 goja（少一道 esbuild 转译）
+		js = string(src)
 	}
 	vm, err := engine.New(m.host)
 	if err != nil {
