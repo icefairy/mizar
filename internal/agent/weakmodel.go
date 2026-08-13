@@ -25,9 +25,9 @@ type WeakModelTuner struct {
 	loopWindowSize int // 窗口大小（默认 3）
 
 	// 状态
-	parseFailures atomic.Int32   // 当前连续解析失败数
+	parseFailures        atomic.Int32 // 当前连续解析失败数
 	consecutiveToolCalls atomic.Value // 最近 N 个工具调用
-	llmRetryCount atomic.Int32   // LLM 当前重试次数
+	llmRetryCount        atomic.Int32 // LLM 当前重试次数
 
 	// 回调
 	onParseEscalate func(step int, failures int) string // 返回升级后的提示文案

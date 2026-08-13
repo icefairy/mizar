@@ -169,6 +169,14 @@ func main() {
 		}
 		return client.Chat(msgs)
 	}
+	// LSP 插件桥接：JS 插件用 lsp_register_diagnostic(name, fn) 注册诊断提供者。
+	// fn(uri string) => jsonString（诊断数组 [{startLine,startChar,endLine,endChar,severity,message,source}]）
+	host.LSPRegisterDiagnostic = func(name string, fn func(uri string) string) error {
+		return lsp.RegisterDiagnosticProvider(lsp.NewJSDiagnosticProvider(name, fn))
+	}
+	host.LSPRegisterCompletion = func(name string, fn func(uri string, line, col int) string) error {
+		return lsp.RegisterCompletionProvider(lsp.NewJSCompletionProvider(name, fn))
+	}
 
 	extAbs, err := filepath.Abs(*extDir)
 	if err != nil {

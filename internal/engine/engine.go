@@ -35,6 +35,12 @@ type HostFuncs struct {
 	FSWrite    func(path, content string) error
 	FSList     func(dir string) ([]string, error)
 	ShellExec  func(cmd string) (string, error)
+	// LSPRegisterDiagnostic 注册 LSP 诊断提供者（JS 插件用）。
+	// name: 提供者名称；fn: (uri string) => jsonString（诊断数组）
+	LSPRegisterDiagnostic func(name string, fn func(uri string) string) error
+	// LSPRegisterCompletion 注册 LSP 补全提供者（JS 插件用）。
+	// name: 提供者名称；fn: (uri string, line, col int) => jsonString（补全数组）
+	LSPRegisterCompletion func(name string, fn func(uri string, line, col int) string) error
 	LLMChat  func(messagesJSON string) (string, error)
 	Log        func(msg string)
 	Sleep      func(ms int)
@@ -98,6 +104,12 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.ShellExec != nil {
 		reg("shell_exec", h.ShellExec)
+	}
+	if h.LSPRegisterDiagnostic != nil {
+		reg("lsp_register_diagnostic", h.LSPRegisterDiagnostic)
+	}
+	if h.LSPRegisterCompletion != nil {
+		reg("lsp_register_completion", h.LSPRegisterCompletion)
 	}
 	if h.LLMChat != nil {
 		reg("llm_chat", h.LLMChat)

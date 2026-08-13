@@ -7,7 +7,6 @@ package lsp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -223,8 +222,14 @@ func (s *Server) RegisterProvider(p any) {
 
 // --- 全局服务器实例（供插件注册使用） ---
 
-var globalServer *Server
-var globalServerMu sync.Mutex
+var (
+	globalServer  *Server
+	globalServerMu sync.Mutex
+
+	// pending 是在 server 初始化前注册的 provider，SetGlobalServer 时自动 drain。
+	pendingDiag []DiagnosticProvider
+	pendingComp []CompletionProvider
+)
 
 // GlobalServer 返回全局 LSP 服务器实例（如果已创建）。
 func GlobalServer() *Server {
@@ -233,30 +238,40 @@ func GlobalServer() *Server {
 	return globalServer
 }
 
-// SetGlobalServer 设置全局 LSP 服务器实例（供插件注册使用）。
+// SetGlobalServer 设置全局 LSP 服务器实例。同时 drain pending provider。
 func SetGlobalServer(s *Server) {
 	globalServerMu.Lock()
 	defer globalServerMu.Unlock()
 	globalServer = s
+	for _, p := range pendingDiag {
+		s.RegisterProvider(p)
+	}
+	for _, p := range pendingComp {
+		s.RegisterProvider(p)
+	}
+	pendingDiag = nil
+	pendingComp = nil
 }
 
-// RegisterDiagnosticProvider 插件注册诊断提供者。
+// RegisterDiagnosticProvider 注册诊断提供者。server 未初始化时暂存到 pending 队列。
 func RegisterDiagnosticProvider(p DiagnosticProvider) error {
 	globalServerMu.Lock()
 	defer globalServerMu.Unlock()
 	if globalServer == nil {
-		return fmt.Errorf("lsp: global server not initialized")
+		pendingDiag = append(pendingDiag, p)
+		return nil
 	}
 	globalServer.RegisterProvider(p)
 	return nil
 }
 
-// RegisterCompletionProvider 插件注册补全提供者。
+// RegisterCompletionProvider 注册补全提供者。server 未初始化时暂存到 pending 队列。
 func RegisterCompletionProvider(p CompletionProvider) error {
 	globalServerMu.Lock()
 	defer globalServerMu.Unlock()
 	if globalServer == nil {
-		return fmt.Errorf("lsp: global server not initialized")
+		pendingComp = append(pendingComp, p)
+		return nil
 	}
 	globalServer.RegisterProvider(p)
 	return nil
