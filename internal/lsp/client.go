@@ -343,7 +343,7 @@ type Position struct {
 }
 
 type Location struct {
-	URI   string `json:"uri"`
+	URI   string   `json:"uri"`
 	Start Position `json:"range.start"`
 	End   Position `json:"range.end"`
 }

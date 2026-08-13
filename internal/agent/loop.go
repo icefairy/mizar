@@ -172,7 +172,7 @@ func (a *Agent) Run(task string) (string, error) {
 		if a.Compactor != nil {
 			est := EstimateMessages(msgs)
 			if a.Compactor.ShouldCompact(est) {
-			a.log("%s", q.FormatLog("compact", "est=", fmt.Sprintf("%d", est), " step=", fmt.Sprintf("%d", qc.Step)))
+				a.log("%s", q.FormatLog("compact", "est=", fmt.Sprintf("%d", est), " step=", fmt.Sprintf("%d", qc.Step)))
 				a.Hooks.fireCompactionBefore(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, EstTokens: est, Messages: msgs}, a.logf)
 				var err error
 				msgs, err = a.Compactor.Compact(msgs)

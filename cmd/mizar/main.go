@@ -29,28 +29,28 @@ var version = "v0.1.0"
 
 func main() {
 	var (
-		baseURL = flag.String("base-url", "http://127.0.0.1:3002/v1", "OpenAI 兼容端点 (默认指向璇玑网关)")
-		apiKey  = flag.String("api-key", "", "API Key (可选)")
-		model   = flag.String("model", "deepseek-v4-flash", "模型名")
-		extDir  = flag.String("ext", "extensions", "插件目录")
-		skillDir = flag.String("skills", "skills", "技能目录")
-		workDir = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
-		sessDir = flag.String("sessions", "sessions", "会话目录")
+		baseURL   = flag.String("base-url", "http://127.0.0.1:3002/v1", "OpenAI 兼容端点 (默认指向璇玑网关)")
+		apiKey    = flag.String("api-key", "", "API Key (可选)")
+		model     = flag.String("model", "deepseek-v4-flash", "模型名")
+		extDir    = flag.String("ext", "extensions", "插件目录")
+		skillDir  = flag.String("skills", "skills", "技能目录")
+		workDir   = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
+		sessDir   = flag.String("sessions", "sessions", "会话目录")
 		sessionID = flag.String("session", "", "会话 ID (续接对话)")
-		history = flag.Int("history", 50, "会话恢复的最大历史消息数")
+		history   = flag.Int("history", 50, "会话恢复的最大历史消息数")
 		ctxWindow = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
 		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
-		task    = flag.String("task", "", "任务内容 (非空则单次执行)")
-		showVer = flag.Bool("version", false, "显示版本")
-		initWiz = flag.Bool("init", false, "运行初始化向导（配置供应商/模型）")
+		task      = flag.String("task", "", "任务内容 (非空则单次执行)")
+		showVer   = flag.Bool("version", false, "显示版本")
+		initWiz   = flag.Bool("init", false, "运行初始化向导（配置供应商/模型）")
 		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
 		// Server 模式（持久运行 daemon）
-		serve      = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
-		addr       = flag.String("addr", ":3003", "Server 监听地址")
-		token      = flag.String("token", "", "Server Bearer token (空=不认证)")
-		httpOn     = flag.Bool("http", true, "Server: 启用 OpenAI 兼容 HTTP")
-		rpcOn      = flag.Bool("rpc", true, "Server: 启用 JSON-RPC")
-		wsOn       = flag.Bool("ws", true, "Server: 启用 WebSocket")
+		serve  = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
+		addr   = flag.String("addr", ":3003", "Server 监听地址")
+		token  = flag.String("token", "", "Server Bearer token (空=不认证)")
+		httpOn = flag.Bool("http", true, "Server: 启用 OpenAI 兼容 HTTP")
+		rpcOn  = flag.Bool("rpc", true, "Server: 启用 JSON-RPC")
+		wsOn   = flag.Bool("ws", true, "Server: 启用 WebSocket")
 	)
 	flag.Parse()
 
@@ -108,8 +108,8 @@ func main() {
 		// FSReadRange：有界 seek 读取。返回 [content, totalSize, error]。
 		// 单次最多 4MB，大文件插件用循环分片读。
 		FSReadRange: engine.FSReadRangeFn,
-		FSWrite: func(p, c string) error { return os.WriteFile(p, []byte(c), 0o644) },
-		FSList:  func(dir string) ([]string, error) {
+		FSWrite:     func(p, c string) error { return os.WriteFile(p, []byte(c), 0o644) },
+		FSList: func(dir string) ([]string, error) {
 			es, e := os.ReadDir(dir)
 			if e != nil {
 				return nil, e
