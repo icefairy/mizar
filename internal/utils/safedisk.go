@@ -1,10 +1,10 @@
 // safedisk 提供安全的临时文件操作（O_NOFOLLOW + session 隔离）。
 //
 // 安全设计：
-//   1. O_NOFOLLOW：防 symlink 攻击，防止 attacker 在 temp 目录创建 symlink
-//      指向任意文件，导致 mizar 写入到非预期位置
-//   2. Session 隔离：每个 session 使用独立的 temp 目录，避免多个 mizar
-//      实例互相干扰
+//  1. O_NOFOLLOW：防 symlink 攻击，防止 attacker 在 temp 目录创建 symlink
+//     指向任意文件，导致 mizar 写入到非预期位置
+//  2. Session 隔离：每个 session 使用独立的 temp 目录，避免多个 mizar
+//     实例互相干扰
 //
 // 用法：
 //

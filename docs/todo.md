@@ -32,7 +32,17 @@
 - **说明**：引入 `go.lsp.dev/jsonrpc2 v1.0.1` + `go.lsp.dev/protocol v1.0.1`
 - **参考**：openclaude LSPTool
 
----
+### 4. [x] LSP 客户端实现（LSPTool 当 Agent 工具）
+
+- **文件**：`internal/lsp/client.go`、`internal/lsp/tools.go`
+- **说明**：
+  - 通过 stdio 启动语言服务器（gopls/tsserver），jsonrpc2 通信
+  - 初始化流程：`initialize` → `initialized` 通知
+  - 文档通知：`DidOpen` / `DidChange` / `DidClose`
+  - 查询方法：`Diagnostics`（诊断）/ `Definition`（定义跳转）/ `References`（引用查找）/ `Completion`（补全）
+  - 工具注册：`lsp_diagnostics` / `lsp_definition` / `lsp_references` / `lsp_completion`
+- **接入点**：`cmd/mizar/main.go` → `--lsp <binary>` 启动 + `pm.RegisterBuiltin()` 注册工具；未配置时工具优雅降级提示
+- **参考**：openclaude LSPTool
 
 ### 7. [x] 顺序执行包装器 sequential
 
@@ -64,17 +74,24 @@
 - **说明**：`DumpToTemp(content)` 安全落盘（O_EXCL 防 symlink + session 隔离 + 5GB 上限）；`TaskOutputPath(projectRoot, taskId)` 生成任务输出路径；`SetTaskOutputDir/GetTaskOutputDir` 配置任务输出目录
 - **参考**：openclaude `diskOutput.ts`
 
+### 12. [x] 结构化操作跟踪（QueryLifecycleOperationTracker）
+
+- **文件**：`internal/utils/lifecycle.go`
+- **说明**：`QueryLifecycle` 查询级生命周期跟踪：`GenerateQueryID()` / `BeginStep()` / `BeginOperation`/`EndOperation` / `Snapshot()` / `FormatLog()` / `ContextWithQuery`（context 注入）
+- **参考**：openclaude `QueryLifecycleOperationTracker`
+- **工作量估算**：~120 行
+- **状态**：✅ 基础工具完成；❌ 尚未接入 `internal/agent/loop.go`（接线为后续项）
+
+### 13. [x] RepoMap（文件依赖关系图）
+
+- **文件**：`internal/repo/repo_map.go`
+- **说明**：`Build(root)` 遍历生成文件级仓库地图（目录/文件/语言/大小）；`Render(maxFiles)` 生成可读文本，按目录分组 + 超限截断
+- **参考**：openclaude `RepoMapTool`
+- **状态**：✅ 完成
+
 ---
 
 ## 🔧 进行中
-
-### 4. [ ] LSP 客户端实现（LSPTool 当 Agent 工具）
-
-- **目标**：`internal/lsp/client.go` — 连接 gopls/tsserver，当 Agent 可调用的工具
-- **功能**：诊断查询、跳转定义、查找引用、代码动作
-- **依赖**：`go.lsp.dev/jsonrpc2` + `go.lsp.dev/protocol`（已引入）
-- **工作量估算**：~200 行
-- **优先级**：P1
 
 ### 5. [ ] LSP 服务器实现（mizar 自身作为 LSP server）
 
@@ -89,53 +106,10 @@
 - **工作量估算**：~50 行
 - **优先级**：P2
 
----
+### 12b. [ ] 结构化操作跟踪接入 Agent 循环
 
-## 📋 待做
-
-### 12. [ ] 结构化操作跟踪（QueryLifecycleOperationTracker）
-
-- **目标**：`internal/utils/sequential.go` — 将并发调用串行化（防文件写竞争）
-- **参考**：openclaude `sequential.ts`
-- **工作量估算**：~40 行
-
-### 8. [ ] RaceAbort + 并发 map
-
-- **目标**：`internal/utils/boundedasync.go` — `RaceAbort()` + `MapWithConcurrency()` + `ThrowIfAborted()`
-- **参考**：openclaude `boundedAsync.ts`
-- **工作量估算**：~60 行
-
-### 9. [ ] CircularBuffer 泛型工具
-
-- **目标**：`internal/utils/circularbuffer.go` — 固定容量环形缓冲，`Add()`/`GetRecent(n)`/`ToArray()`
-- **参考**：openclaude `CircularBuffer.ts`
+- **目标**：`internal/agent/loop.go` — 将 `utils.QueryLifecycle` 接入 `Agent.Run()`，queryId/step 写进 HookContext 与日志
 - **工作量估算**：~30 行
-
-### 10. [ ] 稳定 JSON 序列化
-
-- **目标**：`internal/utils/stablejson.go` — `StableJSON(v)` 对 map key 排序后序列化
-- **参考**：openclaude `stableStringifyJson`
-- **工作量估算**：~20 行
-
-### 11. [ ] 安全磁盘任务输出（O_NOFOLLOW + session 隔离）
-
-- **目标**：`internal/builtins/files.go` → `dumpToTemp()` 改进
-- **说明**：改用项目 temp 目录 + `O_NOFOLLOW` 防 symlink 攻击
-- **参考**：openclaude `diskOutput.ts`
-- **工作量估算**：~20 行
-
-### 12. [ ] 结构化操作跟踪（QueryLifecycleOperationTracker）
-
-- **目标**：`internal/agent/loop.go` 增强 — queryId/step/source 结构化日志
-- **参考**：openclaude `QueryLifecycleOperationTracker`
-- **工作量估算**：~50 行
-
-### 13. [ ] RepoMap（文件依赖关系图）
-
-- **目标**：`internal/repo/repo_map.go` — 生成文件级别 repo 地图
-- **参考**：openclaude `RepoMapTool`
-- **工作量估算**：~150 行
-- **优先级**：P3
 
 ### 14. [ ] 弱模型宽容循环调优
 
@@ -147,7 +121,6 @@
 ## 📊 统计
 
 - **总项**：14
-- **已完成**：8
-- **进行中**：3
-- **待做**：8
-- **覆盖率**：57%
+- **已完成**：11（1-4、7-13）
+- **进行中**：3（5、6、14）
+- **完成度**：79%

@@ -13,8 +13,8 @@ package utils
 // 所有入队调用按 FIFO 顺序执行，即使并发调用也不会有竞态。
 func Sequential[T any](fn func(T) (string, error)) func(T) (string, error) {
 	type item struct {
-		arg    T
-		ch     chan result[T]
+		arg T
+		ch  chan result[T]
 	}
 	type result[T any] struct {
 		val string

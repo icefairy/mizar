@@ -18,6 +18,7 @@ import (
 	"mizar/internal/context"
 	"mizar/internal/engine"
 	"mizar/internal/llm"
+	"mizar/internal/lsp"
 	"mizar/internal/plugins"
 	"mizar/internal/server"
 	"mizar/internal/session"
@@ -42,6 +43,7 @@ func main() {
 		task    = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer = flag.Bool("version", false, "显示版本")
 		initWiz = flag.Bool("init", false, "运行初始化向导（配置供应商/模型）")
+		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
 		// Server 模式（持久运行 daemon）
 		serve      = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
 		addr       = flag.String("addr", ":3003", "Server 监听地址")
@@ -198,6 +200,10 @@ func main() {
 	for _, t := range builtins.All(skAbs) {
 		pm.RegisterBuiltin(t)
 	}
+	for _, t := range lsp.All() {
+		pm.RegisterBuiltin(t)
+	}
+	lsp.Init(*lspBinary)
 	loaded, failed := pm.LoadAll()
 	for _, f := range loaded {
 		log.Printf("插件加载: %s", f)
