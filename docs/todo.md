@@ -34,6 +34,38 @@
 
 ---
 
+### 7. [x] 顺序执行包装器 sequential
+
+- **文件**：`internal/utils/sequential.go`
+- **说明**：`Sequential(fn)` 将并发调用的异步函数包装为串行执行，按入队 FIFO 顺序处理，防文件写竞争
+- **参考**：openclaude `sequential.ts`
+
+### 8. [x] RaceAbort + 并发 map
+
+- **文件**：`internal/utils/boundedasync.go`
+- **说明**：`RaceAbort(ctx, fn)` ctx 取消/超时与协程完成的竞争；`MapWithConcurrency(ctx, items, concurrency, mapper)` 带并发控制+取消+fail-fast 的 map；`ThrowIfAborted(ctx)` 同步检查点
+- **参考**：openclaude `boundedAsync.ts`
+
+### 9. [x] CircularBuffer 泛型工具
+
+- **文件**：`internal/utils/circularbuffer.go`
+- **说明**：`CircularBuffer[T]` 泛型环形缓冲，固定容量，`Add`/`AddAll`/`GetRecent(n)`/`ToArray`/`Peek`/`Clear`/`Length`/`Capacity`
+- **参考**：openclaude `CircularBuffer.ts`
+
+### 10. [x] 稳定 JSON 序列化
+
+- **文件**：`internal/utils/stablejson.go`
+- **说明**：`StableJSON(v)` 对 map 类型按 key 字典序排序后序列化，确保相同内容产出相同 JSON，可用于哈希/缓存
+- **参考**：openclaude `stableStringifyJson`
+
+### 11. [x] 安全磁盘任务输出（O_EXCL + session 隔离）
+
+- **文件**：`internal/utils/safedisk.go`
+- **说明**：`DumpToTemp(content)` 安全落盘（O_EXCL 防 symlink + session 隔离 + 5GB 上限）；`TaskOutputPath(projectRoot, taskId)` 生成任务输出路径；`SetTaskOutputDir/GetTaskOutputDir` 配置任务输出目录
+- **参考**：openclaude `diskOutput.ts`
+
+---
+
 ## 🔧 进行中
 
 ### 4. [ ] LSP 客户端实现（LSPTool 当 Agent 工具）
@@ -61,7 +93,7 @@
 
 ## 📋 待做
 
-### 7. [ ] 顺序执行包装器 sequential
+### 12. [ ] 结构化操作跟踪（QueryLifecycleOperationTracker）
 
 - **目标**：`internal/utils/sequential.go` — 将并发调用串行化（防文件写竞争）
 - **参考**：openclaude `sequential.ts`
@@ -115,7 +147,7 @@
 ## 📊 统计
 
 - **总项**：14
-- **已完成**：3
+- **已完成**：8
 - **进行中**：3
 - **待做**：8
-- **覆盖率**：21%
+- **覆盖率**：57%
