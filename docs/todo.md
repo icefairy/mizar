@@ -93,28 +93,13 @@
 
 ## 🔧 进行中
 
-### 5. [ ] LSP 服务器实现（mizar 自身作为 LSP server）
+### 6. [ ] LSP 插件扩展（插件通过 JS 注册 Provider）
 
-- **目标**：`internal/lsp/server.go` — mizar 作为 LSP 服务器，支持插件注册自定义 provider
-- **功能**：initialize/initialized/shutdown/textDocument/completion/diagnostics
-- **工作量估算**：~300 行
-- **优先级**：P1
-
-### 6. [ ] LSP 插件扩展
-
-- **目标**：`internal/lsp/providers/provider.go` — 插件通过 `lsp.RegisterDiagnosticProvider()` 注册自定义能力
+- **目标**：`internal/lsp/providers/provider.go` — 插件通过 `lsp.RegisterDiagnosticProvider()` 注册自定义能力（JS 插件接口）
+- **现状**：`internal/lsp/server.go` 已有 `RegisterProvider` Go 接口 + `GlobalServer` 全局实例
+- **剩余**：JS 插件层暴露 `diagnosticProviders`/`completionProviders` 注册点
 - **工作量估算**：~50 行
 - **优先级**：P2
-
-### 12b. [ ] 结构化操作跟踪接入 Agent 循环
-
-- **目标**：`internal/agent/loop.go` — 将 `utils.QueryLifecycle` 接入 `Agent.Run()`，queryId/step 写进 HookContext 与日志
-- **工作量估算**：~30 行
-
-### 14. [ ] 弱模型宽容循环调优
-
-- **目标**：错误修复、逐步降级策略
-- **工作量估算**：~100 行
 
 ---
 
