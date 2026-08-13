@@ -120,7 +120,8 @@ vm.Set("http_get", httpGet)         // 薄封装：http_request("GET", url, "", 
 vm.Set("http_post", httpPost)       // 薄封装：http_request("POST", url, body, "")
 vm.Set("json_decode", jsonDecode) // JSON 解析
 vm.Set("json_encode", jsonEncode)
-vm.Set("fs_read", fsRead)         // 文件读写（限定在项目目录内）
+vm.Set("fs_read", fsRead)         // 文件读取（10MB 上限，超限拒绝）
+vm.Set("fs_read_range", fsReadRange) // 有界 seek 读：fs_read_range(path, offset, length) → [content, totalSize, error]，单次 4MB，大文件循环分片
 vm.Set("fs_write", fsWrite)
 vm.Set("fs_list", fsList)
 vm.Set("shell_exec", shellExec)   // 执行命令（白名单 + 超时 + 输出上限）

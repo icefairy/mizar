@@ -3,6 +3,8 @@ package engine
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"time"
 
 	"github.com/dop251/goja"
@@ -26,6 +28,10 @@ type HostFuncs struct {
 	JSONDecode func(s string) (map[string]any, error)
 	JSONEncode func(v any) (string, error)
 	FSRead     func(path string) (string, error)
+	// FSReadRange 有界读取（seek 语义）：从 offset 读最多 length 字节，
+	// 返回 [content, totalSize, error]。插件读大文件时用循环分片，
+	// 替代 fs_read 的全量读（10MB 上限）。
+	FSReadRange func(path string, offset, length int64) (string, int64, error)
 	FSWrite    func(path, content string) error
 	FSList     func(dir string) ([]string, error)
 	ShellExec  func(cmd string) (string, error)
@@ -81,6 +87,9 @@ func (e *Engine) registerHostFuncs() error {
 	if h.FSRead != nil {
 		reg("fs_read", h.FSRead)
 	}
+	if h.FSReadRange != nil {
+		reg("fs_read_range", h.FSReadRange)
+	}
 	if h.FSWrite != nil {
 		reg("fs_write", h.FSWrite)
 	}
@@ -103,6 +112,40 @@ func (e *Engine) registerHostFuncs() error {
 		reg("ws_emit", h.WSEmit)
 	}
 	return nil
+}
+
+// FSReadRangeFn 是 fs_read_range 宿主函数的默认实现（seek 语义，单次 4MB）。
+// 返回 [content, totalSize, error]。插件读大文件时用循环分片。
+func FSReadRangeFn(path string, offset, length int64) (string, int64, error) {
+	const maxChunk = 4 << 20
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	size := fi.Size()
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > size {
+		offset = size
+	}
+	if length <= 0 || length > maxChunk {
+		length = maxChunk
+	}
+	if offset+length > size {
+		length = size - offset
+	}
+	buf := make([]byte, length)
+	n, err := f.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return "", size, err
+	}
+	return string(buf[:n]), size, nil
 }
 
 // RunScript 执行一段 JS 源码（已编译产物）。

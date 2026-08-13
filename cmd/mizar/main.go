@@ -98,11 +98,14 @@ func main() {
 				return "", err
 			}
 			if fi.Size() > 10*1024*1024 {
-				return "", fmt.Errorf("FSRead: %s is %.1fMB (limit 10MB)", p, float64(fi.Size())/1024/1024)
+				return "", fmt.Errorf("FSRead: %s is %.1fMB (limit 10MB); use fs_read_range for seek reads", p, float64(fi.Size())/1024/1024)
 			}
 			b, err := os.ReadFile(p)
 			return string(b), err
 		},
+		// FSReadRange：有界 seek 读取。返回 [content, totalSize, error]。
+		// 单次最多 4MB，大文件插件用循环分片读。
+		FSReadRange: engine.FSReadRangeFn,
 		FSWrite: func(p, c string) error { return os.WriteFile(p, []byte(c), 0o644) },
 		FSList:  func(dir string) ([]string, error) {
 			es, e := os.ReadDir(dir)
