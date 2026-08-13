@@ -21,6 +21,7 @@ func mockHost() *HostFuncs {
 			return "mock-llm-reply", nil
 		},
 		Log: func(msg string) {},
+		DBQuery: DBQueryFn,
 	}
 }
 

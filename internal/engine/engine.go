@@ -51,6 +51,9 @@ type HostFuncs struct {
 	WSEmit func(event, dataJSON string)
 	// WSClient 插件 WS 客户端桥（连外部 WS 服务，如飞书长连接）。
 	WSClient *WSClientBridge
+	// DBQuery 内置数据库查询：db_query(driver, dsn, sql) -> JSON。
+	// driver 白名单: sqlite3 / mysql / postgres。nil 时不注册该函数。
+	DBQuery func(driver, dsn, sql string) (string, error)
 }
 
 // cjsShim 让 esbuild 的 CommonJS 输出能在 goja 中运行。
@@ -125,6 +128,9 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.WSEmit != nil {
 		reg("ws_emit", h.WSEmit)
+	}
+	if h.DBQuery != nil {
+		reg("db_query", h.DBQuery)
 	}
 	return nil
 }

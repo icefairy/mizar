@@ -134,6 +134,8 @@ func main() {
 			return out, nil
 		},
 		Log: func(msg string) { log.Print(msg) },
+		// DBQuery：内置数据库查询（sqlite3/mysql/postgres），插件 db_query() 直达
+		DBQuery: engine.DBQueryFn,
 	}
 	// 插件 HTTP 能力：统一 http_request(method,url,body,headers) + 薄封装 http_get/http_post
 	httpDo := func(method, url, body, headersJSON string) (string, error) {
