@@ -109,6 +109,7 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 //   - prefix = "src/"   → 列出当前工作目录/src/ 下的所有条目
 //   - prefix = "./src"  → 同上（相对路径）
 //   - prefix = "/etc/"  → 列出 /etc/ 下的所有条目
+//
 // 文件夹返回时带 / 后缀。返回最多 100 个候选。
 func completeAtPath(prefix string) []string {
 	prefix = strings.TrimSpace(prefix)
