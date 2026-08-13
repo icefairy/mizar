@@ -112,21 +112,24 @@
 
 ---
 
-## 🔧 进行中
+## ✅ 全部完成（14/14）
 
-### 6. [ ] LSP 插件扩展（JS 插件层注册 Provider）
+### 6. [x] LSP 插件扩展（JS 插件层注册 Provider）
 
-- **目标**：`internal/lsp/providers/provider.go` — 插件通过 JS 注册自定义 diagnostic/completion Provider
-- **现状**：`internal/lsp/server.go` 已有 `RegisterProvider` Go 接口 + `GlobalServer` 全局实例
-- **剩余**：JS 插件层暴露 `diagnosticProviders`/`completionProviders` 注册点，让插件可用 JS 定义能力
-- **工作量估算**：~50 行
-- **优先级**：P2
+- **文件**：`internal/engine/engine.go`、`internal/lsp/pluginbridge.go`、`internal/lsp/server.go`、`internal/plugins/loader.go`、`extensions/lsp_sample.ts`
+- **说明**：
+  - JS 插件通过 `lsp_register_diagnostic(name, fn)` / `lsp_register_completion(name, fn)` 注册自定义 Provider
+  - 桥接层把 JS 回调的 JSON（诊断/补全数组）转换为 protocol 类型
+  - pending 队列：server 初始化前注册的 provider 自动暂存，创建后 drain
+  - `Unregister` 按名移除（插件热重载时清理旧 provider，防旧 VM 悬挂）
+  - 插件管理器跟踪每插件注册名，热重载时自动清理；允许 LSP-only 插件加载
+  - 测试：`internal/lsp/pluginbridge_test.go`（7 个用例：解析/端到端/错误路径）
+- **优先级**：P2 → ✅
 
 ---
 
 ## 📊 统计
 
 - **总项**：14
-- **已完成**：13（1-5、7-14）
-- **进行中**：1（6）
-- **完成度**：93%
+- **已完成**：14（1-14 全部完成）
+- **完成度**：100%
