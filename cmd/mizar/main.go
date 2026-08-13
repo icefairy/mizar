@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	ctxpkg "context"
+
 	"mizar/internal/agent"
 	"mizar/internal/builtins"
 	"mizar/internal/config"
@@ -43,7 +45,8 @@ func main() {
 		task      = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer   = flag.Bool("version", false, "显示版本")
 		initWiz   = flag.Bool("init", false, "运行初始化向导（配置供应商/模型）")
-		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
+		lspBinary  = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
+		lspServer  = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
 		// Server 模式（持久运行 daemon）
 		serve  = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
 		addr   = flag.String("addr", ":3003", "Server 监听地址")
@@ -56,6 +59,16 @@ func main() {
 
 	if *showVer {
 		fmt.Println("mizar", version)
+		return
+	}
+
+	// LSP server 模式：通过 stdio 提供 LSP 能力
+	if *lspServer {
+		log.Print("LSP server 模式启动")
+		ctx := ctxpkg.Background()
+		if err := lsp.ServeStdio(ctx, lsp.ProviderConfig{}); err != nil {
+			log.Fatalf("LSP server 退出: %v", err)
+		}
 		return
 	}
 
