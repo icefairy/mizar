@@ -243,7 +243,7 @@ func (s *Server) RemoveProvider(name string) {
 // --- 全局服务器实例（供插件注册使用） ---
 
 var (
-	globalServer  *Server
+	globalServer   *Server
 	globalServerMu sync.Mutex
 
 	// pending 是在 server 初始化前注册的 provider，SetGlobalServer 时自动 drain。

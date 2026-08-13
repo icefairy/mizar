@@ -26,17 +26,17 @@ type Tool struct {
 
 // Manager 管理插件加载、热重载与工具注册。
 type Manager struct {
-	mu       sync.RWMutex
-	dir      string
-	host     *engine.HostFuncs
-	engines  map[string]*engine.Engine // 每个插件独立引擎（隔离）
-	tools    map[string]Tool
-	commands map[string]Command // 斜杠命令（command_* 导出）
+	mu         sync.RWMutex
+	dir        string
+	host       *engine.HostFuncs
+	engines    map[string]*engine.Engine // 每个插件独立引擎（隔离）
+	tools      map[string]Tool
+	commands   map[string]Command   // 斜杠命令（command_* 导出）
 	rpcMethods map[string]RPCMethod // 自定义 JSON-RPC 方法（rpc_* 导出）
-	modTime  map[string]time.Time
-	maxExec  time.Duration // 单次插件执行超时
-	onTool   func(name string) // 工具调用回调（技能统计用）
-	disabled map[string]bool // 禁用的工具（不注册、不可调用，不影响提示词）
+	modTime    map[string]time.Time
+	maxExec    time.Duration     // 单次插件执行超时
+	onTool     func(name string) // 工具调用回调（技能统计用）
+	disabled   map[string]bool   // 禁用的工具（不注册、不可调用，不影响提示词）
 
 	// LSP 提供者注册跟踪（按文件名，热重载时清理用）
 	lspDiagNames map[string][]string // filename → registered diagnostic provider names
@@ -50,15 +50,15 @@ type Manager struct {
 // NewManager 创建插件管理器。
 func NewManager(dir string, host *engine.HostFuncs) *Manager {
 	m := &Manager{
-		dir:      dir,
-		host:     host,
-		engines:  make(map[string]*engine.Engine),
-		tools:    make(map[string]Tool),
-		commands: make(map[string]Command),
-		rpcMethods: make(map[string]RPCMethod),
-		modTime:    make(map[string]time.Time),
-		disabled:   make(map[string]bool),
-		maxExec:    30 * time.Second,
+		dir:          dir,
+		host:         host,
+		engines:      make(map[string]*engine.Engine),
+		tools:        make(map[string]Tool),
+		commands:     make(map[string]Command),
+		rpcMethods:   make(map[string]RPCMethod),
+		modTime:      make(map[string]time.Time),
+		disabled:     make(map[string]bool),
+		maxExec:      30 * time.Second,
 		lspDiagNames: make(map[string][]string),
 		lspCompNames: make(map[string][]string),
 	}

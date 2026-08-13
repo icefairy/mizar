@@ -16,8 +16,9 @@ import (
 // jsDiagnosticProvider 包装 JS 回调为 DiagnosticProvider。
 //
 // JS 插件签名：lsp_register_diagnostic(name, fn)
-//   fn(uri string) => jsonString
-//   jsonString: [{"startLine":0,"startChar":0,"endLine":0,"endChar":5,"severity":1,"message":"...","source":"myplugin"}]
+//
+//	fn(uri string) => jsonString
+//	jsonString: [{"startLine":0,"startChar":0,"endLine":0,"endChar":5,"severity":1,"message":"...","source":"myplugin"}]
 //
 // severity: 1=ERROR, 2=WARN, 3=INFO, 4=HINT
 type jsDiagnosticProvider struct {
@@ -42,12 +43,14 @@ func (p *jsDiagnosticProvider) Name() string { return p.name }
 // jsCompletionProvider 包装 JS 回调为 CompletionProvider。
 //
 // JS 插件签名：lsp_register_completion(name, fn)
-//   fn(uri string, line int, col int) => jsonString
-//   jsonString: [{"label":"foo","kind":3,"detail":"...","insertText":"..."}]
+//
+//	fn(uri string, line int, col int) => jsonString
+//	jsonString: [{"label":"foo","kind":3,"detail":"...","insertText":"..."}]
 //
 // kind: 1=text,2=method,3=function,4=constructor,5=field,6=variable,
-//       7=class,8=interface,9=module,10=property,11=unit,12=value,
-//       13=enum,14=keyword,15=snippet
+//
+//	7=class,8=interface,9=module,10=property,11=unit,12=value,
+//	13=enum,14=keyword,15=snippet
 type jsCompletionProvider struct {
 	name string
 	fn   func(uri string, line, col int) string // JS 回调
@@ -115,16 +118,16 @@ func parseDiagnostics(raw string) ([]protocol.Diagnostic, error) {
 		case 4:
 			severity = protocol.DiagnosticSeverityHint
 		}
-			source := protocol.Optional[string]{}
-			if d.Source != "" {
-				source = protocol.NewOptional[string](d.Source)
-			}
-			out = append(out, protocol.Diagnostic{
-				Range:    protocol.Range{Start: protocol.Position{Line: uint32(d.StartLine), Character: uint32(d.StartChar)}, End: protocol.Position{Line: uint32(d.EndLine), Character: uint32(d.EndChar)}},
-				Severity: severity,
-				Message:  protocol.String(d.Message),
-				Source:   source,
-			})
+		source := protocol.Optional[string]{}
+		if d.Source != "" {
+			source = protocol.NewOptional[string](d.Source)
+		}
+		out = append(out, protocol.Diagnostic{
+			Range:    protocol.Range{Start: protocol.Position{Line: uint32(d.StartLine), Character: uint32(d.StartChar)}, End: protocol.Position{Line: uint32(d.EndLine), Character: uint32(d.EndChar)}},
+			Severity: severity,
+			Message:  protocol.String(d.Message),
+			Source:   source,
+		})
 	}
 	return out, nil
 }

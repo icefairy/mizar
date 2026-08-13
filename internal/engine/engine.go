@@ -20,21 +20,21 @@ type Engine struct {
 
 // HostFuncs 是宿主注册给 JS 插件的函数集（Go 能力）。
 type HostFuncs struct {
-	HTTPGet    func(url string) (string, error)
-	HTTPPost   func(url, body string) (string, error)
+	HTTPGet  func(url string) (string, error)
+	HTTPPost func(url, body string) (string, error)
 	// HTTPRequest 统一 HTTP 请求：method 任意（GET/POST/PUT/DELETE/PATCH...），
 	// headersJSON 形如 {"Authorization":"Bearer xxx","X-Custom":"v"}（可空）。
 	HTTPRequest func(method, url, body, headersJSON string) (string, error)
-	JSONDecode func(s string) (map[string]any, error)
-	JSONEncode func(v any) (string, error)
-	FSRead     func(path string) (string, error)
+	JSONDecode  func(s string) (map[string]any, error)
+	JSONEncode  func(v any) (string, error)
+	FSRead      func(path string) (string, error)
 	// FSReadRange 有界读取（seek 语义）：从 offset 读最多 length 字节，
 	// 返回 [content, totalSize, error]。插件读大文件时用循环分片，
 	// 替代 fs_read 的全量读（10MB 上限）。
 	FSReadRange func(path string, offset, length int64) (string, int64, error)
-	FSWrite    func(path, content string) error
-	FSList     func(dir string) ([]string, error)
-	ShellExec  func(cmd string) (string, error)
+	FSWrite     func(path, content string) error
+	FSList      func(dir string) ([]string, error)
+	ShellExec   func(cmd string) (string, error)
 	// LSPUnregisterDiagnostic 插件热重载时按名字移除诊断提供者
 	LSPUnregisterDiagnostic func(name string)
 	// LSPUnregisterCompletion 插件热重载时按名字移除补全提供者
@@ -44,9 +44,9 @@ type HostFuncs struct {
 	// LSPRegisterCompletion 注册 LSP 补全提供者（JS 插件用）。
 	// name: 提供者名称；fn: (uri string, line, col int) => jsonString（补全数组）
 	LSPRegisterCompletion func(name string, fn func(uri string, line, col int) string) error
-	LLMChat  func(messagesJSON string) (string, error)
-	Log        func(msg string)
-	Sleep      func(ms int)
+	LLMChat               func(messagesJSON string) (string, error)
+	Log                   func(msg string)
+	Sleep                 func(ms int)
 	// WSEmit 向所有 WS 客户端广播自定义事件（event + JSON 数据）。
 	WSEmit func(event, dataJSON string)
 	// WSClient 插件 WS 客户端桥（连外部 WS 服务，如飞书长连接）。
@@ -234,13 +234,13 @@ func (e *Engine) Close() {
 // CompileTS 用 esbuild 把 TS 源码编译为 ES2018 JS（goja 兼容目标）。
 func CompileTS(name, src string) (string, error) {
 	result := api.Transform(src, api.TransformOptions{
-		Loader:            api.LoaderTS,
-		Target:            api.ES2018,
-		Format:            api.FormatCommonJS,
-		Sourcefile:        name,
-		MinifyWhitespace:  false,
-		LegalComments:     api.LegalCommentsNone,
-		LogLevel:          api.LogLevelSilent,
+		Loader:           api.LoaderTS,
+		Target:           api.ES2018,
+		Format:           api.FormatCommonJS,
+		Sourcefile:       name,
+		MinifyWhitespace: false,
+		LegalComments:    api.LegalCommentsNone,
+		LogLevel:         api.LogLevelSilent,
 	})
 	if len(result.Errors) > 0 {
 		msgs := make([]string, 0, len(result.Errors))
