@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"mizar/internal/plugins"
@@ -54,6 +55,8 @@ func toolBash() plugins.Tool {
 				return "", fmt.Errorf("bash: args {command} required")
 			}
 			cmd := exec.Command("bash", "-c", p.Command)
+			// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			var out strings.Builder
 			cmd.Stdout = &out
 			cmd.Stderr = &out
@@ -66,7 +69,7 @@ func toolBash() plugins.Tool {
 				select {
 				case <-done:
 				case <-time.After(time.Duration(p.Timeout) * time.Second):
-					_ = cmd.Process.Kill()
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 					return "", fmt.Errorf("bash: timeout after %ds", p.Timeout)
 				}
 			} else {

@@ -115,25 +115,39 @@ func toolEdit() plugins.Tool {
 			if len(edits) == 0 {
 				return "", fmt.Errorf("edit: oldText or edits required")
 			}
-			applied := 0
+			// 从后往前应用，防前面 edit 改变 offset 导致后面错配（对齐 pi 的多编辑倒序）
+			type replacement struct {
+				start   int
+				end     int
+				newText string
+			}
+			var reps []replacement
 			for _, e := range edits {
 				if e.OldText == "" {
 					continue
+				}
+				idx := strings.Index(content, e.OldText)
+				if idx < 0 {
+					return "", fmt.Errorf("edit: oldText %q not found", truncate(e.OldText, 50))
 				}
 				count := strings.Count(content, e.OldText)
 				if count != 1 {
 					return "", fmt.Errorf("edit: oldText %q appears %d times (must be unique)", truncate(e.OldText, 50), count)
 				}
-				content = strings.Replace(content, e.OldText, e.NewText, 1)
-				applied++
+				reps = append(reps, replacement{start: idx, end: idx + len(e.OldText), newText: e.NewText})
 			}
-			if applied == 0 {
+			if len(reps) == 0 {
 				return "", fmt.Errorf("edit: no edits applied")
+			}
+			// 按位置降序替换，避免偏移错乱
+			sort.Slice(reps, func(i, j int) bool { return reps[i].start > reps[j].start })
+			for _, r := range reps {
+				content = content[:r.start] + r.newText + content[r.end:]
 			}
 			if err := os.WriteFile(p.Path, []byte(content), 0o644); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("applied %d edit(s) to %s", applied, p.Path), nil
+			return fmt.Sprintf("applied %d edit(s) to %s", len(reps), p.Path), nil
 		},
 	}
 }
