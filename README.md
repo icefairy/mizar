@@ -2,6 +2,8 @@
 
 > 北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 **开阳 (Mizar)** is a minimal, zero-dependency, single-file, self-bootstrapping AI Agent framework.
 
 - **Core**: A single static Go binary (~20-30MB, no runtime deps, no npm, no Python, no Docker)
