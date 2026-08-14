@@ -20,7 +20,7 @@ import (
 type messageRole int
 
 const (
-	msgUser      messageRole = iota
+	msgUser messageRole = iota
 	msgAssistant
 	msgThinking
 	msgError
@@ -56,12 +56,12 @@ type chatMessage struct {
 
 // tuiModel Bubble Tea 主模型。
 type tuiModel struct {
-	agent       *agent.Agent
-	store       *session.Store
-	sessionID   string
-	width       int
-	height      int
-	input       textinput.Model
+	agent        *agent.Agent
+	store        *session.Store
+	sessionID    string
+	width        int
+	height       int
+	input        textinput.Model
 	pendingInput string
 
 	candidates       []string
@@ -72,13 +72,13 @@ type tuiModel struct {
 	viewport viewport.Model
 	renderer *glamour.TermRenderer
 
-	loading  bool
-	spinner  spinner.Model
-	status   string
-	err      error
+	loading    bool
+	spinner    spinner.Model
+	status     string
+	err        error
 	cmdHistory []string
 	historyIdx int
-	quitting bool
+	quitting   bool
 }
 
 func newTuiModel(a *agent.Agent, st *session.Store, sessionID string) tuiModel {
@@ -278,7 +278,11 @@ func (m tuiModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(m.viewport.View())
-	sb.WriteString(fmt.Sprintf("┌─%s┐\n", strings.Repeat("─", m.width-2)))
+	sepLen := m.width - 2
+	if sepLen < 10 {
+		sepLen = 60 // 初始窗口尚未调整时
+	}
+	sb.WriteString(fmt.Sprintf("┌─%s┐\n", strings.Repeat("─", sepLen)))
 
 	if m.showAutocomplete {
 		sb.WriteString("  ")
@@ -302,7 +306,7 @@ func (m tuiModel) View() string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("└─%s┘\n", strings.Repeat("─", m.width-2)))
+	sb.WriteString(fmt.Sprintf("└─%s┘\n", strings.Repeat("─", sepLen)))
 	sb.WriteString("  [Tab=@补全 | Enter=发送 | ↑↓=历史 | /help=命令 | /quit=退出]\n")
 
 	return sb.String()
