@@ -22,7 +22,8 @@ type Config struct {
 	BaseURL       string `json:"base_url"`       // OpenAI 兼容端点，如 http://127.0.0.1:3002/v1
 	APIKey        string `json:"api_key"`        // Bearer token（可选）
 	Model         string `json:"model"`          // 模型名
-	Thinking      bool   `json:"thinking"`       // 思考模式
+	Thinking      bool   `json:"thinking"`       // (deprecated) 旧版思考模式开关，由 ThinkingLevel 替代
+	ThinkingLevel string `json:"thinking_level,omitempty"` // 思考等级：auto/off/low/medium/high（空=auto）
 	ContextWindow int    `json:"context_window"` // 上下文窗口（token）
 	SkillEvolution *bool `json:"skill_evolution"` // 技能自动沉淀（nil=默认开启）
 	SkillStatsEnabled *bool `json:"skill_stats_enabled"` // 技能使用统计+周报（nil=默认开启）
@@ -60,6 +61,19 @@ func (c *Config) SkillEvolutionEnabled() bool {
 		return true
 	}
 	return *c.SkillEvolution
+}
+
+// ThinkingStr 返回思考等级字符串（空串=auto）
+func (c *Config) ThinkingStr() string {
+	if c.ThinkingLevel == "" {
+		return "auto"
+	}
+	return c.ThinkingLevel
+}
+
+// ThinkingOn 返回思考是否开启（兼容旧 bool 接口）
+func (c *Config) ThinkingOn() bool {
+	return c.ThinkingLevel == "low" || c.ThinkingLevel == "medium" || c.ThinkingLevel == "high"
 }
 
 // ConfigDir 返回配置目录（~/.mizar/），配置文件与全局 AGENTS.md 都放这里。

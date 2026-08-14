@@ -14,15 +14,21 @@ import (
 )
 
 // OpenAI 是 OpenAI 兼容客户端。
+// 思考等级（ThinkingLevel）：
+//   "auto"   — 不传 thinking 参数，由模型决定
+//   "off"    — thinking: {type: "disabled"}
+//   "low"    — thinking: {type: "enabled"}, reasoning_effort: "low"
+//   "medium" — thinking: {type: "enabled"}, reasoning_effort: "medium"
+//   "high"   — thinking: {type: "enabled"}, reasoning_effort: "high"
 type OpenAI struct {
 	BaseURL string // 如 http://127.0.0.1:3002/v1
 	APIKey  string
 	Model   string
 	Client  *http.Client
-	// Thinking 思考模式（deepseek 等模型支持）。
-	// 开启时请求体带 "thinking": {"type":"enabled"}；
-	// 关闭时带 "thinking": {"type":"disabled"} 抑制思考。
-	Thinking *bool
+	// 思考等级（auto/off/low/medium/high），空串等价 auto
+	ThinkingLevel string
+	// 最后一次响应的 token 用量（只读，供 TUI 状态栏展示）
+	lastUsage *agent.Usage
 }
 
 // NewOpenAI 创建客户端。
@@ -41,12 +47,13 @@ type chatMsg struct {
 }
 
 type chatReq struct {
-	Model     string    `json:"model"`
-	Messages  []chatMsg `json:"messages"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
-	Thinking  *struct {
+	Model           string    `json:"model"`
+	Messages        []chatMsg `json:"messages"`
+	MaxTokens       int       `json:"max_tokens,omitempty"`
+	Thinking        *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"` // openai beta: low/medium/high
 }
 
 // SummarizeMessages 生成会话摘要（供 Compactor 使用）。
@@ -112,6 +119,87 @@ type chatResp struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+	Usage *agent.Usage `json:"usage,omitempty"`
+}
+
+// OpenAI 是 OpenAI 兼容客户端。
+
+const (
+	thinkingAuto   = "auto"
+	thinkingOff    = "off"
+	thinkingLow    = "low"
+	thinkingMedium = "medium"
+	thinkingHigh   = "high"
+)
+
+var thinkingOrder = []string{thinkingOff, thinkingLow, thinkingMedium, thinkingHigh, thinkingAuto}
+
+// ThinkingEnabled 返回思考等级描述字符串
+func (o *OpenAI) ThinkingEnabled() string {
+	if o.ThinkingLevel == "" {
+		return thinkingAuto
+	}
+	return o.ThinkingLevel
+}
+
+// SetThinkingLevel 设置思考等级（兼容 main.go 命名）
+func (o *OpenAI) SetThinkingLevel(level string) {
+	o.SetThinking(level)
+}
+
+// SetThinking 设置思考等级（auto/off/low/medium/high）
+func (o *OpenAI) SetThinking(level string) {
+	o.ThinkingLevel = level
+}
+
+// ToggleThinking 在 auto/off/low/medium/high 之间循环切换
+func (o *OpenAI) ToggleThinking() string {
+	for i, l := range thinkingOrder {
+		if o.ThinkingLevel == l {
+			idx := (i + 1) % len(thinkingOrder)
+			o.ThinkingLevel = thinkingOrder[idx]
+			return o.ThinkingLevel
+		}
+	}
+	o.ThinkingLevel = thinkingLow
+	return o.ThinkingLevel
+}
+
+// HasThinkingHeader 返回是否应当发送 thinking 请求头
+func (o *OpenAI) HasThinkingHeader() (bool, string) {
+	// nil/auto = 不传；off = disabled；low/medium/high = enabled + reasoning_effort
+	switch o.ThinkingLevel {
+	case "":
+		return false, ""
+	case thinkingOff:
+		return true, "disabled"
+	case thinkingLow, thinkingMedium, thinkingHigh:
+		return true, "enabled"
+	case thinkingAuto:
+		return false, ""
+	}
+	return false, ""
+}
+
+// ReasoningEffort 返回 reasoning_effort 值（仅 enabled 时返回）
+func (o *OpenAI) ReasoningEffort() string {
+	send, typ := o.HasThinkingHeader()
+	if send && typ == "enabled" {
+		switch o.ThinkingLevel {
+		case thinkingLow:
+			return "low"
+		case thinkingMedium:
+			return "medium"
+		case thinkingHigh:
+			return "high"
+		}
+	}
+	return ""
+}
+
+// LastUsage 返回最后一次响应的 token 用量
+func (o *OpenAI) LastUsage() *agent.Usage {
+	return o.lastUsage
 }
 
 // Chat 实现 agent.LLM 接口。
@@ -120,15 +208,14 @@ func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 	for _, m := range messages {
 		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
 	}
-	// 思考模式：Thinking 非 nil 时透传 thinking 参数（enabled/disabled）
-	if c.Thinking != nil {
-		t := "disabled"
-		if *c.Thinking {
-			t = "enabled"
-		}
+	// 思考模式：根据 ThinkingLevel 设置 thinking + reasoning_effort
+	if send, typ := c.HasThinkingHeader(); send {
 		req.Thinking = &struct {
 			Type string `json:"type"`
-		}{Type: t}
+		}{Type: typ}
+		if effort := c.ReasoningEffort(); effort != "" {
+			req.ReasoningEffort = effort
+		}
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -161,6 +248,7 @@ func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("llm: no choices")
 	}
+	c.lastUsage = out.Usage // 记录用量供 TUI 展示
 	return out.Choices[0].Message.Content, nil
 }
 

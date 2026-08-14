@@ -36,7 +36,43 @@ var (
 	styleSys  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styleSep  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styleHelp = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleStat = lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // 状态栏紫色
+	styleStatOff = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // 关闭状态灰色
 )
+
+// =============================================================================
+// 统计
+// =============================================================================
+
+type tuiStats struct {
+	CumulativePromptTokens    int
+	CumulativeCompletionTokens int
+	CumulativeTotalTokens     int
+	CumulativeCachedTokens    int
+	LastPromptTokens          int
+	LastCompletionTokens      int
+	LastResponseDuration      float64
+	LastSpeedTokensPerSec     float64
+	RequestStartTime          time.Time
+	ThinkingLevel             string
+	ModelName                 string
+}
+
+func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
+	if u == nil {
+		return
+	}
+	s.CumulativePromptTokens += u.PromptTokens
+	s.CumulativeCompletionTokens += u.CompletionTokens
+	s.CumulativeTotalTokens += u.TotalTokens
+	s.CumulativeCachedTokens += u.CachedTokens
+	s.LastPromptTokens = u.PromptTokens
+	s.LastCompletionTokens = u.CompletionTokens
+	s.LastResponseDuration = dur.Seconds()
+	if u.CompletionTokens > 0 && dur.Seconds() > 0 {
+		s.LastSpeedTokensPerSec = float64(u.CompletionTokens) / dur.Seconds()
+	}
+}
 
 // =============================================================================
 // 模型
@@ -52,6 +88,7 @@ type tuiModel struct {
 	height    int
 	loading   bool
 	status    string
+	stats     tuiStats
 	renderer  *glamour.TermRenderer
 }
 
@@ -75,9 +112,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		renderer:  renderer,
 		lines: []chatLine{
 			{
-				role: "system",
+				role:    "system",
 				content: banner(),
-				ts: time.Now(),
+				ts:      time.Now(),
 			},
 		},
 		status: fmt.Sprintf("model=%s", a.Model()),
@@ -120,7 +157,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if out != "" {
 						m.lines = append(m.lines, chatLine{role: "bot", content: out, ts: time.Now()})
 					}
-					m.status = fmt.Sprintf("model=%s", m.agent.Model())
+					// 更新思考等级状态
+					if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+						m.stats.ThinkingLevel = ut.ThinkingEnabled()
+					}
 					return m, nil
 				}
 			}
@@ -129,9 +169,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 
-			// 普通消息
+			// 普通消息：记录开始时间
 			m.lines = append(m.lines, chatLine{role: "user", content: s, ts: time.Now()})
 			m.loading = true
+			m.stats.RequestStartTime = time.Now()
 
 			done := make(chan doneMsg, 1)
 			go func() {
@@ -179,10 +220,34 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Ctrl+T 切换思考等级
+		if msg.Type == tea.KeyCtrlT {
+			if toggle, ok := m.agent.LLM.(interface{ ToggleThinking() string }); ok {
+				newLevel := toggle.ToggleThinking()
+				m.stats.ThinkingLevel = newLevel
+				m.lines = append(m.lines, chatLine{role: "err", content: "思考等级已切换: " + newLevel, ts: time.Now()})
+			}
+			return m, nil
+		}
+
 		m.input, _ = m.input.Update(msg)
 
 	case doneMsg:
 		m.loading = false
+		elapsed := time.Since(m.stats.RequestStartTime)
+
+		// 从 LLM 获取用量
+		if ut, ok := m.agent.LLM.(interface{ LastUsage() *agent.Usage }); ok {
+			if u := ut.LastUsage(); u != nil {
+				m.stats.AddUsage(u, elapsed)
+			}
+		}
+		// 更新思考等级状态
+		if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+			m.stats.ThinkingLevel = ut.ThinkingEnabled()
+		}
+		m.stats.ModelName = m.agent.Model()
+
 		if msg.err != nil {
 			m.lines = append(m.lines, chatLine{role: "err", content: msg.err.Error(), ts: time.Now()})
 		} else {
@@ -210,10 +275,10 @@ func (m *tuiModel) View() string {
 			// banner 直接输出（已含格式化）
 			sb.WriteString(l.content + "\n")
 		case "user":
-			sb.WriteString(styleUser.Render("▶ [" + t + "]") + "\n")
+			sb.WriteString(styleUser.Render("▶ ["+t+"]") + "\n")
 			sb.WriteString(l.content + "\n\n")
 		case "bot":
-			sb.WriteString(styleBot.Render("▲ [" + t + "]") + "\n")
+			sb.WriteString(styleBot.Render("▲ ["+t+"]") + "\n")
 			// Markdown 渲染
 			rendered, err := m.renderer.Render(l.content)
 			if err != nil {
@@ -221,7 +286,7 @@ func (m *tuiModel) View() string {
 			}
 			sb.WriteString(rendered + "\n\n")
 		case "err":
-			sb.WriteString(styleErr.Render("✗ [" + t + "]") + " " + l.content + "\n")
+			sb.WriteString(styleErr.Render("✗ ["+t+"]") + " " + l.content + "\n")
 		}
 	}
 
@@ -235,7 +300,69 @@ func (m *tuiModel) View() string {
 		sb.WriteString(m.input.View() + "\n")
 	}
 
-	sb.WriteString(styleHelp.Render("  Enter=发送 | /help=命令 | /quit=退出 | Esc=取消") + "\n")
+	// ===== 状态栏（统计信息） =====
+	status := m.statusBar()
+	sb.WriteString(styleStat.Render(status) + "\n")
+
+	// 帮助行
+	sb.WriteString(styleHelp.Render("  Enter=发送 | Tab=补全 | Ctrl+T=思考 | /think=等级 | /help=命令 | /quit=退出 | Esc=取消") + "\n")
+
+	return sb.String()
+}
+
+// statusBar 构建底部状态栏：tokens/压缩进度/缓存命中/响应速度/思考等级
+func (m *tuiModel) statusBar() string {
+	var sb strings.Builder
+	s := &m.stats
+
+	// 1. 累计 tokens
+	sb.WriteString(fmt.Sprintf("tokens: %d", s.CumulativeTotalTokens))
+	sb.WriteString("(in:" + fmt.Sprintf("%d", s.CumulativePromptTokens) + " out:" + fmt.Sprintf("%d", s.CumulativeCompletionTokens) + ")")
+
+	// 2. 压缩进度（接近触发阈值百分比）
+	if a := m.agent; a != nil && a.Compactor != nil {
+		limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
+		if limit > 0 && len(m.lines) > 0 {
+			est := 0
+			for i := 1; i < len(m.lines); i++ {
+				est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
+			}
+			pct := float64(est) / float64(limit) * 100
+			color := lipgloss.Color("2") // 绿色
+			if pct > 80 {
+				color = lipgloss.Color("1") // 红色
+			} else if pct > 60 {
+				color = lipgloss.Color("3") // 黄色
+			}
+			sb.WriteString(" | 压缩: " + lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%.0f%%", pct)))
+		}
+	}
+
+	// 3. 缓存命中率
+	if s.CumulativeCachedTokens > 0 && s.CumulativePromptTokens > 0 {
+		hit := float64(s.CumulativeCachedTokens) / float64(s.CumulativePromptTokens) * 100
+		sb.WriteString(fmt.Sprintf(" | 缓存:%.0f%%", hit))
+	} else {
+		sb.WriteString(" | 缓存:-")
+	}
+
+	// 4. 响应速度 tokens/s
+	if s.LastCompletionTokens > 0 && s.LastResponseDuration > 0 {
+		sb.WriteString(fmt.Sprintf(" | %.0f tok/s", s.LastSpeedTokensPerSec))
+	} else {
+		sb.WriteString(" | . tok/s")
+	}
+
+	// 5. 思考等级
+	level := s.ThinkingLevel
+	if level == "" {
+		level = "auto"
+	}
+	if level == "off" {
+		sb.WriteString(" | 思考: " + styleStatOff.Render(level))
+	} else {
+		sb.WriteString(" | 思考: " + level)
+	}
 
 	return sb.String()
 }

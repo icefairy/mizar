@@ -107,7 +107,7 @@ func main() {
 		if !explicit["ctx-window"] && cfg.ContextWindow > 0 {
 			*ctxWindow = cfg.ContextWindow
 		}
-		log.Printf("已加载配置 %s: model=%s thinking=%v window=%d", config.DefaultPath(), *model, cfg.Thinking, *ctxWindow)
+		log.Printf("已加载配置 %s: model=%s thinking=%s window=%d", config.DefaultPath(), *model, cfg.ThinkingStr(), *ctxWindow)
 	}
 
 	// 宿主函数集
@@ -196,9 +196,8 @@ func main() {
 	host.HTTPPost = func(url, body string) (string, error) { return httpDo("POST", url, body, "") }
 	// 提供真实 LLM 给插件 llm_chat
 	client := llm.NewOpenAI(*baseURL, *apiKey, *model)
-	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.Thinking {
-		thinking := true
-		client.Thinking = &thinking
+	if cfg, err := config.Load(config.DefaultPath()); err == nil {
+		client.SetThinkingLevel(cfg.ThinkingStr())
 	}
 	host.LLMChat = func(messagesJSON string) (string, error) {
 		var msgs []agent.Message
@@ -352,10 +351,7 @@ func main() {
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
-				thinking := "off"
-				if client.Thinking != nil && *client.Thinking {
-					thinking = "on"
-				}
+				thinking := client.ThinkingEnabled()
 				keyMask := "<set>"
 				if client.APIKey != "" {
 					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
@@ -375,7 +371,7 @@ func main() {
 			cfg.Model = client.Model
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
-			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			cfg.ThinkingLevel = client.ThinkingEnabled()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/provider 持久化失败: %v", err)
 			}
@@ -405,7 +401,7 @@ func main() {
 			cfg.Model = client.Model
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
-			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			cfg.ThinkingLevel = client.ThinkingEnabled()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/model 持久化失败: %v", err)
 			}
@@ -433,7 +429,7 @@ func main() {
 			cfg.Model = client.Model
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
-			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			cfg.ThinkingLevel = client.ThinkingEnabled()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/apikey 持久化失败: %v", err)
 			}
@@ -456,11 +452,10 @@ func main() {
 			client.BaseURL = cfg.BaseURL
 			client.APIKey = cfg.APIKey
 			client.Model = cfg.Model
-			if cfg.Thinking {
-				thinking := true
-				client.Thinking = &thinking
+			if cfg.ThinkingStr() != "off" {
+				client.SetThinkingLevel(cfg.ThinkingStr())
 			} else {
-				client.Thinking = nil
+				client.SetThinkingLevel("")
 			}
 			// 应用上下文窗口
 			if cfg.ContextWindow > 0 {
@@ -480,7 +475,7 @@ func main() {
 			a.Commands.SyncFromPlugins(cmds)
 			// 汇总
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%v\n", cfg.Model, cfg.ContextWindow, cfg.Thinking)
+			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%s\n", cfg.Model, cfg.ContextWindow, cfg.ThinkingStr())
 			if len(loaded) > 0 {
 				fmt.Fprintf(&sb, "✓ 插件重载: %s\n", strings.Join(loaded, ", "))
 			}
@@ -507,6 +502,42 @@ func main() {
 			fmt.Println("再见")
 			os.Exit(0)
 			return "", nil
+		},
+	})
+	// 内置 /think 命令：查看/切换思考等级（auto/off/low/medium/high）
+	a.Commands.Register(agent.Command{
+		Name:        "think",
+		Description: "查看/切换思考等级（/think 查看 | /think auto|off|low|medium|high 设置 | /think cycle 循环切换）",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			if args == "" {
+				return fmt.Sprintf("当前思考等级: %s\n等级说明:\n  auto   — 不传 thinking 参数，由模型自行决定\n  off    — 关闭思考\n  low    — 低强度思考（最快，推理 effort=low）\n  medium — 中等强度思考（默认推荐）\n  high   — 高强度思考（最彻底，推理 effort=high）", client.ThinkingEnabled()), nil
+			}
+			supported := []string{"auto", "off", "low", "medium", "high", "cycle"}
+			for _, s := range supported {
+				if args == s {
+					switch s {
+					case "cycle":
+						newLevel := client.ToggleThinking()
+						// 持久化
+						cfg, _ := config.Load(config.DefaultPath())
+						cfg.ThinkingLevel = newLevel
+						if err := config.Save(config.DefaultPath(), cfg); err != nil {
+							log.Printf("/think 持久化失败: %v", err)
+						}
+						return fmt.Sprintf("✓ 思考等级已切换: %s", newLevel), nil
+					default:
+						client.SetThinking(s)
+						cfg, _ := config.Load(config.DefaultPath())
+						cfg.ThinkingLevel = s
+						if err := config.Save(config.DefaultPath(), cfg); err != nil {
+							log.Printf("/think 持久化失败: %v", err)
+						}
+						return fmt.Sprintf("✓ 思考等级已设置为: %s", s), nil
+					}
+				}
+			}
+			return "", fmt.Errorf("未知参数 %q，支持: auto/off/low/medium/high/cycle", args)
 		},
 	})
 	// 内置 /help 命令：列出所有可用命令
@@ -537,7 +568,7 @@ func main() {
 			cfg.Model = client.Model
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
-			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			cfg.ThinkingLevel = client.ThinkingEnabled()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				return "", fmt.Errorf("保存失败: %v", err)
 			}
