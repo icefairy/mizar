@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -20,9 +21,14 @@ import (
 // =============================================================================
 
 type chatLine struct {
-	role    string // "system" / "user" / "bot" / "err"
+	role    string // "system" / "user" / "bot" / "err" / "tool"
 	content string
 	ts      time.Time
+}
+
+type toolCallInfo struct {
+	Tool string
+	Args string
 }
 
 // =============================================================================
@@ -30,13 +36,13 @@ type chatLine struct {
 // =============================================================================
 
 var (
-	styleUser = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
-	styleBot  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
-	styleErr  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	styleSys  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleSep  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleHelp = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleStat = lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // 状态栏紫色
+	styleUser    = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
+	styleBot     = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+	styleErr     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+	styleTool    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Italic(true) // 青色斜体：工具调用
+	styleSep     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleHelp    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleStat    = lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // 状态栏紫色
 	styleStatOff = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // 关闭状态灰色
 )
 
@@ -45,17 +51,17 @@ var (
 // =============================================================================
 
 type tuiStats struct {
-	CumulativePromptTokens    int
+	CumulativePromptTokens     int
 	CumulativeCompletionTokens int
-	CumulativeTotalTokens     int
-	CumulativeCachedTokens    int
-	LastPromptTokens          int
-	LastCompletionTokens      int
-	LastResponseDuration      float64
-	LastSpeedTokensPerSec     float64
-	RequestStartTime          time.Time
-	ThinkingLevel             string
-	ModelName                 string
+	CumulativeTotalTokens      int
+	CumulativeCachedTokens     int
+	LastPromptTokens           int
+	LastCompletionTokens       int
+	LastResponseDuration       float64
+	LastSpeedTokensPerSec      float64
+	RequestStartTime           time.Time
+	ThinkingLevel              string
+	ModelName                  string
 }
 
 func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
@@ -124,8 +130,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 func (m *tuiModel) Init() tea.Cmd { return nil }
 
 type doneMsg struct {
-	reply string
-	err   error
+	reply     string
+	err       error
+	toolCalls []toolCallInfo
 }
 
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -174,10 +181,25 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.stats.RequestStartTime = time.Now()
 
+			// 注册工具调用捕获钩子
+			var toolMu sync.Mutex
+			var toolCalls []toolCallInfo
+			if m.agent.Hooks != nil {
+				m.agent.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
+					toolMu.Lock()
+					defer toolMu.Unlock()
+					toolCalls = append(toolCalls, toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)})
+					return nil
+				})
+			}
+
 			done := make(chan doneMsg, 1)
 			go func() {
 				reply, err := m.agent.Run(s)
-				done <- doneMsg{reply: reply, err: err}
+				toolMu.Lock()
+				calls := append([]toolCallInfo(nil), toolCalls...)
+				toolMu.Unlock()
+				done <- doneMsg{reply: reply, err: err, toolCalls: calls}
 			}()
 			return m, func() tea.Msg { return <-done }
 		}
@@ -232,7 +254,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.input, _ = m.input.Update(msg)
 
-	case doneMsg:
+case doneMsg:
 		m.loading = false
 		elapsed := time.Since(m.stats.RequestStartTime)
 
@@ -247,6 +269,21 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.stats.ThinkingLevel = ut.ThinkingEnabled()
 		}
 		m.stats.ModelName = m.agent.Model()
+
+		// 工具调用摘要
+		if len(msg.toolCalls) > 0 {
+			var tc strings.Builder
+			for i, call := range msg.toolCalls {
+				if i > 0 {
+								tc.WriteString("  ")
+				}
+				tc.WriteString(call.Tool)
+				if call.Args != "" && call.Args != "{}" {
+								tc.WriteString("(" + call.Args + ")")
+				}
+			}
+			m.lines = append(m.lines, chatLine{role: "tool", content: tc.String(), ts: time.Now()})
+		}
 
 		if msg.err != nil {
 			m.lines = append(m.lines, chatLine{role: "err", content: msg.err.Error(), ts: time.Now()})
@@ -287,6 +324,9 @@ func (m *tuiModel) View() string {
 			sb.WriteString(rendered + "\n\n")
 		case "err":
 			sb.WriteString(styleErr.Render("✗ ["+t+"]") + " " + l.content + "\n")
+		case "tool":
+			// 工具调用摘要：🔧 read(/tmp/file) bash(ls -la)...
+			sb.WriteString(styleTool.Render("🔧 ["+t+"]") + " " + l.content + "\n")
 		}
 	}
 
@@ -365,6 +405,15 @@ func (m *tuiModel) statusBar() string {
 	}
 
 	return sb.String()
+}
+
+// truncateArgs 截断工具参数（JSON 展示时取前 80 字符）
+func truncateArgs(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= 80 {
+		return s
+	}
+	return s[:77] + "..."
 }
 
 func runTUI(a *agent.Agent, st *session.Store, sessionID string) {

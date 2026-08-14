@@ -15,11 +15,12 @@ import (
 
 // OpenAI 是 OpenAI 兼容客户端。
 // 思考等级（ThinkingLevel）：
-//   "auto"   — 不传 thinking 参数，由模型决定
-//   "off"    — thinking: {type: "disabled"}
-//   "low"    — thinking: {type: "enabled"}, reasoning_effort: "low"
-//   "medium" — thinking: {type: "enabled"}, reasoning_effort: "medium"
-//   "high"   — thinking: {type: "enabled"}, reasoning_effort: "high"
+//
+//	"auto"   — 不传 thinking 参数，由模型决定
+//	"off"    — thinking: {type: "disabled"}
+//	"low"    — thinking: {type: "enabled"}, reasoning_effort: "low"
+//	"medium" — thinking: {type: "enabled"}, reasoning_effort: "medium"
+//	"high"   — thinking: {type: "enabled"}, reasoning_effort: "high"
 type OpenAI struct {
 	BaseURL string // 如 http://127.0.0.1:3002/v1
 	APIKey  string
@@ -47,10 +48,10 @@ type chatMsg struct {
 }
 
 type chatReq struct {
-	Model           string    `json:"model"`
-	Messages        []chatMsg `json:"messages"`
-	MaxTokens       int       `json:"max_tokens,omitempty"`
-	Thinking        *struct {
+	Model     string    `json:"model"`
+	Messages  []chatMsg `json:"messages"`
+	MaxTokens int       `json:"max_tokens,omitempty"`
+	Thinking  *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"` // openai beta: low/medium/high

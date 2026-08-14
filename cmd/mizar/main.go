@@ -641,6 +641,11 @@ func main() {
 		return
 	}
 
+	// TUI 模式关闭 verbose 日志输出到 stderr
+	if *tui {
+		a.VerboseLog = nil
+	}
+
 	// 交互模式
 	if *tui {
 		runTUI(a, st, *sessionID)

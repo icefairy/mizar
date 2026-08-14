@@ -16,16 +16,16 @@ type UsageTracker interface {
 // StatsSession 会话级统计（由 Agent 维护，TUI 读取）
 type StatsSession struct {
 	// 累计 token
-	CumulativePromptTokens    int
+	CumulativePromptTokens     int
 	CumulativeCompletionTokens int
-	CumulativeTotalTokens     int
-	CumulativeCachedTokens    int
+	CumulativeTotalTokens      int
+	CumulativeCachedTokens     int
 	// 最近一次响应
-	LastPromptTokens     int
-	LastCompletionTokens int
-	LastTotalTokens      int
-	LastCachedTokens     int
-	LastResponseDuration float64 // 秒
+	LastPromptTokens      int
+	LastCompletionTokens  int
+	LastTotalTokens       int
+	LastCachedTokens      int
+	LastResponseDuration  float64 // 秒
 	LastSpeedTokensPerSec float64
 }
 
@@ -34,6 +34,6 @@ type CompactionInfo struct {
 	EstCurrentTokens int
 	ContextWindow    int
 	ReserveTokens    int
-	CompactionLimit  int // ContextWindow - ReserveTokens
+	CompactionLimit  int     // ContextWindow - ReserveTokens
 	ProximityPct     float64 // 当前 / 压缩阈值
 }
