@@ -17,10 +17,13 @@ func mockHost() *HostFuncs {
 		},
 		FSRead:  func(p string) (string, error) { return "file:" + p, nil },
 		FSWrite: func(p, c string) error { return nil },
+		DBExecBatch: DBExecBatchFn,
+		DBClose: DBCloseFn,
 		LLMChat: func(messagesJSON string) (string, error) {
 			return "mock-llm-reply", nil
 		},
 		Log: func(msg string) {},
+		DBQuery: DBQueryFn,
 	}
 }
 

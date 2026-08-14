@@ -134,6 +134,17 @@ vm.Set("ws_connect", ...)         // WS 客户端桥：连外部 WS 服务（如
 vm.Set("ws_send", ...)
 vm.Set("ws_onmessage", ...)
 vm.Set("ws_close", ...)
+vm.Set("db_query", dbQuery)       // 内置数据库查询：db_query(driver, dsn, sql) → JSON（v1.2+）
+vm.Set("mcp_call", mcpCall)       // 外部 MCP server：mcp_call(server, tool, argsJSON) → 文本（v1.3+）
+vm.Set("hook_on", hookOn)         // 生命周期挂载点：hook_on(event, cb(ctxJSON)) （v1.3+）
+// —— 纯函数标准库（v1.3+，无 I/O 零副作用，引擎创建时无条件注册）——
+vm.Set("time_now", ...)           // 当前 UTC 时间 RFC3339Nano；time_unix() → 秒
+vm.Set("uuid", ...)               // UUID v4（crypto/rand）
+vm.Set("base64_encode", ...)      // base64_decode(s)
+vm.Set("hash_sha256", ...)        // SHA-256 hex
+vm.Set("path_join", ...)          // path_base(p) / path_dir(p)，POSIX 语义
+vm.Set("url_parse", ...)          // URL → JSON {scheme,host,path,query,fragment,user}
+vm.Set("count_tokens", ...)       // 估算 token 数（CJK 按字符、其他按 4 字符/token，与压缩器同口径）
 ```
 
 **HTTP 统一化**（v0.2.4+）：早期只有 `http_get`/`http_post` 两个固定方法，无法覆盖 PUT/DELETE/PATCH 等场景，且 `main.go` 里 host 实际未实现这两个函数（架构文档画饼）。现统一为 `http_request(method, url, body, headersJSON)`：
@@ -160,6 +171,91 @@ export function tool_disk_watch(): string {
   return "正常 (" + pct + "%)";
 }
 ```
+
+### 3.6 db_query——内置数据库查询（v1.2+）
+
+插件连接常见数据库用内置驱动，**不需要**额外进程或 MCP server。驱动白名单：`sqlite3`（纯 Go 免 CGO）/ `mysql` / `postgres`。
+
+```
+db_query(driver, dsn, sql) → JSON 字符串
+```
+
+- **查询语句**（SELECT/SHOW/PRAGMA 等）返回 JSON 行数组：`[{"id":1,"name":"zhang"},...]`
+- **非查询语句**（INSERT/UPDATE/DELETE/DDL）返回 `{"rowsAffected":N}`
+- 内置 30s 超时；DSN 长度限制；驱动白名单外直接报错
+- sqlite3 的 DSN 就是文件路径；mysql/postgres 用标准 DSN 格式
+
+```ts
+// 常见关系型——内置，秒连
+export function tool_users(): string {
+  return db_query("sqlite3", "/data/app.db", "SELECT id, name FROM users LIMIT 10");
+}
+
+// 参数化注意：db_query 只接字符串，SQL 拼接时插件自行校验/转义输入
+export function tool_insert(name: string): string {
+  const safe = name.replace(/'/g, "''");   // SQL 注入防护（至少）
+  return db_query("sqlite3", "/data/app.db", "INSERT INTO users (name) VALUES ('" + safe + "')");
+}
+```
+
+**边界**：`db_query` 只覆盖内置驱动的库。连冷门数据库（MongoDB/Redis/ClickHouse 等）时走 MCP server（见 3.7），外部 server 自带驱动，不进主体二进制。
+
+### 3.6.1 连接池 + 批量 + 显式关闭（v1.3+）
+
+**连接池**：db 连接按 `driver|dsn` 缓存复用（同一 DSN 共享同一连接）。文件库空闲 5min 自动 Close，`:memory:` 永久保留（跨调用数据可见）。性能对比（SQLite 500 行基准）：
+
+| 操作 | 每次重开连接 | 连接池复用 |
+|---|---|---|
+| 逐条插入 | 193ms | 46ms（4.2x）|
+| 100 次点查 | 31ms | 9ms（3.4x）|
+
+**会话语义**：同一 DSN 复用连接 → 会话状态（`PRAGMA`/`SET SESSION`/临时表/用户变量）跨调用保留。插件需要干净会话时用 `db_close` 显式重置。
+
+```ts
+db_query("sqlite3", "/data/app.db", "PRAGMA foreign_keys=OFF");   // 影响后续同 DSN 调用
+db_close("sqlite3", "/data/app.db");                               // 丢弃残留，下次重建连接
+```
+
+**db_exec_batch**：SQL 数组一个事务执行，失败整体回滚。
+
+```ts
+db_exec_batch("sqlite3", "/data/app.db", JSON.stringify([
+  "CREATE TABLE IF NOT EXISTS mem (id INTEGER PRIMARY KEY, task TEXT)",
+  "INSERT INTO mem (task) VALUES ('a'); INSERT INTO mem (task) VALUES ('b');"
+]));
+// → {"rowsAffected":2,"statements":3}
+```
+
+性能：批量 500 行 3ms（事务 + 连接复用），逐条 46ms（连接复用无事务）。**写多行优先 batch**。
+
+### 3.7 mcp_call——冷门能力的外部通道（v1.3+）
+
+`internal/mcp` 实现 MCP **client**（stdio + HTTP/streamable 传输，支持 `tools/list` / `tools/call`），连外部 MCP server——任何语言实现的协议服务，驱动/能力自带。
+
+- **宿主函数**：`mcp_call(serverName, toolName, argsJSON)` → 结果文本
+- **配置**：`~/.mizar/config.json` 的 `mcp_servers` 数组，每项 `name` +（`command`/`args` 走 stdio 子进程，或 `url` 走 HTTP）
+- **惰性连接**：首次调用才启动/握手，连接按 server 复用；单次调用 30s 超时
+- **典型场景**：MongoDB/Redis/ClickHouse 等 db_query 白名单外的数据库、内部系统 API、专用工具链
+
+```json
+{
+  "mcp_servers": [
+    { "name": "redis", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-redis"] },
+    { "name": "internal", "url": "http://127.0.0.1:9000/mcp" }
+  ]
+}
+```
+
+```ts
+// 插件里一行调用
+export function tool_cache_get(key: string): string {
+  return mcp_call("redis", "get", JSON.stringify({ key }));
+}
+```
+
+**分层总览**：`db_query`（内置关系型）→ `mcp_call`（外部任意服务），插件按场景选，互不阻塞。内置 3 驱动保持主体轻量，长尾能力全部外置，二进制永不膨胀。
+
+
 
 ## 4. 自举闭环（核心卖点）
 

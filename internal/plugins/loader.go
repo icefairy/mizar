@@ -45,6 +45,9 @@ type Manager struct {
 	loadFile string
 	// 当前加载的 LSP 注册计数（用于判定 LSP-only 插件）
 	lspRegCount int
+
+	// Hook 回调注册表（hook_on 宿主函数收集，Agent 触发挂载点时 Fire）
+	hookReg *hookRegistry
 }
 
 // NewManager 创建插件管理器。
@@ -61,6 +64,7 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 		maxExec:      30 * time.Second,
 		lspDiagNames: make(map[string][]string),
 		lspCompNames: make(map[string][]string),
+		hookReg:      newHookRegistry(),
 	}
 	// 包装 LSP 宿主函数，跟踪文件名
 	if host != nil {
@@ -86,12 +90,34 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 			}
 			return nil
 		}
+		// HookOn：插件 hook_on() → Manager.hookReg 收集（按文件跟踪，热重载清理）
+		host.HookOn = func(event string, cb func(ctxJSON string) (string, error)) error {
+			if cb == nil {
+				return fmt.Errorf("hook_on: 回调不能为 nil")
+			}
+			m.mu.Lock()
+			file := m.loadFile
+			m.mu.Unlock()
+			return m.hookReg.Register(file, event, cb)
+		}
 	}
 	return m
 }
 
 // SetMaxExec 设置插件单次执行超时（默认 30s）。
 func (m *Manager) SetMaxExec(d time.Duration) { m.maxExec = d }
+
+// FireHook 触发某挂载点事件：向所有注册该事件的插件回调分发 ctxJSON。
+// 供 Agent 的 Hooks 桥接调用（见 cmd/mizar/main.go 的 On* 注册）。
+// 返回 (成功数, 错误列表)；无回调时返回 (0, nil)。
+func (m *Manager) FireHook(event string, ctxJSON string) (int, []error) {
+	return m.hookReg.Fire(event, ctxJSON)
+}
+
+// HookCount 返回某事件已注册的回调数（测试/日志用）。
+func (m *Manager) HookCount(event string) int {
+	return m.hookReg.Count(event)
+}
 
 // LoadAll 扫描目录，加载/重载所有 .ts 插件。返回新增与失败的插件名。
 func (m *Manager) LoadAll() (loaded []string, failed map[string]error) {
@@ -162,7 +188,10 @@ func (m *Manager) loadPlugin(filename string) error {
 		return err
 	}
 
-	// 设置当前加载文件名，以便 LSP 宿主函数跟踪注册
+	// 设置当前加载文件名，以便 LSP/hook 宿主函数跟踪注册
+	// 先快照并清理旧 hook（RunScript 会注册新 hook，须先移除旧文件残留）
+	oldHooks := m.hookReg.SnapshotFile(filename)
+	m.hookReg.RemoveFile(filename)
 	m.mu.Lock()
 	m.loadFile = filename
 	m.lspRegCount = 0
@@ -177,6 +206,7 @@ func (m *Manager) loadPlugin(filename string) error {
 
 	if err != nil {
 		vm.Close()
+		m.hookReg.RestoreFile(oldHooks) // 回滚旧 hook
 		return fmt.Errorf("exec %s: %w", filename, err)
 	}
 
@@ -192,7 +222,7 @@ func (m *Manager) loadPlugin(filename string) error {
 	// 原子替换：先收集再提交
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// 移除旧引擎里属于该文件的工具、命令、RPC、LSP 提供者
+	// 移除旧引擎里属于该文件的工具、命令、RPC、LSP 提供者、Hook 回调
 	m.removeToolsLocked(filename)
 	m.removeCommandsLocked(filename)
 	m.removeRPCLocked(filename)

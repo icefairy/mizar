@@ -51,6 +51,24 @@ type HostFuncs struct {
 	WSEmit func(event, dataJSON string)
 	// WSClient 插件 WS 客户端桥（连外部 WS 服务，如飞书长连接）。
 	WSClient *WSClientBridge
+	// DBQuery 内置数据库查询：db_query(driver, dsn, sql) -> JSON。
+	// driver 白名单: sqlite3 / mysql / postgres。nil 时不注册该函数。
+	DBQuery func(driver, dsn, sql string) (string, error)
+	// DBExecBatch 事务批量执行：db_exec_batch(driver, dsn, sqlsJSON) -> JSON。
+	// sqlsJSON 为 SQL 字符串数组，全部语句一个事务内执行，失败整体回滚。
+	// nil 时不注册该函数。
+	DBExecBatch func(driver, dsn, sqlsJSON string) (string, error)
+	// DBClose 关闭连接：db_close(driver, dsn) -> JSON。丢弃会话残留（PRAGMA/SET/临时表），
+	// 下次 db_query 调用会重建连接。nil 时不注册该函数。
+	DBClose func(driver, dsn string) (string, error)
+	// MCPCall 调用外部 MCP server 工具：mcp_call(server, tool, argsJSON) -> 文本。
+	// 覆盖内置驱动之外的长尾能力（Redis/Kafka/MongoDB/ClickHouse 等）。
+	// nil 时不注册该函数。
+	MCPCall func(server, tool, argsJSON string) (string, error)
+	// HookOn 注册挂载点回调：hook_on(eventName, jsCallback)。
+	// eventName 归一化（大小写/连字符/下划线不敏感）; jsCallback 为 JS 函数 (ctxJSON)=>string。
+	// nil 时不注册该函数。
+	HookOn func(event string, cb func(ctxJSON string) (string, error)) error
 }
 
 // cjsShim 让 esbuild 的 CommonJS 输出能在 goja 中运行。
@@ -78,6 +96,8 @@ func (e *Engine) registerHostFuncs() error {
 	reg := func(name string, fn any) {
 		_ = e.vm.Set(name, fn)
 	}
+	// 纯函数标准库（无 I/O、零副作用），引擎创建时无条件注册
+	registerStdlib(reg)
 	if h.HTTPGet != nil {
 		reg("http_get", h.HTTPGet)
 	}
@@ -125,6 +145,41 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.WSEmit != nil {
 		reg("ws_emit", h.WSEmit)
+	}
+	if h.DBQuery != nil {
+		reg("db_query", h.DBQuery)
+	}
+	if h.DBExecBatch != nil {
+		reg("db_exec_batch", h.DBExecBatch)
+	}
+	if h.DBClose != nil {
+		reg("db_close", h.DBClose)
+	}
+	if h.MCPCall != nil {
+		reg("mcp_call", h.MCPCall)
+	}
+	if h.HookOn != nil {
+		// hook_on(eventName, jsCallback)：goja 对 (string,error) 多返回值
+		// 自动适配不可靠，手动接收 goja.Value 并 AssertFunction 包装。
+		reg("hook_on", func(event string, cb goja.Value) error {
+			if cb == nil || goja.IsUndefined(cb) || goja.IsNull(cb) {
+				return fmt.Errorf("hook_on: 回调不能为空")
+			}
+			fn, ok := goja.AssertFunction(cb)
+			if !ok {
+				return fmt.Errorf("hook_on: 第二个参数必须是函数")
+			}
+			return h.HookOn(event, func(ctxJSON string) (string, error) {
+				res, err := fn(goja.Undefined(), e.vm.ToValue(ctxJSON))
+				if err != nil {
+					return "", err
+				}
+				if res == nil || goja.IsUndefined(res) || goja.IsNull(res) {
+					return "", nil
+				}
+				return res.String(), nil
+			})
+		})
 	}
 	return nil
 }
