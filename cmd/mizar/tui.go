@@ -237,11 +237,10 @@ func (m *tuiModel) setLoadingAsync(loading bool) {
 }
 
 func (m *tuiModel) startTask(input string) {
-	// 将用户消息 + bot 回复追加到会话历史（供下次 agent.Run 继承上下文）
+	// 持久化用户消息
 	if len(m.lines) > 0 && m.store != nil && m.sessionID != "" {
 		m.store.Append(m.sessionID, agent.Message{Role: agent.RoleUser, Content: input})
 	}
-	m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: input})
 
 	m.liveMu.Lock()
 	evtCh := make(chan toolCallInfo, 20)
@@ -260,26 +259,27 @@ func (m *tuiModel) startTask(input string) {
 
 		elapsed := time.Since(m.stats.RequestStartTime)
 
-		// 用量
 		if ut, ok := m.agent.LLM.(interface{ LastUsage() *agent.Usage }); ok {
 			if u := ut.LastUsage(); u != nil {
 				m.stats.AddUsage(u, elapsed)
 			}
 		}
-		// 思考等级
 		if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 			m.stats.ThinkingLevel = ut.ThinkingEnabled()
 		}
 		m.stats.ModelName = m.agent.Model()
 
+		// 无论成功与否，都追加本次 user 消息到初始历史（供下次 Run 继承）
+		m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: input})
+
 		if err != nil {
 			m.addChatLineAsync(chatLine{role: "err", content: err.Error(), ts: time.Now()})
 		} else {
 			m.addChatLineAsync(chatLine{role: "bot", content: reply, ts: time.Now()})
-			// 将 bot 回复追加到会话历史
 			if m.store != nil && m.sessionID != "" {
 				m.store.Append(m.sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 			}
+			// 追加 bot 回复到初始历史（工具调用/结果不追加，它们是内部实现细节）
 			m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 
@@ -318,12 +318,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		SetFieldWidth(0).
 		SetPlaceholder("输入任务，/help 查看命令，/quit 退出")
 
-	// 状态栏
+	// 状态栏（无边框，flex 只用 fixedSize=1 不够放边框+内容）
 	m.statusBar = tview.NewTextView().
 		SetDynamicColors(true).
 		SetRegions(false)
-	m.statusBar.SetBorder(true).
-		SetBorderPadding(0, 0, 1, 1)
 
 	// 布局：垂直排列
 	m.flex = tview.NewFlex().

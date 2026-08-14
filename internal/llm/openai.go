@@ -75,11 +75,11 @@ type chatMsg struct {
 }
 
 type chatReq struct {
-	Model           string    `json:"model"`
-	Messages        []chatMsg `json:"messages"`
-	Tools           []toolDef `json:"tools,omitempty"`
-	MaxTokens       int       `json:"max_tokens,omitempty"`
-	Thinking        *struct {
+	Model     string    `json:"model"`
+	Messages  []chatMsg `json:"messages"`
+	Tools     []toolDef `json:"tools,omitempty"`
+	MaxTokens int       `json:"max_tokens,omitempty"`
+	Thinking  *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
@@ -87,8 +87,8 @@ type chatReq struct {
 
 type chatResp struct {
 	Choices []struct {
-		Index        int `json:"index"`
-		Message      struct {
+		Index   int `json:"index"`
+		Message struct {
 			Role      string     `json:"role"`
 			Content   string     `json:"content"`
 			ToolCalls []toolCall `json:"tool_calls,omitempty"`
@@ -125,7 +125,8 @@ func pluginsToolToDef(t plugins.Tool) toolDef {
 
 // toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
 // agent 的 callParser 期望格式：
-//   {"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}
+//
+//	{"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}
 func toolCallsToText(tcs []toolCall) string {
 	if len(tcs) == 0 {
 		return ""
@@ -205,8 +206,12 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	c.lastUsage = out.Usage
 
 	msg := out.Choices[0].Message
+	fmt.Printf("[llm] response: finish=%s content=%q toolCalls=%d\n", out.Choices[0].FinishReason, msg.Content, len(msg.ToolCalls))
 	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
 	if len(msg.ToolCalls) > 0 {
+		for i, tc := range msg.ToolCalls {
+			fmt.Printf("[llm]   tc[%d]: id=%q type=%q function.name=%q function.arguments=%q\n", i, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments)
+		}
 		return toolCallsToText(msg.ToolCalls), nil
 	}
 	return msg.Content, nil

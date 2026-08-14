@@ -1,6 +1,7 @@
 module mizar
 
 go 1.26.3
+license AGPL-3.0-or-later
 
 require (
 	github.com/charmbracelet/glamour v1.0.0
