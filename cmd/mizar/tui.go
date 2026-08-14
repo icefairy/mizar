@@ -418,7 +418,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 				}
 				cands := completeAtRaw(after, cmds, tools)
 				if len(cands) > 0 {
-					newVal := val[:idx] + cands[0] + " "
+					newVal := val[:idx+1] + cands[0] + " "
 					m.inputField.SetText(newVal)
 				}
 			}

@@ -102,7 +102,8 @@ type chatResp struct {
 }
 
 // pluginsToolToDef 将 plugins.Tool 转为 OpenAI tools 定义。
-// 参数统一使用 args: string（JSON 字符串），与 agent 的 callRequest 格式对齐。
+// 参数使用 additionalProperties: true 让模型直接传原始参数，
+// 不使用 args: string 包裹层（会导致模型困惑）。
 func pluginsToolToDef(t plugins.Tool) toolDef {
 	return toolDef{
 		Type: "function",
@@ -110,30 +111,22 @@ func pluginsToolToDef(t plugins.Tool) toolDef {
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"args": map[string]any{
-						"type":        "string",
-						"description": "JSON string arguments for the tool",
-					},
-				},
-				"required": []string{"args"},
+				"type":                 "object",
+				"additionalProperties": true,
 			},
 		},
 	}
 }
 
 // toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
-// agent 的 callParser 期望格式：
-//
-//	{"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}
+// 新 schema 中 arguments 直接是原始参数（如 {"command":"hostname"}），
+// 用 json.Marshal 转成转义后的 JSON 字符串填入 args 字段。
+// 期望输出：{"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}
 func toolCallsToText(tcs []toolCall) string {
 	if len(tcs) == 0 {
 		return ""
 	}
-	tc := tcs[0] // 每次只处理第一个工具调用
-	// arguments 已经是 JSON 对象字符串（如 {"command":"hostname"}）
-	// 需要用 json.Marshal 把它包成 JSON 字符串值（带引号转义）
+	tc := tcs[0]
 	argsEscaped, _ := json.Marshal(tc.Function.Arguments)
 	return fmt.Sprintf(`{"action":"tool","tool":"%s","args":%s}`, tc.Function.Name, argsEscaped)
 }
@@ -206,12 +199,8 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	c.lastUsage = out.Usage
 
 	msg := out.Choices[0].Message
-	fmt.Printf("[llm] response: finish=%s content=%q toolCalls=%d\n", out.Choices[0].FinishReason, msg.Content, len(msg.ToolCalls))
 	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
 	if len(msg.ToolCalls) > 0 {
-		for i, tc := range msg.ToolCalls {
-			fmt.Printf("[llm]   tc[%d]: id=%q type=%q function.name=%q function.arguments=%q\n", i, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments)
-		}
 		return toolCallsToText(msg.ToolCalls), nil
 	}
 	return msg.Content, nil
