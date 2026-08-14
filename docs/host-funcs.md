@@ -34,5 +34,24 @@
 - ws_emit — 向 WS 客户端推送事件
 - lsp_register_diagnostic — 注册 LSP 诊断提供者
 - lsp_register_completion — 注册 LSP 补全提供者
+- tcp_listen — 启动 TCP 服务器
+- tcp_dial — TCP 客户端连接
+- tcp_send — TCP 发送数据
+- tcp_onrecv — 注册 TCP 接收回调
+- tcp_close — 关闭 TCP 连接
+- tcp_stop — 停止 TCP 服务器
+- ftp_connect — FTP 登录
+- ftp_list — FTP 列目录
+- ftp_upload — FTP 上传
+- ftp_download — FTP 下载
+- ftp_mkdir — FTP 建目录
+- ftp_rmdir — FTP 删目录
+- ftp_delete — FTP 删文件
+- ftp_rename — FTP 重命名
+- ftp_close — FTP 登出关闭
+- ws_connect — WS 客户端连接
+- ws_send — WS 发送消息
+- ws_onmessage — WS 注册消息回调
+- ws_close — WS 关闭连接
 
 完整文档用宿主函数 doc_get(name) 按需查询。

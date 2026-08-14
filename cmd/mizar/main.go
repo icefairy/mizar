@@ -161,6 +161,12 @@ func main() {
 	}
 	defer mcpReg.Close()
 	host.MCPCall = mcpReg.CallFn()
+	// NetBridge：插件 TCP 网络能力（listen/dial/send/recv/close/stop），实现分布式通信/自定义协议
+	host.NetBridge = engine.NewNetBridge()
+	// FTPBridge：插件 FTP 客户端（connect/list/upload/download/mkdir/rmdir/delete/rename/close）
+	host.FTPBridge = engine.NewFTPBridge()
+	// WSClient：插件 WS 客户端（连外部长连接服务，如飞书），ws_connect/send/onmessage/close
+	host.WSClient = engine.NewWSClientBridge()
 	// 插件 HTTP 能力：统一 http_request(method,url,body,headers) + 薄封装 http_get/http_post
 	httpDo := func(method, url, body, headersJSON string) (string, error) {
 		req, err := http.NewRequest(method, url, strings.NewReader(body))

@@ -147,6 +147,55 @@ POSIX 路径拼接，自动处理分隔符。变参。
 	{Name: "lsp_register_completion", Brief: "注册 LSP 补全提供者", Full: `lsp_register_completion(name, fn) -> error
 注册补全提供者，fn(uri, line, col) => 补全项 JSON。
 仅 LSP 相关插件使用。`},
+
+	// ---- TCP 网络 ----
+	{Name: "tcp_listen", Brief: "启动 TCP 服务器", Full: `tcp_listen(addr, onAccept) -> serverID
+启动 TCP 服务器。onAccept(connID, remoteAddr) 每接入一个连接回调一次。
+connID 是服务端对这条连接的句柄，可用 tcp_send/tcp_onrecv/tcp_close 操作。
+示例: tcp_listen(":9000", (id, addr) => tcp_onrecv(id, (data) => log(data)))`},
+	{Name: "tcp_dial", Brief: "TCP 客户端连接", Full: `tcp_dial(addr) -> connID
+建立 TCP 客户端连接，返回连接句柄。示例: tcp_dial("192.168.1.5:9000")`},
+	{Name: "tcp_send", Brief: "TCP 发送数据", Full: `tcp_send(connID, data) -> void
+向连接发送文本数据（不自动换行/分隔，协议自己定）。
+错误（连接关闭）会抛异常，插件用 try/catch 处理。`},
+	{Name: "tcp_onrecv", Brief: "注册 TCP 接收回调", Full: `tcp_onrecv(connID, cb) -> void
+注册接收回调，cb(data) 每收到一段数据回调一次。
+同一个连接只保留一个回调，重复注册会替换旧的。`},
+	{Name: "tcp_close", Brief: "关闭 TCP 连接", Full: `tcp_close(connID) -> void
+关闭连接。对已关闭的连接再次调用会抛异常（幂等由插件自己保证）。`},
+	{Name: "tcp_stop", Brief: "停止 TCP 服务器", Full: `tcp_stop(serverID) -> void
+停止监听并关闭 server 持有的所有连接。`},
+
+	// ---- FTP 客户端 ----
+	{Name: "ftp_connect", Brief: "FTP 登录", Full: `ftp_connect(host, port, user, pass) -> ftpID
+FTP 客户端登录（仅客户端，不提供服务器）。超时 10s。`},
+	{Name: "ftp_list", Brief: "FTP 列目录", Full: `ftp_list(ftpID, dir) -> string
+列出远程目录，返回 JSON 数组（每项含 Name/Size/Type/Time 等字段）。`},
+	{Name: "ftp_upload", Brief: "FTP 上传", Full: `ftp_upload(ftpID, localPath, remotePath) -> void
+本地上传到远程（STOR）。`},
+	{Name: "ftp_download", Brief: "FTP 下载", Full: `ftp_download(ftpID, remotePath, localPath) -> void
+远程下载到本地（RETR）。`},
+	{Name: "ftp_mkdir", Brief: "FTP 建目录", Full: `ftp_mkdir(ftpID, dir) -> void
+远程创建目录。`},
+	{Name: "ftp_rmdir", Brief: "FTP 删目录", Full: `ftp_rmdir(ftpID, dir) -> void
+远程删除目录。`},
+	{Name: "ftp_delete", Brief: "FTP 删文件", Full: `ftp_delete(ftpID, path) -> void
+远程删除文件。`},
+	{Name: "ftp_rename", Brief: "FTP 重命名", Full: `ftp_rename(ftpID, from, to) -> void
+远程重命名文件/目录。`},
+	{Name: "ftp_close", Brief: "FTP 登出关闭", Full: `ftp_close(ftpID) -> void
+登出并关闭 FTP 连接。`},
+
+	// ---- WebSocket 客户端 ----
+	{Name: "ws_connect", Brief: "WS 客户端连接", Full: `ws_connect(url, headersJSON) -> connID
+连接 WebSocket 服务器。headersJSON 形如 {"Authorization":"Bearer x"}（可空）。
+示例: ws_connect("ws://x.com/sock", "{}")`},
+	{Name: "ws_send", Brief: "WS 发送消息", Full: `ws_send(connID, data) -> void
+向 WS 连接发送文本消息。`},
+	{Name: "ws_onmessage", Brief: "WS 注册消息回调", Full: `ws_onmessage(connID, cb) -> void
+注册接收回调，cb(data) 每收到一条消息回调一次。`},
+	{Name: "ws_close", Brief: "WS 关闭连接", Full: `ws_close(connID) -> void
+关闭 WS 连接。`},
 }
 
 // hostDocIndex name -> HostDoc 查询索引（构建一次）。

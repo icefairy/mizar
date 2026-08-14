@@ -14,10 +14,14 @@ import (
 
 // Engine 是 goja 运行时 + 宿主函数注册的封装。
 type Engine struct {
-	vm     *goja.Runtime
-	host   *HostFuncs
-	closed bool
+	vm          *goja.Runtime
+	host        *HostFuncs
+	closed      bool
+	callTimeout time.Duration
+	runTimeout  time.Duration
 }
+
+const defaultTimeout = 30 * time.Second
 
 // HostFuncs 是宿主注册给 JS 插件的函数集（Go 能力）。
 type HostFuncs struct {
@@ -72,6 +76,10 @@ type HostFuncs struct {
 	// 返回: {"status":200,"headers":{...},"body":"..."}
 	// nil 时不注册该函数。
 	HostListen func(addr string, handler func(requestJSON string) string) (string, error)
+	// NetBridge 插件 TCP 网络能力（listen/dial/send/recv/close/stop）。
+	NetBridge *NetBridge
+	// FTPBridge 插件 FTP 客户端能力（connect/list/upload/download/mkdir/rmdir/delete/rename/close）。
+	FTPBridge *FTPBridge
 	// HookOn 注册挂载点回调：hook_on(eventName, jsCallback)。
 	// eventName 归一化（大小写/连字符/下划线不敏感）; jsCallback 为 JS 函数 (ctxJSON)=>string。
 	// nil 时不注册该函数。
@@ -88,7 +96,7 @@ func New(host *HostFuncs) (*Engine, error) {
 	if host == nil {
 		host = &HostFuncs{}
 	}
-	e := &Engine{vm: goja.New(), host: host}
+	e := &Engine{vm: goja.New(), host: host, callTimeout: defaultTimeout, runTimeout: defaultTimeout}
 	if err := e.registerHostFuncs(); err != nil {
 		return nil, fmt.Errorf("register host funcs: %w", err)
 	}
@@ -215,6 +223,65 @@ func (e *Engine) registerHostFuncs() error {
 			})
 		})
 	}
+
+	// TCP 网络能力：tcp_listen/tcp_dial/tcp_send/tcp_onrecv/tcp_close/tcp_stop
+	if h.NetBridge != nil {
+		nb := h.NetBridge
+		reg("tcp_listen", func(addr string, cb goja.Value) (string, error) {
+			fn, ok := goja.AssertFunction(cb)
+			if !ok {
+				return "", fmt.Errorf("tcp_listen: 第二个参数必须是函数")
+			}
+			return nb.Listen(addr, func(connID, remoteAddr string) {
+				_, _ = fn(goja.Undefined(), e.vm.ToValue(connID), e.vm.ToValue(remoteAddr))
+			})
+		})
+		reg("tcp_dial", func(addr string) (string, error) { return nb.Dial(addr) })
+		reg("tcp_send", func(connID, data string) error { return nb.Send(connID, data) })
+		reg("tcp_onrecv", func(connID string, cb goja.Value) error {
+			fn, ok := goja.AssertFunction(cb)
+			if !ok {
+				return fmt.Errorf("tcp_onrecv: 第二个参数必须是函数")
+			}
+			return nb.OnRecv(connID, func(data string) {
+				_, _ = fn(goja.Undefined(), e.vm.ToValue(data))
+			})
+		})
+		reg("tcp_close", func(connID string) error { return nb.Close(connID) })
+		reg("tcp_stop", func(serverID string) error { return nb.Stop(serverID) })
+	}
+
+	// FTP 客户端：ftp_connect/list/upload/download/mkdir/rmdir/delete/rename/close
+	if h.FTPBridge != nil {
+		fb := h.FTPBridge
+		reg("ftp_connect", func(host string, port int, user, pass string) (string, error) {
+			return fb.Connect(host, port, user, pass)
+		})
+		reg("ftp_list", func(id, dir string) (string, error) { return fb.List(id, dir) })
+		reg("ftp_upload", func(id, localPath, remotePath string) error { return fb.Upload(id, localPath, remotePath) })
+		reg("ftp_download", func(id, remotePath, localPath string) error { return fb.Download(id, remotePath, localPath) })
+		reg("ftp_mkdir", func(id, dir string) error { return fb.Mkdir(id, dir) })
+		reg("ftp_rmdir", func(id, dir string) error { return fb.Rmdir(id, dir) })
+		reg("ftp_delete", func(id, path string) error { return fb.Delete(id, path) })
+		reg("ftp_rename", func(id, from, to string) error { return fb.Rename(id, from, to) })
+		reg("ftp_close", func(id string) error { return fb.Close(id) })
+	}
+
+	// WS 客户端桥（已实现，补接线注册）：ws_connect/send/onmessage/close
+	if h.WSClient != nil {
+		wc := h.WSClient
+		reg("ws_connect", func(url, headersJSON string) (string, error) { return wc.Connect(url, headersJSON) })
+		reg("ws_send", func(id, data string) error { return wc.Send(id, data) })
+		reg("ws_onmessage", func(id string, cb goja.Value) error {
+			fn, ok := goja.AssertFunction(cb)
+			if !ok {
+				return fmt.Errorf("ws_onmessage: 第二个参数必须是函数")
+			}
+			return wc.OnMessage(id, fn, e.vm)
+		})
+		reg("ws_close", func(id string) error { return wc.Close(id) })
+	}
+
 	return nil
 }
 
@@ -252,23 +319,39 @@ func FSReadRangeFn(path string, offset, length int64) (string, int64, error) {
 	return string(buf[:n]), size, nil
 }
 
-// RunScript 执行一段 JS 源码（已编译产物）。
-func (e *Engine) RunScript(name, src string) error {
+// RunScript 执行一段 JS 源码，30s 超时防死循环。
+func (e *Engine) RunScript(name, src string) (err error) {
 	if e.closed {
 		return fmt.Errorf("engine closed")
 	}
-	_, err := e.vm.RunScript(name, src)
+	// panic 隔离
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in run script %s: %v", name, r)
+		}
+	}()
+	// 30s 超时（goja 全局中断，脚本执行过久时抛出 *InterruptedError）
+	timer := time.AfterFunc(e.runTimeout, func() { e.vm.Interrupt("script timed out") })
+	defer timer.Stop()
+	_, err = e.vm.RunScript(name, src)
 	if err != nil {
 		return fmt.Errorf("run script %s: %w", name, err)
 	}
 	return nil
 }
 
-// Call 调用 JS 中的函数，args 为参数，返回 Go 值。
-func (e *Engine) Call(fn string, args ...any) (any, error) {
+// Call 调用 JS 中的函数，args 为参数，返回 Go 值。30s 超时 + panic 隔离。
+func (e *Engine) Call(fn string, args ...any) (res any, err error) {
 	if e.closed {
 		return nil, fmt.Errorf("engine closed")
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in call %s: %v", fn, r)
+		}
+	}()
+	timer := time.AfterFunc(e.callTimeout, func() { e.vm.Interrupt("call timed out") })
+	defer timer.Stop()
 	f, ok := goja.AssertFunction(e.vm.Get(fn))
 	if !ok {
 		return nil, fmt.Errorf("function %q not found", fn)
@@ -277,11 +360,12 @@ func (e *Engine) Call(fn string, args ...any) (any, error) {
 	for _, a := range args {
 		params = append(params, e.vm.ToValue(a))
 	}
-	res, err := f(goja.Undefined(), params...)
+	rv, err := f(goja.Undefined(), params...)
 	if err != nil {
 		return nil, fmt.Errorf("call %s: %w", fn, err)
 	}
-	return res.Export(), nil
+	res = rv.Export()
+	return res, nil
 }
 
 // Has 检查 JS 中是否存在某函数。

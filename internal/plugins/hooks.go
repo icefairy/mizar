@@ -109,11 +109,19 @@ func (r *hookRegistry) Fire(event string, ctxJSON string) (int, []error) {
 	ok := 0
 	var errs []error
 	for _, cb := range cbs {
-		if _, err := cb(ctxJSON); err != nil {
-			errs = append(errs, fmt.Errorf("hook %s: %w", event, err))
-		} else {
-			ok++
-		}
+		func() {
+			// 单个回调 panic 不拖垮其他回调
+			defer func() {
+				if r := recover(); r != nil {
+					errs = append(errs, fmt.Errorf("hook %s panic: %v", event, r))
+				}
+			}()
+			if _, err := cb(ctxJSON); err != nil {
+				errs = append(errs, fmt.Errorf("hook %s: %w", event, err))
+			} else {
+				ok++
+			}
+		}()
 	}
 	return ok, errs
 }

@@ -9,6 +9,7 @@ require (
 	github.com/gdamore/tcell/v2 v2.8.1
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/jlaffaye/ftp v0.2.2
 	github.com/lib/pq v1.12.3
 	github.com/peterh/liner v1.2.2
 	github.com/rivo/tview v0.42.0

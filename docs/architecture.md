@@ -230,28 +230,11 @@ db_exec_batch("sqlite3", "/data/app.db", JSON.stringify([
 
 ### 3.7 mcp_call——冷门能力的外部通道（v1.3+）
 
-`internal/mcp` 实现 MCP **client**（stdio + HTTP/streamable 传输，支持 `tools/list` / `tools/call`），连外部 MCP server——任何语言实现的协议服务，驱动/能力自带。
+插件需要 Redis/Kafka/MongoDB/ClickHouse 等长尾能力时，不内置驱动，走 `mcp_call` 调外部 MCP server：
 
-- **宿主函数**：`mcp_call(serverName, toolName, argsJSON)` → 结果文本
-- **配置**：`~/.mizar/config.json` 的 `mcp_servers` 数组，每项 `name` +（`command`/`args` 走 stdio 子进程，或 `url` 走 HTTP）
-- **惰性连接**：首次调用才启动/握手，连接按 server 复用；单次调用 30s 超时
-- **典型场景**：MongoDB/Redis/ClickHouse 等 db_query 白名单外的数据库、内部系统 API、专用工具链
-
-```json
-{
-  "mcp_servers": [
-    { "name": "redis", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-redis"] },
-    { "name": "internal", "url": "http://127.0.0.1:9000/mcp" }
-  ]
-}
-```
-
-```ts
-// 插件里一行调用
-export function tool_cache_get(key: string): string {
-  return mcp_call("redis", "get", JSON.stringify({ key }));
-}
-```
+- `mcp_call(server, tool, argsJSON)` → 文本
+- 配置驱动：`config.json` 加 `mcp_servers`（支持 stdio + HTTP 传输）
+- 惰性连接 + 复用 + 30s 超时；调用失败返回错误，不阻塞后续
 
 **分层总览**：`db_query`（内置关系型）→ `mcp_call`（外部任意服务），插件按场景选，互不阻塞。内置 3 驱动保持主体轻量，长尾能力全部外置，二进制永不膨胀。
 
@@ -261,36 +244,52 @@ export function tool_cache_get(key: string): string {
 
 | 钩子 | 触发时机 | 用途 |
 |---|---|---|
-| `plugin_init()` | 加载成功后（含首次加载、热重载新版本） | 建表、注册 hook、连外部服务、启动后台任务 |
-| `plugin_cleanup()` | 卸载前：热重载替换旧版本、**插件文件被删除**、进程退出前 | 关闭连接、释放端口、持久化状态、注销 hook |
+| `plugin_init()` | 加载成功后（含首次加载、热重载新版本） | 建表、注册 hook、初始化状态 |
+| `plugin_cleanup()` | 卸载前（热重载替换、插件文件被删除） | 释放连接、关闭端口、反注册 |
 
+示例：
 ```ts
-// extensions/worker.ts —— 生命周期示例
-var timer: any = null;
-
 export function plugin_init(): void {
-  db_exec_batch("sqlite3", "/data/worker.db", JSON.stringify([
-    "CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, task TEXT)",
-  ]));
-  // 注册 RunEnd hook：任务结束记一笔
-  hook_on("RunEnd", (ctx: string): string => {
-    db_query("sqlite3", "/data/worker.db", "INSERT INTO jobs (task) VALUES ('" + ctx + "')");
-    return "recorded";
-  });
+  db_exec_batch("sqlite3", "/data/app.db", "[...]");  // 建表
+  hook_on("RunEnd", (ctx) => {...});                  // 注册 hook
 }
-
 export function plugin_cleanup(): void {
-  if (timer) { clearInterval(timer); timer = null; }   // 停后台任务
-  db_close("sqlite3", "/data/worker.db");              // 断开连接
+  db_close("sqlite3", "/data/app.db");                // 释放连接
 }
 ```
 
-**稳定性语义**：
-- 单插件加载失败/panic 不影响其他插件和主程序（失败进 `failed` map，其余照常）
-- 热重载 = 原子替换：新版本 `plugin_init` 成功才生效，失败保留旧版本
-- **删除插件文件 → 自动卸载**：调 `plugin_cleanup` + 注销全部工具/命令/hook/HTTP 服务器，无幽灵残留
-- 生命周期回调在锁外执行，插件内可自由调宿主函数
+设计要点：
+- **回调在锁外执行**：init/cleanup 内可自由调宿主函数（db_query 等），不会死锁
+- **热重载原子性**：新版本 `plugin_init` 成功才生效；失败保留旧版本
+- **删除自动卸载**：插件文件消失 → `plugin_cleanup` + 注销全部工具/命令/hook/HTTP server（无幽灵插件）
+- **无钩子兼容**：插件不导出这两个函数完全不受影响（Has 探测跳过）
 
+### 3.9 网络能力（v1.3+）
+
+插件可直接开网络服务/连外部服务，做分布式互联：
+
+| 能力 | 函数 | 说明 |
+|---|---|---|
+| TCP 服务器 | `tcp_listen` / `tcp_stop` | onAccept 回调接入连接，返回 connID |
+| TCP 客户端 | `tcp_dial` / `tcp_send` / `tcp_onrecv` / `tcp_close` | 双向文本通信，协议自定 |
+| HTTP 服务器 | `host_listen` | 已存在（Manager 接管热重载关闭） |
+| FTP 客户端 | `ftp_connect` / `ftp_list` / `ftp_upload` / `ftp_download` / `ftp_mkdir` / `ftp_rmdir` / `ftp_delete` / `ftp_rename` / `ftp_close` | **仅客户端**，不暴露服务器 |
+| WS 客户端 | `ws_connect` / `ws_send` / `ws_onmessage` / `ws_close` | 连外部长连接服务（飞书等） |
+
+设计原则：
+- **回调驱动**：`tcp_onrecv`/`tcp_onmessage` 注册 JS 回调，数据到达自动触发，不阻塞 Agent 主循环
+- **零状态泄漏**：TCP server stop / 插件热重载时全部连接自动关闭
+- **命名统一**：`tcp_*`/`ftp_*`/`ws_*` 前缀，与 `host_listen` 并列
+
+### 3.10 稳定性加固（v1.3+）
+
+| 防线 | 机制 | 效果 |
+|---|---|---|
+| 加载失败隔离 | loadPlugin 逐个加载，失败进 failed map | 坏插件不影响其他插件与主程序 |
+| 热重载原子性 | 新引擎成功才替换，失败保留旧 | 改坏不丢 |
+| 删除自动卸载 | loadAll 对比目录发现文件消失 → plugin_cleanup + 注销 | 无幽灵插件 |
+| **panic 隔离** | Call / RunScript / FireHook 全部 defer recover | 宿主函数 panic 不拖垮主程序 |
+| **执行超时** | Call / RunScript 默认 30s，goja Interrupt 打断 | 死循环插件被中断，引擎可继续用 |
 
 ## 4. 自举闭环（核心卖点）
 ```
