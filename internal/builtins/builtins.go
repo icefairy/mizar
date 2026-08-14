@@ -57,7 +57,7 @@ func toolBash() plugins.Tool {
 			cmd := exec.Command("bash", "-c", p.Command)
 			// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化（平台抽象）
 			setupProcessGroup(cmd)
-			var out strings.Builder
+var out strings.Builder
 			cmd.Stdout = &out
 			cmd.Stderr = &out
 			if err := cmd.Start(); err != nil {
@@ -67,13 +67,25 @@ func toolBash() plugins.Tool {
 			go func() { done <- cmd.Wait() }()
 			if p.Timeout > 0 {
 				select {
-				case <-done:
+				case err := <-done:
+					if err != nil {
+						return out.String(), err
+					}
 				case <-time.After(time.Duration(p.Timeout) * time.Second):
 					_ = killProcessTree(cmd)
-					return "", fmt.Errorf("bash: timeout after %ds", p.Timeout)
+					return out.String(), fmt.Errorf("bash: timeout after %ds", p.Timeout)
 				}
 			} else {
-				<-done
+				// 默认 60s 超时，防止命令无限阻塞
+				select {
+				case err := <-done:
+					if err != nil {
+						return out.String(), err
+					}
+				case <-time.After(60 * time.Second):
+					_ = killProcessTree(cmd)
+					return out.String(), fmt.Errorf("bash: timeout after 60s (default)")
+				}
 			}
 			full := out.String()
 			// 输出截断（对齐 pi）：50KB 超限截尾 + 落盘 temp + 回传路径

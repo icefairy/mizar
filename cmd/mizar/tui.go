@@ -7,10 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	glamour "github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 
 	"mizar/internal/agent"
 	"mizar/internal/session"
@@ -32,22 +30,7 @@ type toolCallInfo struct {
 }
 
 // =============================================================================
-// 样式
-// =============================================================================
-
-var (
-	styleUser    = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
-	styleBot     = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
-	styleErr     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
-	styleTool    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Italic(true) // 青色斜体：工具调用
-	styleSep     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleHelp    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleStat    = lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // 状态栏紫色
-	styleStatOff = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // 关闭状态灰色
-)
-
-// =============================================================================
-// 统计
+// TUI 模型
 // =============================================================================
 
 type tuiStats struct {
@@ -80,181 +63,301 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 	}
 }
 
-// =============================================================================
-// 模型
-// =============================================================================
-
 type tuiModel struct {
 	agent     *agent.Agent
 	store     *session.Store
 	sessionID string
-	input     textinput.Model
 	lines     []chatLine
-	width     int
-	height    int
-	loading   bool
-	status    string
 	stats     tuiStats
-	renderer  *glamour.TermRenderer
-	// 实时工具调用：结构体字段持有 channel，钩子只注册一次
-	liveCh   chan liveToolMsg
+	loading   bool
+	app       *tview.Application
+	textView  *tview.TextView
+	inputField *tview.InputField
+	statusBar *tview.TextView
+	flex      *tview.Flex
+
+	// 钩子通信：每次任务用新 channel
 	liveMu   sync.Mutex
-	allCalls []toolCallInfo
-	lastSeq  int
+	evtCh    chan toolCallInfo
 }
 
+// sgrColor 生成 tview 动态颜色标记：[color:name]text[::]
+func sgrColor(name, text string) string {
+	return "[#" + name + "]" + text + "[::]"
+}
+
+func (m *tuiModel) addChatLine(line chatLine) {
+	m.lines = append(m.lines, line)
+	m.renderAll()
+}
+
+func (m *tuiModel) renderAll() {
+	m.app.QueueUpdateDraw(func() {
+		var sb strings.Builder
+		start := 0
+		if len(m.lines) > 30 {
+			start = len(m.lines) - 30
+		}
+		for _, l := range m.lines[start:] {
+			t := l.ts.Format("15:04")
+			switch l.role {
+			case "system":
+				sb.WriteString(l.content + "\n")
+			case "user":
+				sb.WriteString(sgrColor("bold", fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
+			case "bot":
+				sb.WriteString(sgrColor("green", fmt.Sprintf("▲ [%s]", t)) + "\n")
+				sb.WriteString(l.content + "\n\n")
+			case "err":
+				sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, l.content)) + "\n")
+			case "tool":
+				sb.WriteString(sgrColor("cyan", fmt.Sprintf("🔧 [%s] %s", t, l.content)) + "\n")
+			}
+		}
+		m.textView.SetText(sb.String()).SetDynamicColors(true).ScrollToEnd()
+		m.updateStatusBar()
+	})
+}
+
+func (m *tuiModel) updateStatusBar() {
+	s := &m.stats
+	var sb strings.Builder
+
+	sb.WriteString(sgrColor("magenta", "tokens: "))
+	sb.WriteString(fmt.Sprintf("%d", s.CumulativeTotalTokens))
+	sb.WriteString(sgrColor("magenta", "(in:"))
+	sb.WriteString(fmt.Sprintf("%d", s.CumulativePromptTokens))
+	sb.WriteString(sgrColor("magenta", " out:"))
+	sb.WriteString(fmt.Sprintf("%d", s.CumulativeCompletionTokens))
+	sb.WriteString(sgrColor("magenta", ")"))
+
+	if a := m.agent; a != nil && a.Compactor != nil {
+		limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
+		if limit > 0 && len(m.lines) > 0 {
+			est := 0
+			for i := 1; i < len(m.lines); i++ {
+				est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
+			}
+			pct := float64(est) / float64(limit) * 100
+			color := "green"
+			if pct > 80 {
+				color = "red"
+			} else if pct > 60 {
+				color = "yellow"
+			}
+			sb.WriteString(sgrColor("magenta", " | "))
+			sb.WriteString(sgrColor(color, fmt.Sprintf("压缩: %.0f%%", pct)))
+		}
+	}
+
+	if s.CumulativeCachedTokens > 0 && s.CumulativePromptTokens > 0 {
+		hit := float64(s.CumulativeCachedTokens) / float64(s.CumulativePromptTokens) * 100
+		sb.WriteString(sgrColor("magenta", " | "))
+		sb.WriteString(sgrColor("magenta", fmt.Sprintf("缓存: %.0f%%", hit)))
+	} else {
+		sb.WriteString(sgrColor("magenta", " | "))
+		sb.WriteString(sgrColor("magenta", "缓存: -"))
+	}
+
+	if s.LastCompletionTokens > 0 && s.LastResponseDuration > 0 {
+		sb.WriteString(sgrColor("magenta", " | "))
+		sb.WriteString(sgrColor("magenta", fmt.Sprintf("%.0f tok/s", s.LastSpeedTokensPerSec)))
+	} else {
+		sb.WriteString(sgrColor("magenta", " | "))
+		sb.WriteString(sgrColor("magenta", ". tok/s"))
+	}
+
+	level := s.ThinkingLevel
+	if level == "" {
+		level = "auto"
+	}
+	sb.WriteString(sgrColor("magenta", " | "))
+	sb.WriteString(sgrColor("magenta", "思考: "))
+	if level == "off" {
+		sb.WriteString(sgrColor("grey", level))
+	} else {
+		sb.WriteString(sgrColor("magenta", level))
+	}
+
+	m.app.QueueUpdateDraw(func() {
+		m.statusBar.SetText(sb.String()).SetDynamicColors(true)
+	})
+}
+
+func (m *tuiModel) setLoading(loading bool) {
+	m.loading = loading
+	m.app.QueueUpdateDraw(func() {
+		if loading {
+			m.inputField.SetPlaceholder("思考中...")
+			m.inputField.SetLabel("> ")
+		} else {
+			m.inputField.SetPlaceholder("输入任务，/help 查看命令，/quit 退出")
+		}
+		m.updateStatusBar()
+	})
+}
+
+func (m *tuiModel) startTask(input string) {
+	m.liveMu.Lock()
+	evtCh := make(chan toolCallInfo, 20)
+	m.evtCh = evtCh
+	m.liveMu.Unlock()
+
+	m.setLoading(true)
+	m.stats.RequestStartTime = time.Now()
+	m.addChatLine(chatLine{role: "user", content: input, ts: time.Now()})
+
+	go func() {
+		reply, err := m.agent.Run(input)
+		m.liveMu.Lock()
+		m.evtCh = nil
+		m.liveMu.Unlock()
+
+		elapsed := time.Since(m.stats.RequestStartTime)
+
+		// 用量
+		if ut, ok := m.agent.LLM.(interface{ LastUsage() *agent.Usage }); ok {
+			if u := ut.LastUsage(); u != nil {
+				m.stats.AddUsage(u, elapsed)
+			}
+		}
+		// 思考等级
+		if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+			m.stats.ThinkingLevel = ut.ThinkingEnabled()
+		}
+		m.stats.ModelName = m.agent.Model()
+
+		if err != nil {
+			m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+		} else {
+			m.addChatLine(chatLine{role: "bot", content: reply, ts: time.Now()})
+		}
+
+		m.setLoading(false)
+	}()
+}
+
+// =============================================================================
+// 构造
+// =============================================================================
+
 func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
-	ti := textinput.New()
-	ti.Placeholder = "输入任务，/help 查看命令，/quit 退出"
-	ti.Focus()
-	ti.Width = 80
-
-	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-	)
-
 	m := &tuiModel{
 		agent:     a,
 		store:     st,
 		sessionID: sid,
-		input:     ti,
-		width:     80,
-		height:    24,
-		renderer:  renderer,
 		lines: []chatLine{
-			{
-				role:    "system",
-				content: banner(),
-				ts:      time.Now(),
-			},
+			{role: "system", content: banner(), ts: time.Now()},
 		},
-		status: fmt.Sprintf("model=%s", a.Model()),
+		stats: tuiStats{ModelName: a.Model()},
 	}
 
-	// 钩子只注册一次：从结构体字段读取当前 liveCh，每次任务更新字段即可
-	if a.Hooks != nil {
-		a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
-			m.liveMu.Lock()
-			defer m.liveMu.Unlock()
-			if m.liveCh == nil {
-				return nil // 任务间无活跃监听，跳过
-			}
-			m.lastSeq++
-			call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
-			m.allCalls = append(m.allCalls, call)
-			select {
-			case m.liveCh <- liveToolMsg{tool: call.Tool, args: call.Args, seq: m.lastSeq}:
-			default:
+	// 文本视图（聊天区，可滚动）
+	m.textView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true).
+		SetWordWrap(true)
+	m.textView.SetBorder(true).
+		SetTitle(" 开阳 Mizar ").
+		SetTitleAlign(tview.AlignLeft)
+
+	// 输入框
+	m.inputField = tview.NewInputField().
+		SetLabel("> ").
+		SetFieldWidth(0).
+		SetPlaceholder("输入任务，/help 查看命令，/quit 退出")
+
+	// 状态栏
+	m.statusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(false)
+	m.statusBar.SetBorder(true).
+		SetBorderPadding(0, 0, 1, 1)
+
+	// 布局：垂直排列
+	m.flex = tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(m.textView, 0, 1, true).
+		AddItem(m.inputField, 1, 0, false).
+		AddItem(m.statusBar, 1, 0, false)
+
+	// 应用
+	m.app = tview.NewApplication()
+
+	// 全局按键捕获（Ctrl+T 切换思考等级）
+	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyCtrlT {
+			if toggle, ok := m.agent.LLM.(interface{ ToggleThinking() string }); ok {
+				newLevel := toggle.ToggleThinking()
+				m.stats.ThinkingLevel = newLevel
+				m.addChatLine(chatLine{role: "err", content: "思考等级已切换: " + newLevel, ts: time.Now()})
 			}
 			return nil
-		})
-	}
+		}
+		if event.Key() == tcell.KeyEsc && m.loading {
+			m.setLoading(false)
+			m.addChatLine(chatLine{role: "err", content: "任务已取消", ts: time.Now()})
+			return nil
+		}
+		return event // 转发
+	})
 
-	return m
-}
-
-func (m *tuiModel) Init() tea.Cmd { return nil }
-
-type doneMsg struct {
-	reply     string
-	err       error
-	toolCalls []toolCallInfo
-}
-
-// liveToolMsg 工具调用实时通知（任务进行中）
-type liveToolMsg struct {
-	tool string
-	args string
-	seq  int // 序号，防止乱序
-}
-
-func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-		m.input.Width = msg.Width - 2
-		if m.input.Width < 10 {
-			m.input.Width = 40
+	// 输入框 DoneFunc
+	m.inputField.SetDoneFunc(func(key tcell.Key) {
+		if key != tcell.KeyEnter {
+			return
+		}
+		if m.loading {
+			return
+		}
+		s := strings.TrimSpace(m.inputField.GetText())
+		if s == "" {
+			return
 		}
 
-	case tea.KeyMsg:
-		if msg.Type == tea.KeyEnter {
-			if m.loading {
-				return m, nil
-			}
-			s := strings.TrimSpace(m.input.Value())
-			if s == "" {
-				return m, nil
-			}
-			m.input.SetValue("")
-
+		// Tab 补全（如果未补全则 Enter 触发）
+		if strings.HasPrefix(s, "/") {
 			// 斜杠命令
-			if strings.HasPrefix(s, "/") {
-				if handled, out, err := m.agent.Commands.Dispatch(s); handled {
-					if err != nil {
-						m.lines = append(m.lines, chatLine{role: "err", content: err.Error(), ts: time.Now()})
-					}
-					if out != "" {
-						m.lines = append(m.lines, chatLine{role: "bot", content: out, ts: time.Now()})
-					}
-					// 更新状态栏信息
-					m.stats.ModelName = m.agent.Model()
-					m.status = fmt.Sprintf("model=%s", m.agent.Model())
-					if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
-						m.stats.ThinkingLevel = ut.ThinkingEnabled()
-					}
-					return m, nil
+			if handled, out, err := m.agent.Commands.Dispatch(s); handled {
+				if err != nil {
+					m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
 				}
-			}
-
-			if s == "/quit" || s == "/exit" {
-				return m, tea.Quit
-			}
-
-			// 普通消息：记录开始时间
-			m.lines = append(m.lines, chatLine{role: "user", content: s, ts: time.Now()})
-			m.loading = true
-			m.stats.RequestStartTime = time.Now()
-
-			// 重置实时工具调用状态（新 channel + 清空收集列表）
-			m.liveMu.Lock()
-			m.liveCh = make(chan liveToolMsg, 20)
-			m.allCalls = nil
-			m.lastSeq = 0
-			liveCh := m.liveCh
-			m.liveMu.Unlock()
-
-			done := make(chan doneMsg, 1)
-			go func() {
-				reply, err := m.agent.Run(s)
-				m.liveMu.Lock()
-				close(liveCh) // 关闭本地副本（与 m.liveCh 同引用）
-				m.liveCh = nil // 标记无活跃监听，让钩子跳过
-				calls := append([]toolCallInfo(nil), m.allCalls...)
-				m.liveMu.Unlock()
-				done <- doneMsg{reply: reply, err: err, toolCalls: calls}
-			}()
-
-			return m, func() tea.Msg {
-				select {
-				case evt, ok := <-liveCh:
-					if !ok {
-						return <-done
-					}
-					return evt
+				if out != "" {
+					m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
 				}
+				// 更新状态
+				m.stats.ModelName = m.agent.Model()
+				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+					m.stats.ThinkingLevel = ut.ThinkingEnabled()
+				}
+				m.updateStatusBar()
+				return
 			}
 		}
 
-		if msg.Type == tea.KeyTab {
-			// Tab 补全：/ 命令 / @ 补全
-			val := m.input.Value()
+		if s == "/quit" || s == "/exit" {
+			m.app.Stop()
+			return
+		}
+
+		// 普通消息
+		m.startTask(s)
+		m.inputField.SetText("")
+	})
+
+	// Tab 补全
+	m.inputField.SetChangedFunc(func(text string) {
+		// 空实现，仅用于占位
+	})
+	m.inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyTab {
+			val := m.inputField.GetText()
 			if strings.HasPrefix(val, "/") {
 				for _, c := range m.agent.Commands.List() {
 					full := "/" + c.Name
 					if strings.HasPrefix(full, val) && full != val {
-						m.input.SetValue(full + " ")
-						break
+						m.inputField.SetText(full + " ")
+						return nil
 					}
 				}
 			} else if idx := strings.LastIndex(val, "@"); idx >= 0 {
@@ -270,178 +373,42 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cands := completeAtRaw(after, cmds, tools)
 				if len(cands) > 0 {
 					newVal := val[:idx] + cands[0] + " "
-					m.input.SetValue(newVal)
+					m.inputField.SetText(newVal)
 				}
 			}
-			return m, nil
+			return nil
 		}
+		return event
+	})
 
-		if msg.Type == tea.KeyEsc {
-			if m.loading {
-				m.loading = false
-				m.lines = append(m.lines, chatLine{role: "err", content: "任务已取消", ts: time.Now()})
+	// 钩子只注册一次：从 m.evtCh 发送工具调用
+	if a.Hooks != nil {
+		a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
+			m.liveMu.Lock()
+			ch := m.evtCh
+			m.liveMu.Unlock()
+			if ch == nil {
+				return nil
 			}
-			return m, nil
-		}
-
-		// Ctrl+T 切换思考等级
-		if msg.Type == tea.KeyCtrlT {
-			if toggle, ok := m.agent.LLM.(interface{ ToggleThinking() string }); ok {
-				newLevel := toggle.ToggleThinking()
-				m.stats.ThinkingLevel = newLevel
-				m.lines = append(m.lines, chatLine{role: "err", content: "思考等级已切换: " + newLevel, ts: time.Now()})
+			call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
+			select {
+			case ch <- call:
+				m.addChatLine(chatLine{role: "tool", content: call.Tool + "(" + call.Args + ")", ts: time.Now()})
+			default:
 			}
-			return m, nil
-		}
-
-		m.input, _ = m.input.Update(msg)
-
-	case liveToolMsg:
-		// 实时工具调用展示（思考过程中立即显示）
-		m.lines = append(m.lines, chatLine{role: "tool", content: msg.tool + "(" + msg.args + ")", ts: time.Now()})
-
-	case doneMsg:
-		m.loading = false
-		elapsed := time.Since(m.stats.RequestStartTime)
-
-		// 从 LLM 获取用量
-		if ut, ok := m.agent.LLM.(interface{ LastUsage() *agent.Usage }); ok {
-			if u := ut.LastUsage(); u != nil {
-				m.stats.AddUsage(u, elapsed)
-			}
-		}
-		// 更新思考等级状态
-		if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
-			m.stats.ThinkingLevel = ut.ThinkingEnabled()
-		}
-		m.stats.ModelName = m.agent.Model()
-
-		// 工具调用已在思考过程中实时显示（liveToolMsg），此处不再重复添加
-
-		if msg.err != nil {
-			m.lines = append(m.lines, chatLine{role: "err", content: msg.err.Error(), ts: time.Now()})
-		} else {
-			m.lines = append(m.lines, chatLine{role: "bot", content: msg.reply, ts: time.Now()})
-		}
-		m.input.Focus()
+			return nil
+		})
 	}
 
-	return m, nil
+	return m
 }
 
-func (m *tuiModel) View() string {
-	var sb strings.Builder
-
-	// 保留最后 15 条（避免撑爆）
-	start := 0
-	if len(m.lines) > 15 {
-		start = len(m.lines) - 15
-	}
-
-	for _, l := range m.lines[start:] {
-		t := l.ts.Format("15:04")
-		switch l.role {
-		case "system":
-			// banner 直接输出（已含格式化）
-			sb.WriteString(l.content + "\n")
-		case "user":
-			sb.WriteString(styleUser.Render("▶ ["+t+"]") + "\n")
-			sb.WriteString(l.content + "\n\n")
-		case "bot":
-			sb.WriteString(styleBot.Render("▲ ["+t+"]") + "\n")
-			// Markdown 渲染
-			rendered, err := m.renderer.Render(l.content)
-			if err != nil {
-				rendered = l.content
-			}
-			sb.WriteString(rendered + "\n\n")
-		case "err":
-			sb.WriteString(styleErr.Render("✗ ["+t+"]") + " " + l.content + "\n")
-		case "tool":
-			// 工具调用摘要：🔧 read(/tmp/file) bash(ls -la)...
-			sb.WriteString(styleTool.Render("🔧 ["+t+"]") + " " + l.content + "\n")
-		}
-	}
-
-	// 分隔线
-	sb.WriteString(styleSep.Render(strings.Repeat("─", m.width-2)) + "\n")
-
-	// 输入区
-	if m.loading {
-		elapsed := time.Since(m.stats.RequestStartTime).Seconds()
-		sb.WriteString(fmt.Sprintf("  ⏳ [思考中...] %s 耗时%.0fs", m.status, elapsed))
-	} else {
-		sb.WriteString(m.input.View() + "\n")
-	}
-
-	// ===== 状态栏（统计信息） =====
-	status := m.statusBar()
-	sb.WriteString(styleStat.Render(status) + "\n")
-
-	// 帮助行
-	sb.WriteString(styleHelp.Render("  Enter=发送 | Tab=补全 | Ctrl+T=思考 | /think=等级 | /help=命令 | /quit=退出 | Esc=取消") + "\n")
-
-	return sb.String()
+func (m *tuiModel) Run() error {
+	m.app.SetRoot(m.flex, true)
+	m.app.SetFocus(m.inputField)
+	return m.app.Run()
 }
 
-// statusBar 构建底部状态栏：tokens/压缩进度/缓存命中/响应速度/思考等级
-func (m *tuiModel) statusBar() string {
-	var sb strings.Builder
-	s := &m.stats
-
-	// 1. 累计 tokens
-	sb.WriteString(fmt.Sprintf("tokens: %d", s.CumulativeTotalTokens))
-	sb.WriteString("(in:" + fmt.Sprintf("%d", s.CumulativePromptTokens) + " out:" + fmt.Sprintf("%d", s.CumulativeCompletionTokens) + ")")
-
-	// 2. 压缩进度（接近触发阈值百分比）
-	if a := m.agent; a != nil && a.Compactor != nil {
-		limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
-		if limit > 0 && len(m.lines) > 0 {
-			est := 0
-			for i := 1; i < len(m.lines); i++ {
-				est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
-			}
-			pct := float64(est) / float64(limit) * 100
-			color := lipgloss.Color("2") // 绿色
-			if pct > 80 {
-				color = lipgloss.Color("1") // 红色
-			} else if pct > 60 {
-				color = lipgloss.Color("3") // 黄色
-			}
-			sb.WriteString(" | 压缩: " + lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%.0f%%", pct)))
-		}
-	}
-
-	// 3. 缓存命中率
-	if s.CumulativeCachedTokens > 0 && s.CumulativePromptTokens > 0 {
-		hit := float64(s.CumulativeCachedTokens) / float64(s.CumulativePromptTokens) * 100
-		sb.WriteString(fmt.Sprintf(" | 缓存:%.0f%%", hit))
-	} else {
-		sb.WriteString(" | 缓存:-")
-	}
-
-	// 4. 响应速度 tokens/s
-	if s.LastCompletionTokens > 0 && s.LastResponseDuration > 0 {
-		sb.WriteString(fmt.Sprintf(" | %.0f tok/s", s.LastSpeedTokensPerSec))
-	} else {
-		sb.WriteString(" | . tok/s")
-	}
-
-	// 5. 思考等级
-	level := s.ThinkingLevel
-	if level == "" {
-		level = "auto"
-	}
-	if level == "off" {
-		sb.WriteString(" | 思考: " + styleStatOff.Render(level))
-	} else {
-		sb.WriteString(" | 思考: " + level)
-	}
-
-	return sb.String()
-}
-
-// truncateArgs 截断工具参数（JSON 展示时取前 80 字符）
 func truncateArgs(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= 80 {
@@ -452,8 +419,7 @@ func truncateArgs(s string) string {
 
 func runTUI(a *agent.Agent, st *session.Store, sessionID string) {
 	m := newTuiModel(a, st, sessionID)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	if err := m.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI 退出: %v，回退经典模式\n", err)
 		fmt.Println(banner())
 		classicFallback(a, st, sessionID)
