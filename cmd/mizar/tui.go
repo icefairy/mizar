@@ -167,9 +167,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					newVal := val[:idx] + cands[0] + " "
 					m.input.SetValue(newVal)
 				}
-				}
+			}
 			return m, nil
 		}
+
 		if msg.Type == tea.KeyEsc {
 			if m.loading {
 				m.loading = false
