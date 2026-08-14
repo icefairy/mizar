@@ -57,7 +57,7 @@ func toolBash() plugins.Tool {
 			cmd := exec.Command("bash", "-c", p.Command)
 			// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化（平台抽象）
 			setupProcessGroup(cmd)
-var out strings.Builder
+			var out strings.Builder
 			cmd.Stdout = &out
 			cmd.Stderr = &out
 			if err := cmd.Start(); err != nil {

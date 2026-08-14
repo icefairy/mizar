@@ -64,21 +64,21 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 }
 
 type tuiModel struct {
-	agent     *agent.Agent
-	store     *session.Store
-	sessionID string
-	lines     []chatLine
-	stats     tuiStats
-	loading   bool
-	app       *tview.Application
-	textView  *tview.TextView
+	agent      *agent.Agent
+	store      *session.Store
+	sessionID  string
+	lines      []chatLine
+	stats      tuiStats
+	loading    bool
+	app        *tview.Application
+	textView   *tview.TextView
 	inputField *tview.InputField
-	statusBar *tview.TextView
-	flex      *tview.Flex
+	statusBar  *tview.TextView
+	flex       *tview.Flex
 
 	// 钩子通信：每次任务用新 channel
-	liveMu   sync.Mutex
-	evtCh    chan toolCallInfo
+	liveMu sync.Mutex
+	evtCh  chan toolCallInfo
 }
 
 // sgrColor 生成 tview 动态颜色标记：[color:name]text[::]
@@ -302,55 +302,48 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		return event // 转发
 	})
 
-	// 输入框 DoneFunc
-	m.inputField.SetDoneFunc(func(key tcell.Key) {
-		if key != tcell.KeyEnter {
-			return
-		}
-		if m.loading {
-			return
-		}
-		s := strings.TrimSpace(m.inputField.GetText())
-		if s == "" {
-			return
-		}
-
-		// Tab 补全（如果未补全则 Enter 触发）
-		if strings.HasPrefix(s, "/") {
-			// 斜杠命令
-			if handled, out, err := m.agent.Commands.Dispatch(s); handled {
-				if err != nil {
-					m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
-				}
-				if out != "" {
-					m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
-				}
-				// 更新状态
-				m.stats.ModelName = m.agent.Model()
-				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
-					m.stats.ThinkingLevel = ut.ThinkingEnabled()
-				}
-				m.updateStatusBar()
-				return
-			}
-		}
-
-		if s == "/quit" || s == "/exit" {
-			m.app.Stop()
-			return
-		}
-
-		// 普通消息
-		m.startTask(s)
-		m.inputField.SetText("")
-	})
-
-	// Tab 补全
-	m.inputField.SetChangedFunc(func(text string) {
-		// 空实现，仅用于占位
-	})
+	// 输入框按键捕获（Enter 发送，Tab 补全）
 	m.inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyTab {
+		switch event.Key() {
+		case tcell.KeyEnter:
+			// 回车发送
+			if m.loading {
+				return nil
+			}
+			s := strings.TrimSpace(m.inputField.GetText())
+			if s == "" {
+				return nil
+			}
+			m.inputField.SetText("")
+
+			// 斜杠命令
+			if strings.HasPrefix(s, "/") {
+				if handled, out, err := m.agent.Commands.Dispatch(s); handled {
+					if err != nil {
+						m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+					}
+					if out != "" {
+						m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
+					}
+					m.stats.ModelName = m.agent.Model()
+					if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+						m.stats.ThinkingLevel = ut.ThinkingEnabled()
+					}
+					m.updateStatusBar()
+					return nil
+				}
+			}
+
+			if s == "/quit" || s == "/exit" {
+				m.app.Stop()
+				return nil
+			}
+
+			m.startTask(s)
+			return nil
+
+		case tcell.KeyTab:
+			// Tab 补全
 			val := m.inputField.GetText()
 			if strings.HasPrefix(val, "/") {
 				for _, c := range m.agent.Commands.List() {
@@ -404,6 +397,11 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 }
 
 func (m *tuiModel) Run() error {
+	// 初始渲染 banner（直接设 text 而非 QueueUpdateDraw，因事件循环尚未启动）
+	var sb strings.Builder
+	sb.WriteString(banner() + "\n")
+	m.textView.SetText(sb.String()).SetDynamicColors(true)
+
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)
 	return m.app.Run()
