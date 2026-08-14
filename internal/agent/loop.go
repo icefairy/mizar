@@ -44,7 +44,7 @@ type Agent struct {
 	LLM        LLM
 	Plugins    *plugins.Manager
 	System     string
-	PluginDir  string   // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
+	PluginDir  string          // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
 	Initial    []Message       // 会话恢复时的历史消息（置于 task 之前）
 	MaxSteps   int             // 最大循环步数（默认 20）
 	VerboseLog func(string)    // 可选日志回调

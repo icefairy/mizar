@@ -2,7 +2,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	ctxpkg "context"
@@ -220,62 +218,7 @@ func main() {
 	host.LSPUnregisterDiagnostic = lsp.UnregisterDiagnosticProvider
 	host.LSPUnregisterCompletion = lsp.UnregisterCompletionProvider
 
-	// host_listen：启动纯 Go HTTP 服务器，请求转发到 JS handler
-	host.HostListen = func(addr string, handler func(requestJSON string) string) (string, error) {
-		mux := http.NewServeMux()
-		var mu sync.Mutex
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			// 读取请求体
-			body, _ := io.ReadAll(r.Body)
-			// 构造成 requestJSON
-			type respHeaders struct {
-				Key   string `json:"key"`
-				Value string `json:"value"`
-			}
-			reqMap := map[string]any{
-				"method":  r.Method,
-				"path":    r.URL.Path,
-				"query":   r.URL.RawQuery,
-				"body":    string(body),
-				"headers": r.Header,
-			}
-			reqJSON, _ := json.Marshal(reqMap)
-
-			// 调用 JS handler
-			mu.Lock()
-			respStr := handler(string(reqJSON))
-			mu.Unlock()
-
-			// 解析响应 JSON
-			var resp struct {
-				Status  int               `json:"status"`
-				Body    string            `json:"body"`
-				Headers map[string]string `json:"headers,omitempty"`
-			}
-			if err := json.Unmarshal([]byte(respStr), &resp); err != nil {
-				http.Error(w, "handler 返回无效 JSON", 500)
-				return
-			}
-			if resp.Status == 0 {
-				resp.Status = 200
-			}
-			for k, v := range resp.Headers {
-				w.Header().Set(k, v)
-			}
-			w.WriteHeader(resp.Status)
-			if _, werr := w.Write([]byte(resp.Body)); werr != nil {
-				log.Printf("host_listen 写入响应失败: %v", werr)
-			}
-		})
-
-		srv := &http.Server{Addr: addr, Handler: mux}
-		go func() {
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("host_listen 服务器错误: %v", err)
-			}
-		}()
-		return fmt.Sprintf("HTTP 服务器已启动: http://%s", addr), nil
-	}
+	// host_listen：由插件 Manager 接管（internal/plugins/loader.go 中实现）
 
 	extAbs, err := filepath.Abs(*extDir)
 	if err != nil {

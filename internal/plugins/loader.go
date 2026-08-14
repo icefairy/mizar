@@ -3,8 +3,11 @@
 package plugins
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,6 +49,10 @@ type Manager struct {
 	// 当前加载的 LSP 注册计数（用于判定 LSP-only 插件）
 	lspRegCount int
 
+	// 活跃 HTTP 服务器跟踪（host_listen 用）
+	// pluginFile → 该插件启动的服务器列表
+	activeServers map[string][]*http.Server
+
 	// Hook 回调注册表（hook_on 宿主函数收集，Agent 触发挂载点时 Fire）
 	hookReg *hookRegistry
 }
@@ -64,6 +71,7 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 		maxExec:      30 * time.Second,
 		lspDiagNames: make(map[string][]string),
 		lspCompNames: make(map[string][]string),
+		activeServers: make(map[string][]*http.Server),
 		hookReg:      newHookRegistry(),
 	}
 	// 包装 LSP 宿主函数，跟踪文件名
@@ -99,6 +107,53 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 			file := m.loadFile
 			m.mu.Unlock()
 			return m.hookReg.Register(file, event, cb)
+		}
+		// host_listen：Manager 接管 HTTP 服务器创建，实现追踪和热重载关闭
+		host.HostListen = func(addr string, handler func(string) string) (string, error) {
+				m.mu.Lock()
+				file := m.loadFile
+				m.mu.Unlock()
+
+				srv := &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, _ := io.ReadAll(r.Body)
+					reqMap := map[string]any{
+						"method":  r.Method,
+						"path":    r.URL.Path,
+						"query":   r.URL.RawQuery,
+						"body":    string(body),
+						"headers": r.Header,
+					}
+					reqJSON, _ := json.Marshal(reqMap)
+					respStr := handler(string(reqJSON))
+					var resp struct {
+						Status  int               `json:"status"`
+						Body    string            `json:"body"`
+						Headers map[string]string `json:"headers,omitempty"`
+					}
+					if err := json.Unmarshal([]byte(respStr), &resp); err != nil {
+						http.Error(w, "handler 返回无效 JSON", 500)
+						return
+					}
+					if resp.Status == 0 {
+						resp.Status = 200
+					}
+					for k, v := range resp.Headers {
+						w.Header().Set(k, v)
+					}
+					w.WriteHeader(resp.Status)
+					w.Write([]byte(resp.Body))
+				})}
+
+				m.mu.Lock()
+				m.activeServers[file] = append(m.activeServers[file], srv)
+				m.mu.Unlock()
+
+				go func() {
+					if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						fmt.Fprintf(os.Stderr, "host_listen: %s: %v\n", addr, err)
+					}
+				}()
+				return fmt.Sprintf("HTTP 服务器已启动: http://%s", addr), nil
 		}
 	}
 	return m
@@ -227,6 +282,7 @@ func (m *Manager) loadPlugin(filename string) error {
 	m.removeCommandsLocked(filename)
 	m.removeRPCLocked(filename)
 	m.removeLSPLocked(filename)
+	m.removeServersLocked(filename) // 关闭旧 HTTP 服务器，释放端口
 	for _, t := range tools {
 		m.tools[t.Name] = t
 	}
@@ -301,6 +357,16 @@ func (m *Manager) removeLSPLocked(filename string) {
 	}
 	delete(m.lspDiagNames, filename)
 	delete(m.lspCompNames, filename)
+}
+
+// removeServersLocked 关闭某插件启动的所有 HTTP 服务器（热重载时调用）。
+func (m *Manager) removeServersLocked(filename string) {
+	for _, srv := range m.activeServers[filename] {
+		if srv != nil {
+			_ = srv.Close()
+		}
+	}
+	delete(m.activeServers, filename)
 }
 
 // Tools 返回当前所有工具（按名排序，排除禁用的）。
