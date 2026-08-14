@@ -84,7 +84,7 @@ func TestHooksAllPointsFired(t *testing.T) {
 	// 第一次 LLM 调用返回工具调用，但脚本一直返回工具调用会死循环；用 2 步策略
 	llm.fn = func(msgs []Message) (string, error) {
 		if len(msgs) <= 3 { // 首次调用：工具
-			return `{"action":"tool","tool":"ping","args":""}`, nil
+			return `{"action":"tool","tool":"ping","args":"{\"host\":\"127.0.0.1\"}"}`, nil
 		}
 		return `{"action":"reply","text":"done"}`, nil
 	}

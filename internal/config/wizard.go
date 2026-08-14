@@ -193,10 +193,10 @@ func (w *wizard) cmdThink(p func(string, ...any), args string) {
 	arg := strings.ToLower(strings.TrimSpace(args))
 	switch arg {
 	case "on":
-		w.cfg.Thinking = true
+		w.cfg.ThinkingLevel = "medium"
 		p("✓ 思考模式已开启\n")
 	case "off":
-		w.cfg.Thinking = false
+		w.cfg.ThinkingLevel = "off"
 		p("✓ 思考模式已关闭\n")
 	case "":
 		if w.cfg.BaseURL == "" || w.cfg.Model == "" {
@@ -208,8 +208,8 @@ func (w *wizard) cmdThink(p func(string, ...any), args string) {
 			p("探测失败: %v（手动设置 /think on|off）\n", err)
 			return
 		}
-		w.cfg.Thinking = ok
 		if ok {
+			w.cfg.ThinkingLevel = "medium"
 			p("✓ 探测结果：模型支持思考模式，已开启\n")
 		} else {
 			p("探测结果：模型不支持思考模式，已关闭\n")

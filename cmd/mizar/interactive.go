@@ -1,12 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/peterh/liner"
 
 	"mizar/internal/agent"
@@ -14,23 +12,28 @@ import (
 )
 
 func jsonUnmarshal(s string, v any) error {
-	return json.Unmarshal([]byte(s), v)
+	return fmt.Errorf("jsonUnmarshal is unused; use json.Unmarshal directly")
 }
 
-// banner 启动标语（开阳 = Mizar 的项目代号）。
+// banner 启动标语。
 func banner() string {
 	return fmt.Sprintf(`
-  __  ___      __  ___        __ 
- /  |/  /_ ___/ /_/ _ \___ __/ /__
-/ /|_/ / // / __/ // / -_) \ / (_-<
-/_/  /_/\_,_/\__/\___/\__/_//_/___/
+  ███╗   ███╗██╗███████╗ █████╗ ██████╗
+  ████╗ ████║██║╚══███╔╝██╔══██╗██╔══██╗
+  ██╔████╔██║██║  ███╔╝ ███████║██████╔╝
+  ██║╚██╔╝██║██║ ███╔╝  ██╔══██║██╔══██╗
+  ██║ ╚═╝ ██║██║███████╗██║  ██║██║  ██║
+  ╚═╝     ╚═╝╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
               %s — 开阳 · 自举式 AI Agent
 
-  ◆ 单文件二进制，零依赖安装（无依赖地狱）
-  ◆ 完全离线可用：私有模型网关，数据不出内网
-  ◆ 插件沙箱：goja 隔离执行，TS/JS 双写，热重载
-  ◆ 全链路可审计：每步工具调用留痕，技能用量透明
-  ◆ 轻量自举：一个可执行文件跑通 规划→执行→验证
+  ◆ 自举循环：goja 沙箱 → 工具调用 → 反思 → 决策
+  ◆ 离线部署：单文件二进制，数据不出内网
+  ◆ 插件系统：TS/JS 双写，热重载，LSP 诊断/补全
+  ◆ 全链路审计：操作留痕，技能用量透明
+  ◆ 内置 TUI：Tab 补全 / Ctrl+T 思考 / 实时 token 统计
+  ◆ 会话压缩：自动超窗压缩，摘要保留上下文
+  ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
+  ◆ 鼠标：Shift+拖拽 选择复制 ｜ 滚轮滚动 ｜ PgUp/PgDn 翻页
 `, version)
 }
 
@@ -39,26 +42,32 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	rl := liner.NewLiner()
 	defer rl.Close()
 	rl.SetCtrlCAborts(true)
-	// Tab 补全：/ 开头的命令 + 历史
+
+	// 预取命令和工具列表（补全用）
 	cmds := a.Commands.List()
-	names := make([]string, 0, len(cmds))
+	cmdNames := make([]string, 0, len(cmds))
 	for _, c := range cmds {
-		names = append(names, "/"+c.Name)
+		cmdNames = append(cmdNames, "/"+c.Name)
 	}
-	names = append(names, "/help")
+
+	// 工具列表（从插件管理器取）
+	tools := a.Plugins.Tools()
+	toolNames := make([]string, 0, len(tools))
+	for _, t := range tools {
+		toolNames = append(toolNames, t.Name)
+	}
+
+	// 补全器：支持 @cmd: / @tool: / @file: / @路径 四种模式
 	rl.SetCompleter(func(line string) (res []string) {
-		// @ 路径补全：@路径 → 自动提示文件/文件夹
+		// 找到最后一个 @
+		// 但 @cmd: / @tool: / @file: 要特殊处理
 		if idx := strings.LastIndex(line, "@"); idx >= 0 {
-			prefix := strings.TrimSpace(line[idx+1:])
-			for _, c := range completeAtPath(prefix) {
-				if strings.HasPrefix(c, prefix) {
-					res = append(res, "@"+c)
-				}
-			}
+			after := strings.TrimSpace(line[idx+1:])
+			res = completeAtRaw(after, cmdNames, toolNames)
 			return
 		}
 		// 普通命令补全
-		for _, n := range names {
+		for _, n := range cmdNames {
 			if strings.HasPrefix(n, line) {
 				res = append(res, n)
 			}
@@ -66,8 +75,12 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		return
 	})
 
+	// 初始化 glamour 渲染器
+	renderer, _ := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+	)
+
 	fmt.Print(banner())
-	fmt.Println("输入任务，空行退出。Ctrl-D 或 /quit 退出。Tab 补全命令，↑↓ 历史。")
 	for {
 		line, err := rl.Prompt("> ")
 		if err != nil {
@@ -79,7 +92,8 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 			return
 		}
 		rl.AppendHistory(line)
-		// 斜杠命令分发：插件注册的 command_* 与内置命令
+
+		// 斜杠命令分发
 		if handled, out, err := a.Commands.Dispatch(line); handled {
 			if err != nil {
 				fmt.Printf("命令错误: %v\n", err)
@@ -89,71 +103,32 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 			}
 			continue
 		}
-		reply, err := a.Run(line)
+
+		// 处理 @file: / @cmd: / @tool: 引用，解析成实际输入
+		input := resolveAtRef(line, cmdNames, toolNames)
+
+		// LLM 调用
+		reply, err := a.Run(input)
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)
 			continue
 		}
-		fmt.Println(reply)
+
+		// Markdown 渲染输出
+		rendered, renderErr := renderer.Render(reply)
+		if renderErr != nil {
+			// 渲染失败回退到纯文本
+			fmt.Println(reply)
+		} else {
+			fmt.Print(rendered)
+			if !strings.HasSuffix(rendered, "\n") {
+				fmt.Println()
+			}
+		}
+
 		if sessionID != "" {
 			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: line})
 			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 	}
-}
-
-// completeAtPath 根据输入的前缀提示文件/文件夹路径。
-// 支持相对路径和绝对路径：
-//   - prefix = ""       → 无补全（空前缀）
-//   - prefix = "src"    → 从当前工作目录匹配 src* 的条目
-//   - prefix = "src/"   → 列出当前工作目录/src/ 下的所有条目
-//   - prefix = "./src"  → 同上（相对路径）
-//   - prefix = "/etc/"  → 列出 /etc/ 下的所有条目
-//
-// 文件夹返回时带 / 后缀。返回最多 100 个候选。
-func completeAtPath(prefix string) []string {
-	prefix = strings.TrimSpace(prefix)
-	if prefix == "" {
-		return nil
-	}
-
-	// 拆分路径：取已存在的父目录 + 当前输入的文件名片段
-	parent := filepath.Dir(prefix)
-	name := filepath.Base(prefix)
-
-	// 解析当前工作目录
-	cdir, err := os.Getwd()
-	if err != nil {
-		return nil
-	}
-
-	// 将 parent 解析为绝对路径
-	if parent == "" || parent == "." {
-		parent = cdir
-	} else if !filepath.IsAbs(parent) {
-		parent = filepath.Join(cdir, parent)
-	}
-
-	// 打开父目录
-	es, err := os.ReadDir(parent)
-	if err != nil {
-		return nil
-	}
-
-	var result []string
-	for _, e := range es {
-		entryName := e.Name()
-		if name != "" && !strings.HasPrefix(entryName, name) {
-			continue
-		}
-		entryPath := filepath.Join(parent, entryName)
-		if e.IsDir() {
-			entryPath = entryPath + "/"
-		}
-		result = append(result, entryPath)
-	}
-	if len(result) > 100 {
-		result = result[:100]
-	}
-	return result
 }

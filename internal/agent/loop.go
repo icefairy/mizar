@@ -20,6 +20,14 @@ type LLM interface {
 	Chat(messages []Message) (string, error)
 }
 
+// ToolCallLLM 可选接口：支持原生工具调用的 LLM。
+// 若 LLM 实现此接口，Agent 循环会使用原生 tools 参数而非文本 JSON。
+type ToolCallLLM interface {
+	// ChatWithTools 发送消息 + 工具定义，返回模型回复文本。
+	// 若模型返回原生 tool_calls，实现方应将其转为 agent 循环可解析的 JSON 文本。
+	ChatWithTools(messages []Message, tools []plugins.Tool) (string, error)
+}
+
 // Message 对话消息（定义见 message.go：含 Kind 字段用于压缩切点）。
 // Role 常量见 message.go：RoleSystem/RoleUser/RoleAssistant。
 
@@ -36,11 +44,12 @@ type Agent struct {
 	LLM        LLM
 	Plugins    *plugins.Manager
 	System     string
-	Initial    []Message    // 会话恢复时的历史消息（置于 task 之前）
-	MaxSteps   int          // 最大循环步数（默认 20）
-	VerboseLog func(string) // 可选日志回调
-	Compactor  *Compactor   // 会话压缩器（nil = 不压缩）
-	Hooks      *Hooks       // 挂载点（nil = 无钩子）
+	PluginDir  string          // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
+	Initial    []Message       // 会话恢复时的历史消息（置于 task 之前）
+	MaxSteps   int             // 最大循环步数（默认 20）
+	VerboseLog func(string)    // 可选日志回调
+	Compactor  *Compactor      // 会话压缩器（nil = 不压缩）
+	Hooks      *Hooks          // 挂载点（nil = 无钩子）
 	Tuner      *WeakModelTuner // 弱模型宽容策略（nil = 不启用）
 
 	// 工具调用解析策略
@@ -73,7 +82,7 @@ func New(llm LLM, pm *plugins.Manager) *Agent {
 	a := &Agent{
 		LLM:        llm,
 		Plugins:    pm,
-		MaxSteps:   20,
+		MaxSteps:   30,
 		callParser: parseCallJSON,
 		Commands:   NewCommandRegistry(),
 	}
@@ -95,14 +104,46 @@ func (a *Agent) Model() string {
 
 // SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
 // 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
+// defaultSystemPrompt 默认系统提示词：结构化为「身份 + 工具策略 + 工作方法 + 上下文指引」。
+// 学习自 pi：工具提供短描述、方法引导聚合为 guidelines、不设严格步数（默认 30，/config 可调）。
+const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。
+
+## 工作方法
+遵循以下高效工作流，避免盲目尝试：
+1. 先理解任务所需的信息类型，再选择工具。
+2. 优先使用 grep/find 进行定位搜索（快、便宜），再使用 read 读取具体行（offset/limit 精确指定）。
+3. 一次工具调用尽量完成，不要重复试探同一任务。
+4. 命令执行前考虑是否真的需要 bash；环境感知类问题（hostname、ip、进程、包）可用 bash 一次搞定，stderr 已并入 stdout。
+5. 读取文件时务必填写正确的 offset（行号）和 limit（行数），read 支持分段读，不要反复全量读。
+6. 工具失败时根据错误信息修正参数重试，不要盲目换工具。
+7. 修改代码前先读要改的文件，改完给出摘要。
+8. 回复要简洁，展示文件路径要清晰。
+
+## 会话上下文
+- 当前工作目录由用户所在目录决定，不确定时用 pwd 确认。
+- 项目可能有 AGENTS.md 或 .mizar 上下文文件，相关时先读取。
+- 技能（SKILL.md）通过 index 模式注入系统提示，可用 skill_manage 管理。
+
+## 可用工具
+`
+
+// HostPlugins 定位插件目录（如 ~/.mizar/extensions）。
+// 由系统提示词使用，让模型知道在哪里创建/查找插件。可留空以省略该段。
+
+// SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
+// 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
 func (a *Agent) SystemPrompt() string {
 	if a.systemPromptCache != "" {
 		return a.systemPromptCache
 	}
 	tools := a.Plugins.Tools()
 	var sb strings.Builder
-	sb.WriteString(a.System)
-	sb.WriteString("\n\n## 可用工具\n")
+	sys := a.System
+	if sys == "" {
+		sys = defaultSystemPrompt
+	}
+	sb.WriteString(sys)
+	sb.WriteString("\n")
 	if len(tools) == 0 {
 		sb.WriteString("（无）\n")
 	} else {
@@ -117,6 +158,21 @@ func (a *Agent) SystemPrompt() string {
 任务完成时，回复：
 {"action":"reply","text":"最终回答"}
 `)
+
+	// 插件目录信息（引导模型自己创建/扩展插件）
+	if a.PluginDir != "" {
+		pluginNames := a.Plugins.PluginNames()
+		sb.WriteString(fmt.Sprintf("\n## 插件\n插件目录: %s\n", a.PluginDir))
+		if len(pluginNames) > 0 {
+			sb.WriteString("已加载插件：\n")
+			for _, p := range pluginNames {
+				// 统计每个插件导出了多少个工具
+				sb.WriteString(fmt.Sprintf("- %s\n", p))
+			}
+		}
+		sb.WriteString("\n如需扩展能力，在插件目录新建 .ts 文件，导出 tool_* 函数或 command_* 函数，" +
+			"然后调用 /reload 加载。支持 host_listen 宿主函数启动 HTTP 服务器。\n")
+	}
 	a.systemPromptCache = sb.String()
 	return a.systemPromptCache
 }
@@ -131,7 +187,7 @@ func (a *Agent) ReloadTools() {
 // Run 执行任务。返回最终回复。
 func (a *Agent) Run(task string) (string, error) {
 	if a.MaxSteps <= 0 {
-		a.MaxSteps = 20
+		a.MaxSteps = 30
 	}
 	if a.Hooks == nil {
 		a.Hooks = NewHooks()
@@ -196,9 +252,16 @@ func (a *Agent) Run(task string) (string, error) {
 		a.Hooks.fireLLMRequest(llmCtx, a.logf)
 		msgs = llmCtx.Messages
 
-		reply, err := a.LLM.Chat(msgs)
+		var reply string
+		var llmErr error
+		if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
+			// 原生工具调用：发送 tools 参数，模型结构化返回
+			reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
+		} else {
+			reply, llmErr = a.LLM.Chat(msgs)
+		}
 		q.EndOperation("llm")
-		if err != nil {
+		if llmErr != nil {
 			if a.Tuner != nil {
 				if retry, retryCnt := a.Tuner.LLMFailed(); retry {
 					time.Sleep(a.Tuner.RetryDelay(retryCnt))
@@ -206,9 +269,9 @@ func (a *Agent) Run(task string) (string, error) {
 					continue
 				}
 			}
-			q.Complete(err)
-			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: err}, a.logf)
-			return "", fmt.Errorf("llm chat: %w", err)
+			q.Complete(llmErr)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: llmErr}, a.logf)
+			return "", fmt.Errorf("llm chat: %w", llmErr)
 		}
 		if a.Tuner != nil {
 			a.Tuner.LLMSucceeded()
@@ -248,6 +311,17 @@ func (a *Agent) Run(task string) (string, error) {
 		// 工具调用
 		q.BeginOperation("tool:" + req.Tool)
 		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args}, a.logf)
+		// 空参数兑底：不执行工具，把错误发回模型让它修正（防止"args {command} required"空转）
+		trimmedArgs := strings.TrimSpace(req.Args)
+		if trimmedArgs == "" || trimmedArgs == "{}" {
+			q.EndOperation("tool:" + req.Tool)
+			msg := fmt.Sprintf("⚠️ 工具 %s 调用缺少参数（args 为空）。请重新调用，并在 args 中传入正确的 JSON 参数。", req.Tool)
+			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+			msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			step++
+			continue
+		}
 		if a.Tuner != nil && a.Tuner.RecordToolCall(req.Tool, req.Args) {
 			q.EndOperation("tool:" + req.Tool)
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})

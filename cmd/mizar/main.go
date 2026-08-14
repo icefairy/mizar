@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ func main() {
 		baseURL   = flag.String("base-url", "http://127.0.0.1:3002/v1", "OpenAI 兼容端点 (默认指向璇玑网关)")
 		apiKey    = flag.String("api-key", "", "API Key (可选)")
 		model     = flag.String("model", "deepseek-v4-flash", "模型名")
-		extDir    = flag.String("ext", "extensions", "插件目录")
+		extDir    = flag.String("ext", "", "插件目录 (默认 ~/.mizar/extensions)")
 		skillDir  = flag.String("skills", "skills", "技能目录")
 		workDir   = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
 		sessDir   = flag.String("sessions", "sessions", "会话目录")
@@ -44,9 +45,9 @@ func main() {
 		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
 		task      = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer   = flag.Bool("version", false, "显示版本")
-		initWiz   = flag.Bool("init", false, "运行初始化向导（配置供应商/模型）")
-		lspBinary  = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
-		lspServer  = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
+		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
+		lspServer = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
+		tui       = flag.Bool("tui", true, "使用 Bubble Tea TUI 界面（默认开启，--no-tui 用经典 readline）")
 		// Server 模式（持久运行 daemon）
 		serve  = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
 		addr   = flag.String("addr", ":3003", "Server 监听地址")
@@ -72,20 +73,6 @@ func main() {
 		if err := lsp.ServeStdio(ctx, lsp.ProviderConfig{}); err != nil {
 			log.Fatalf("LSP server 退出: %v", err)
 		}
-		return
-	}
-
-	// 初始化向导：交互式配置供应商/模型/思考/上下文
-	if *initWiz {
-		cfg, err := config.RunWizard(config.DefaultPath())
-		if err != nil {
-			log.Fatalf("初始化失败: %v", err)
-		}
-		if cfg.BaseURL == "" {
-			fmt.Println("未配置供应商，退出。")
-			return
-		}
-		fmt.Printf("初始化完成，配置已保存到 %s\n", config.DefaultPath())
 		return
 	}
 
@@ -121,7 +108,7 @@ func main() {
 		if !explicit["ctx-window"] && cfg.ContextWindow > 0 {
 			*ctxWindow = cfg.ContextWindow
 		}
-		log.Printf("已加载配置 %s: model=%s thinking=%v window=%d", config.DefaultPath(), *model, cfg.Thinking, *ctxWindow)
+		log.Printf("已加载配置 %s: model=%s thinking=%s window=%d", config.DefaultPath(), *model, cfg.ThinkingStr(), *ctxWindow)
 	}
 
 	// 宿主函数集
@@ -210,9 +197,8 @@ func main() {
 	host.HTTPPost = func(url, body string) (string, error) { return httpDo("POST", url, body, "") }
 	// 提供真实 LLM 给插件 llm_chat
 	client := llm.NewOpenAI(*baseURL, *apiKey, *model)
-	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.Thinking {
-		thinking := true
-		client.Thinking = &thinking
+	if cfg, err := config.Load(config.DefaultPath()); err == nil {
+		client.SetThinkingLevel(cfg.ThinkingStr())
 	}
 	host.LLMChat = func(messagesJSON string) (string, error) {
 		var msgs []agent.Message
@@ -232,9 +218,15 @@ func main() {
 	host.LSPUnregisterDiagnostic = lsp.UnregisterDiagnosticProvider
 	host.LSPUnregisterCompletion = lsp.UnregisterCompletionProvider
 
+	// host_listen：由插件 Manager 接管（internal/plugins/loader.go 中实现）
+
 	extAbs, err := filepath.Abs(*extDir)
 	if err != nil {
 		log.Fatal(err)
+	}
+	// 插件目录默认 ~/.mizar/extensions（全局，跨项目共享）
+	if *extDir == "" {
+		extAbs = filepath.Join(config.ConfigDir(), "extensions")
 	}
 	if _, err := os.Stat(extAbs); os.IsNotExist(err) {
 		if err := os.MkdirAll(extAbs, 0o755); err != nil {
@@ -274,10 +266,12 @@ func main() {
 		log.Printf("插件失败: %s: %v", f, e)
 	}
 	tools := pm.Tools()
-	log.Printf("可用工具 %d 个", len(tools))
+	log.Printf("工具 %d | 命令 %d", len(tools), len(pm.Commands()))
+	var names []string
 	for _, t := range tools {
-		fmt.Printf("  - %s\n", t.Name)
+		names = append(names, t.Name)
 	}
+	log.Printf("  工具: %s", strings.Join(names, ", "))
 
 	// 技能使用统计回调（每次工具调用 +1；周报每周提示，距上次 ≥7 天触发）
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillStatsOn() {
@@ -330,6 +324,11 @@ func main() {
 	st := session.New(*sessDir)
 
 	a := agent.New(client, pm)
+	a.PluginDir = extAbs
+	// 从配置读取最大步数（0=默认30）
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.MaxSteps > 0 {
+		a.MaxSteps = cfg.MaxSteps
+	}
 	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt + agentsPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
 
@@ -357,28 +356,50 @@ func main() {
 		OnCompactionAfter(bridgeHook("CompactionAfter")).
 		OnError(bridgeHook("Error"))
 
-	// 内置 /provider 命令：查看/切换 LLM 供应商（baseURL）
+	// 内置 /provider 命令：查看/切换/配置 LLM 供应商
 	a.Commands.Register(agent.Command{
 		Name:        "provider",
-		Description: "查看当前 LLM 供应商（/provider）或切换（/provider <baseURL>）",
+		Description: "查看当前 LLM 供应商（/provider）、切换 URL（/provider  ＜baseURL＞）或配置完整信息（/provider ＜baseURL＞ ＜apiKey＞）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
-				thinking := "off"
-				if client.Thinking != nil && *client.Thinking {
-					thinking = "on"
+				thinking := client.ThinkingEnabled()
+				keyMask := "<set>"
+				if client.APIKey != "" {
+					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
 				}
-				return fmt.Sprintf("当前供应商: %s\n模型: %s\n思考模式: %s", client.BaseURL, client.Model, thinking), nil
+				return fmt.Sprintf("当前供应商: %s\n模型: %s\n思考模式: %s\nAPI Key: %s", client.BaseURL, client.Model, thinking, keyMask), nil
 			}
-			old := client.BaseURL
-			client.BaseURL = strings.TrimSuffix(args, "/")
-			return fmt.Sprintf("✓ 供应商已切换: %s → %s", old, client.BaseURL), nil
+			fields := strings.Fields(args)
+			baseURL := strings.TrimSuffix(fields[0], "/")
+			oldURL := client.BaseURL
+			client.BaseURL = baseURL
+			if len(fields) >= 2 {
+				client.APIKey = fields[1]
+			}
+			// 持久化
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.ThinkingLevel = client.ThinkingEnabled()
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				log.Printf("/provider 持久化失败: %v", err)
+			}
+			if len(fields) >= 2 {
+				return fmt.Sprintf("✓ 供应商已切换: %s → %s\n✓ API Key 已更新", oldURL, baseURL), nil
+			}
+			if oldURL == baseURL {
+				return fmt.Sprintf("URL 未变更: %s（设置 API Key: /provider <url> <key> 或 /apikey <key>）", baseURL), nil
+			}
+			return fmt.Sprintf("✓ 供应商已切换: %s → %s", oldURL, baseURL), nil
 		},
 	})
 	// 内置 /model 命令：查看/切换模型（对齐 pi 的 /model）
 	a.Commands.Register(agent.Command{
 		Name:        "model",
-		Description: "查看当前模型（/model）或切换（/model <name>）",
+		Description: "查看当前模型（/model）或切换（/model ＜name＞）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
@@ -386,7 +407,48 @@ func main() {
 			}
 			old := client.Model
 			client.Model = args
+			// 持久化到 config.json
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.ThinkingLevel = client.ThinkingEnabled()
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				log.Printf("/model 持久化失败: %v", err)
+			}
 			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, args), nil
+		},
+	})
+	// 内置 /apikey 命令：查看/设置 API Key（与 /provider 配合使用）
+	a.Commands.Register(agent.Command{
+		Name:        "apikey",
+		Description: "查看当前 API Key（/apikey）或设置（/apikey ＜key＞）",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			if args == "" {
+				keyMask := "<未设置>"
+				if client.APIKey != "" {
+					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
+				}
+				return fmt.Sprintf("当前 API Key: %s\n当前供应商: %s", keyMask, client.BaseURL), nil
+			}
+			old := client.APIKey
+			client.APIKey = args
+			// 持久化
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.ThinkingLevel = client.ThinkingEnabled()
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				log.Printf("/apikey 持久化失败: %v", err)
+			}
+			if old == "" {
+				return "✓ API Key 已设置", nil
+			}
+			return "✓ API Key 已更新", nil
 		},
 	})
 	// 内置 /reload 命令：重载 ~/.mizar/config.json + 插件热重载
@@ -396,17 +458,16 @@ func main() {
 		Run: func(args string) (string, error) {
 			cfg, err := config.Load(config.DefaultPath())
 			if err != nil || cfg.BaseURL == "" {
-				return "", fmt.Errorf("重载失败: %v（先运行 --init 或检查 %s）", err, config.DefaultPath())
+				return "", fmt.Errorf("重载失败: %v（检查 %s）", err, config.DefaultPath())
 			}
 			// 应用配置到客户端
 			client.BaseURL = cfg.BaseURL
 			client.APIKey = cfg.APIKey
 			client.Model = cfg.Model
-			if cfg.Thinking {
-				thinking := true
-				client.Thinking = &thinking
+			if cfg.ThinkingStr() != "off" {
+				client.SetThinkingLevel(cfg.ThinkingStr())
 			} else {
-				client.Thinking = nil
+				client.SetThinkingLevel("")
 			}
 			// 应用上下文窗口
 			if cfg.ContextWindow > 0 {
@@ -426,7 +487,7 @@ func main() {
 			a.Commands.SyncFromPlugins(cmds)
 			// 汇总
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%v\n", cfg.Model, cfg.ContextWindow, cfg.Thinking)
+			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%s\n", cfg.Model, cfg.ContextWindow, cfg.ThinkingStr())
 			if len(loaded) > 0 {
 				fmt.Fprintf(&sb, "✓ 插件重载: %s\n", strings.Join(loaded, ", "))
 			}
@@ -453,6 +514,114 @@ func main() {
 			fmt.Println("再见")
 			os.Exit(0)
 			return "", nil
+		},
+	})
+	// 内置 /think 命令：查看/切换思考等级（auto/off/low/medium/high）
+	a.Commands.Register(agent.Command{
+		Name:        "think",
+		Description: "查看/切换思考等级（/think 查看 ｜ /think auto/off/low/medium/high 设置 ｜ /think cycle 循环切换）",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			if args == "" {
+				return fmt.Sprintf("当前思考等级: %s\n等级说明:\n  auto   — 不传 thinking 参数，由模型自行决定\n  off    — 关闭思考\n  low    — 低强度思考（最快，推理 effort=low）\n  medium — 中等强度思考（默认推荐）\n  high   — 高强度思考（最彻底，推理 effort=high）", client.ThinkingEnabled()), nil
+			}
+			supported := []string{"auto", "off", "low", "medium", "high", "cycle"}
+			for _, s := range supported {
+				if args == s {
+					switch s {
+					case "cycle":
+						newLevel := client.ToggleThinking()
+						// 持久化
+						cfg, _ := config.Load(config.DefaultPath())
+						cfg.ThinkingLevel = newLevel
+						if err := config.Save(config.DefaultPath(), cfg); err != nil {
+							log.Printf("/think 持久化失败: %v", err)
+						}
+						return fmt.Sprintf("✓ 思考等级已切换: %s", newLevel), nil
+					default:
+						client.SetThinking(s)
+						cfg, _ := config.Load(config.DefaultPath())
+						cfg.ThinkingLevel = s
+						if err := config.Save(config.DefaultPath(), cfg); err != nil {
+							log.Printf("/think 持久化失败: %v", err)
+						}
+						return fmt.Sprintf("✓ 思考等级已设置为: %s", s), nil
+					}
+				}
+			}
+			return "", fmt.Errorf("未知参数 %q，支持: auto/off/low/medium/high/cycle", args)
+		},
+	})
+	// 内置 /help 命令：列出所有可用命令
+	a.Commands.Register(agent.Command{
+		Name:        "help",
+		Description: "列出所有可用命令",
+		Run: func(args string) (string, error) {
+			cmds := a.Commands.List()
+			var sb strings.Builder
+			sb.WriteString("**可用命令：**\n")
+			for _, c := range cmds {
+				sb.WriteString(fmt.Sprintf("- `/%s` %s", c.Name, c.Description))
+				if c.PluginFile != "" {
+					sb.WriteString("（插件：" + c.PluginFile + "）")
+				}
+				sb.WriteString("\n")
+			}
+			return sb.String(), nil
+		},
+	})
+	// 内置 /config 命令：查看/修改运行配置（对齐 pi 的 /config）
+	a.Commands.Register(agent.Command{
+		Name:        "config",
+		Description: "查看/修改运行配置（/config 查看 ｜ /config max_steps 30 设置）",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			cfg, _ := config.Load(config.DefaultPath())
+			if args == "" {
+				// 查看当前生效配置（内存中的 a.MaxSteps 优先，因为可能被 Run 兜底改写）
+				ms := a.MaxSteps
+				if ms <= 0 {
+					ms = 30
+				}
+				return fmt.Sprintf(`当前运行配置:
+  最大步数 max_steps: %d
+  上下文窗口 context_window: %d (token, 配置:%d)
+  思考等级 thinking_level: %s
+  模型 model: %s
+  供应商 base_url: %s
+可修改项: max_steps ｜ 修改方法: /config max_steps 30`, ms, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
+			}
+			fields := strings.Fields(args)
+			if len(fields) == 2 && fields[0] == "max_steps" {
+				n, err := strconv.Atoi(fields[1])
+				if err != nil || n < 1 || n > 1000 {
+					return "", fmt.Errorf("max_steps 必须是 1-1000 的整数")
+				}
+				a.MaxSteps = n
+				cfg.MaxSteps = n
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("持久化失败: %v", err)
+				}
+				return fmt.Sprintf("✓ 最大步数已设置为 %d，已持久化到 %s", n, config.DefaultPath()), nil
+			}
+			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps ＜数字1-1000＞")
+		},
+	})
+	// 内置 /save 命令：将当前配置持久化到 ~/.mizar/config.json
+	a.Commands.Register(agent.Command{
+		Name:        "save",
+		Description: "将当前配置保存到 ~/.mizar/config.json",
+		Run: func(args string) (string, error) {
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.ThinkingLevel = client.ThinkingEnabled()
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				return "", fmt.Errorf("保存失败: %v", err)
+			}
+			return fmt.Sprintf("✓ 配置已保存: %s", config.DefaultPath()), nil
 		},
 	})
 	if !*noCompact {
@@ -521,8 +690,17 @@ func main() {
 		return
 	}
 
+	// TUI 模式关闭 verbose 日志输出到 stderr
+	if *tui {
+		a.VerboseLog = nil
+	}
+
 	// 交互模式
-	interactive(a, st, *sessionID)
+	if *tui {
+		runTUI(a, st, *sessionID)
+	} else {
+		interactive(a, st, *sessionID)
+	}
 }
 
 // mcpNames 返回 MCP server 名列表（日志用）。
