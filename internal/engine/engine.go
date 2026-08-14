@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/dop251/goja"
@@ -65,6 +66,12 @@ type HostFuncs struct {
 	// 覆盖内置驱动之外的长尾能力（Redis/Kafka/MongoDB/ClickHouse 等）。
 	// nil 时不注册该函数。
 	MCPCall func(server, tool, argsJSON string) (string, error)
+	// HostListen 在插件侧启动一个 HTTP 服务器。
+	// addr: 监听地址（如 ":8080"），handler: JS 函数 (requestJSON string) => string。
+	// requestJSON: {"method":"GET","path":"/","headers":{...},"body":""}
+	// 返回: {"status":200,"headers":{...},"body":"..."}
+	// nil 时不注册该函数。
+	HostListen func(addr string, handler func(requestJSON string) string) (string, error)
 	// HookOn 注册挂载点回调：hook_on(eventName, jsCallback)。
 	// eventName 归一化（大小写/连字符/下划线不敏感）; jsCallback 为 JS 函数 (ctxJSON)=>string。
 	// nil 时不注册该函数。
@@ -178,6 +185,33 @@ func (e *Engine) registerHostFuncs() error {
 					return "", nil
 				}
 				return res.String(), nil
+			})
+		})
+	}
+	if h.HostListen != nil {
+		// host_listen(addr, jsHandler) 启动 HTTP 服务器，收到请求后调用 JS handler。
+		// JS handler 接收 requestJSON，返回 responseJSON。
+		// 跨 goroutine 安全：用 sync.Mutex 保护 goja 调用。
+		reg("host_listen", func(addr string, cb goja.Value) (string, error) {
+			if cb == nil || goja.IsUndefined(cb) || goja.IsNull(cb) {
+				return "", fmt.Errorf("host_listen: 回调不能为空")
+			}
+			fn, ok := goja.AssertFunction(cb)
+			if !ok {
+				return "", fmt.Errorf("host_listen: 第二个参数必须是函数")
+			}
+			var mu sync.Mutex
+			return h.HostListen(addr, func(reqJSON string) string {
+				mu.Lock()
+				defer mu.Unlock()
+				res, err := fn(goja.Undefined(), e.vm.ToValue(reqJSON))
+				if err != nil {
+					return fmt.Sprintf(`{"status":500,"body":"%s"}`, err.Error())
+				}
+				if res == nil || goja.IsUndefined(res) || goja.IsNull(res) {
+					return `{"status":204,"body":""}`
+				}
+				return res.String()
 			})
 		})
 	}

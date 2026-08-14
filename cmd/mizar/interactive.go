@@ -33,6 +33,7 @@ func banner() string {
   ◆ 内置 TUI：Tab 补全 / Ctrl+T 思考 / 实时 token 统计
   ◆ 会话压缩：自动超窗压缩，摘要保留上下文
   ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
+  ◆ 鼠标：Shift+拖拽 选择复制 ｜ 滚轮滚动 ｜ PgUp/PgDn 翻页
 `, version)
 }
 

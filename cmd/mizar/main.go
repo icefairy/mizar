@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ctxpkg "context"
@@ -35,7 +37,7 @@ func main() {
 		baseURL   = flag.String("base-url", "http://127.0.0.1:3002/v1", "OpenAI 兼容端点 (默认指向璇玑网关)")
 		apiKey    = flag.String("api-key", "", "API Key (可选)")
 		model     = flag.String("model", "deepseek-v4-flash", "模型名")
-		extDir    = flag.String("ext", "extensions", "插件目录")
+		extDir    = flag.String("ext", "", "插件目录 (默认 ~/.mizar/extensions)")
 		skillDir  = flag.String("skills", "skills", "技能目录")
 		workDir   = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
 		sessDir   = flag.String("sessions", "sessions", "会话目录")
@@ -218,9 +220,70 @@ func main() {
 	host.LSPUnregisterDiagnostic = lsp.UnregisterDiagnosticProvider
 	host.LSPUnregisterCompletion = lsp.UnregisterCompletionProvider
 
+	// host_listen：启动纯 Go HTTP 服务器，请求转发到 JS handler
+	host.HostListen = func(addr string, handler func(requestJSON string) string) (string, error) {
+		mux := http.NewServeMux()
+		var mu sync.Mutex
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			// 读取请求体
+			body, _ := io.ReadAll(r.Body)
+			// 构造成 requestJSON
+			type respHeaders struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			}
+			reqMap := map[string]any{
+				"method":  r.Method,
+				"path":    r.URL.Path,
+				"query":   r.URL.RawQuery,
+				"body":    string(body),
+				"headers": r.Header,
+			}
+			reqJSON, _ := json.Marshal(reqMap)
+
+			// 调用 JS handler
+			mu.Lock()
+			respStr := handler(string(reqJSON))
+			mu.Unlock()
+
+			// 解析响应 JSON
+			var resp struct {
+				Status  int               `json:"status"`
+				Body    string            `json:"body"`
+				Headers map[string]string `json:"headers,omitempty"`
+			}
+			if err := json.Unmarshal([]byte(respStr), &resp); err != nil {
+				http.Error(w, "handler 返回无效 JSON", 500)
+				return
+			}
+			if resp.Status == 0 {
+				resp.Status = 200
+			}
+			for k, v := range resp.Headers {
+				w.Header().Set(k, v)
+			}
+			w.WriteHeader(resp.Status)
+			if _, werr := w.Write([]byte(resp.Body)); werr != nil {
+				log.Printf("host_listen 写入响应失败: %v", werr)
+			}
+		})
+
+		srv := &http.Server{Addr: addr, Handler: mux}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("host_listen 服务器错误: %v", err)
+			}
+		}()
+		return fmt.Sprintf("HTTP 服务器已启动: http://%s", addr), nil
+	}
+
 	extAbs, err := filepath.Abs(*extDir)
 	if err != nil {
 		log.Fatal(err)
+	}
+	// 插件目录默认 ~/.mizar/extensions（全局，跨项目共享）
+	if *extDir == "" {
+		extAbs = filepath.Join(config.ConfigDir(), "extensions")
 	}
 	if _, err := os.Stat(extAbs); os.IsNotExist(err) {
 		if err := os.MkdirAll(extAbs, 0o755); err != nil {
@@ -318,6 +381,7 @@ func main() {
 	st := session.New(*sessDir)
 
 	a := agent.New(client, pm)
+	a.PluginDir = extAbs
 	// 从配置读取最大步数（0=默认30）
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.MaxSteps > 0 {
 		a.MaxSteps = cfg.MaxSteps

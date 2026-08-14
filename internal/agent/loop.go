@@ -44,6 +44,7 @@ type Agent struct {
 	LLM        LLM
 	Plugins    *plugins.Manager
 	System     string
+	PluginDir  string   // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
 	Initial    []Message       // 会话恢复时的历史消息（置于 task 之前）
 	MaxSteps   int             // 最大循环步数（默认 20）
 	VerboseLog func(string)    // 可选日志回调
@@ -126,6 +127,9 @@ const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码�
 ## 可用工具
 `
 
+// HostPlugins 定位插件目录（如 ~/.mizar/extensions）。
+// 由系统提示词使用，让模型知道在哪里创建/查找插件。可留空以省略该段。
+
 // SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
 // 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
 func (a *Agent) SystemPrompt() string {
@@ -154,6 +158,21 @@ func (a *Agent) SystemPrompt() string {
 任务完成时，回复：
 {"action":"reply","text":"最终回答"}
 `)
+
+	// 插件目录信息（引导模型自己创建/扩展插件）
+	if a.PluginDir != "" {
+		pluginNames := a.Plugins.PluginNames()
+		sb.WriteString(fmt.Sprintf("\n## 插件\n插件目录: %s\n", a.PluginDir))
+		if len(pluginNames) > 0 {
+			sb.WriteString("已加载插件：\n")
+			for _, p := range pluginNames {
+				// 统计每个插件导出了多少个工具
+				sb.WriteString(fmt.Sprintf("- %s\n", p))
+			}
+		}
+		sb.WriteString("\n如需扩展能力，在插件目录新建 .ts 文件，导出 tool_* 函数或 command_* 函数，" +
+			"然后调用 /reload 加载。支持 host_listen 宿主函数启动 HTTP 服务器。\n")
+	}
 	a.systemPromptCache = sb.String()
 	return a.systemPromptCache
 }
