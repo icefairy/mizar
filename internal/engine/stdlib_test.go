@@ -18,6 +18,27 @@ func callStr(t *testing.T, e *Engine, fn string, args ...any) string {
 	return fmt.Sprintf("%v", out)
 }
 
+// TestStdlibDocGet 验证 doc_get 按需查询完整文档。
+func TestStdlibDocGet(t *testing.T) {
+	e, err := New(mockHost())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	// 查 db_query 完整文档：应含签名、示例、坑
+	got := callStr(t, e, "doc_get", "db_query")
+	if !strings.Contains(got, "db_query(driver, dsn, sql)") {
+		t.Fatalf("doc_get(db_query) 缺签名: %q", got)
+	}
+	if !strings.Contains(got, "坑") {
+		t.Fatalf("doc_get(db_query) 缺坑说明: %q", got)
+	}
+	// 不存在的函数报错
+	if _, err := e.Call("doc_get", "not_exist_fn"); err == nil {
+		t.Fatalf("doc_get 未知函数应报错")
+	}
+}
+
 // TestStdlibCountTokens 验证 count_tokens 估算与压缩器同口径。
 func TestStdlibCountTokens(t *testing.T) {
 	e, err := New(mockHost())

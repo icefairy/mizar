@@ -54,6 +54,9 @@ func main() {
 		httpOn = flag.Bool("http", true, "Server: 启用 OpenAI 兼容 HTTP")
 		rpcOn  = flag.Bool("rpc", true, "Server: 启用 JSON-RPC")
 		wsOn   = flag.Bool("ws", true, "Server: 启用 WebSocket")
+		// 宿主函数文档生成
+		genDoc    = flag.Bool("plugin-doc", false, "生成宿主函数文档（精简清单 + doc_get 指引）")
+		genDocOut = flag.String("plugin-doc-out", "docs/host-funcs.md", "文档输出路径")
 	)
 	flag.Parse()
 
@@ -83,6 +86,22 @@ func main() {
 			return
 		}
 		fmt.Printf("初始化完成，配置已保存到 %s\n", config.DefaultPath())
+		return
+	}
+
+	// 生成宿主函数文档（渐进式披露：精简清单 + 完整文档 md）
+	if *genDoc {
+		briefs := engine.HostDocBriefs()
+		md := "# 开阳宿主函数参考\n\n写插件时的精简清单（~560 tokens）：\n\n" + briefs +
+			"\n完整文档用宿主函数 doc_get(name) 按需查询。\n"
+		out := *genDocOut
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			log.Fatalf("plugin-doc: %v", err)
+		}
+		if err := os.WriteFile(out, []byte(md), 0o644); err != nil {
+			log.Fatalf("plugin-doc: %v", err)
+		}
+		fmt.Printf("宿主函数文档已生成: %s（%d 函数, %d 字符）\n", out, len(engine.HostDocList()), len(md))
 		return
 	}
 

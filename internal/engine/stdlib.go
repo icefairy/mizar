@@ -98,4 +98,8 @@ func registerStdlib(reg func(name string, fn any)) {
 	// count_tokens(text) → int：估算 token 数（CJK 按字符、其他按 4 字符/token）。
 	// 与 Agent 压缩触发同口径；估算用，精确值以 LLM API usage 为准。
 	reg("count_tokens", func(s string) int { return countTokensEstimate(s) })
+
+	// doc_get(name) → string：查宿主函数完整文档（渐进式披露，按需加载）。
+	// 写插件时精简清单不够用，用 doc_get 取参数/示例/坑。
+	reg("doc_get", HostDocGet)
 }
