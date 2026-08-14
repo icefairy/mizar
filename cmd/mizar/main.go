@@ -261,9 +261,11 @@ func main() {
 	}
 	tools := pm.Tools()
 	log.Printf("工具 %d | 命令 %d", len(tools), len(pm.Commands()))
+	var names []string
 	for _, t := range tools {
-		log.Print("  " + t.Name)
+		names = append(names, t.Name)
 	}
+	log.Printf("  工具: %s", strings.Join(names, ", "))
 
 	// 技能使用统计回调（每次工具调用 +1；周报每周提示，距上次 ≥7 天触发）
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillStatsOn() {

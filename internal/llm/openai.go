@@ -50,6 +50,11 @@ type chatReq struct {
 }
 
 // SummarizeMessages 生成会话摘要（供 Compactor 使用）。
+func (o *OpenAI) ModelName() string {
+	return o.Model
+}
+
+// SummarizeMessages 生成会话摘要（供 Compactor 使用）。
 // 缓存友好设计（参照 pi compaction）：摘要请求是独立的一次性请求，
 // 其 prompt 前缀与主对话不同，天然不会污染/命中主对话的 prefix cache。
 // 注意：这里显式使用随机 system 头，防止摘要请求自身反复命中同一缓存
