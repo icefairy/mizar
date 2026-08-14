@@ -357,20 +357,17 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	})
 
 	// 自动补全候选列表（支持上下方向键选择，Enter/Tab 确认）
+	const maxAutoItems = 20
 	m.inputField.SetAutocompleteFunc(func(currentText string) []string {
-		// 斜杠命令补全
+		var cands []string
 		if strings.HasPrefix(currentText, "/") {
-			var cands []string
 			for _, c := range m.agent.Commands.List() {
 				full := "/" + c.Name
 				if strings.HasPrefix(full, currentText) {
 					cands = append(cands, full)
 				}
 			}
-			return cands
-		}
-		// @ 引用补全（@cmd: / @tool: / @路径）
-		if idx := strings.LastIndex(currentText, "@"); idx >= 0 {
+		} else if idx := strings.LastIndex(currentText, "@"); idx >= 0 {
 			after := strings.TrimSpace(currentText[idx+1:])
 			cmds := make([]string, 0)
 			for _, c := range m.agent.Commands.List() {
@@ -380,9 +377,12 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 			for _, t := range m.agent.Plugins.Tools() {
 				tools = append(tools, t.Name)
 			}
-			return completeAtRaw(after, cmds, tools)
+			cands = completeAtRaw(after, cmds, tools)
 		}
-		return nil
+		if len(cands) > maxAutoItems {
+			cands = cands[:maxAutoItems]
+		}
+		return cands
 	})
 	// 选择候选后应用到输入框：保留 @ 前缀，替换 @ 之后的部分
 	m.inputField.SetAutocompletedFunc(func(text string, index int, source int) bool {
