@@ -64,19 +64,20 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 }
 
 type tuiModel struct {
-	agent      *agent.Agent
-	store      *session.Store
-	sessionID  string
-	lines      []chatLine
-	stats      tuiStats
-	loading    bool
-	queue      []string // 排队的待发送消息（LIFO）
-	app        *tview.Application
-	textView   *tview.TextView
-	queueView  *tview.TextView // 排队消息列表（显示在输入框上方）
-	inputField *tview.InputField
-	statusBar  *tview.TextView
-	flex       *tview.Flex
+	agent         *agent.Agent
+	store         *session.Store
+	sessionID     string
+	lines         []chatLine
+	stats         tuiStats
+	loading       bool
+	queue         []string // 排队的待发送消息（LIFO）
+	app           *tview.Application
+	textView      *tview.TextView
+	queueView     *tview.TextView // 排队消息列表（显示在输入框上方）
+	inputField    *tview.InputField
+	statusBar     *tview.TextView
+	flex          *tview.Flex
+	userScrolledUp bool   // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
 
 	// 钩子通信：每次任务用新 channel
 	liveMu sync.Mutex
@@ -115,7 +116,11 @@ func (m *tuiModel) renderAllDirect() {
 			sb.WriteString(sgrColor("cyan", fmt.Sprintf("🔧 [%s] %s", t, l.content)) + "\n")
 		}
 	}
-	m.textView.SetText(sb.String()).SetDynamicColors(true).ScrollToEnd()
+	m.textView.SetText(sb.String()).SetDynamicColors(true)
+	// 仅在首次渲染或新 bot 回复时自动滚动到底部
+	if !m.userScrolledUp {
+		m.textView.ScrollToEnd()
+	}
 	m.statusBarDirect()
 }
 
@@ -172,6 +177,13 @@ func (m *tuiModel) statusBarDirect() {
 	if level == "" {
 		level = "auto"
 	}
+	sb.WriteString(sgrColor("magenta", " | "))
+	model := s.ModelName
+	if model == "" {
+		model = m.agent.Model()
+	}
+	sb.WriteString(sgrColor("cyan", model))
+
 	sb.WriteString(sgrColor("magenta", " | "))
 	sb.WriteString(sgrColor("magenta", "思考: "))
 	if level == "off" {
@@ -354,6 +366,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 
 	// 应用
 	m.app = tview.NewApplication()
+	m.app.EnableMouse(true)
 
 	// 全局按键捕获（Ctrl+T 切换思考等级）
 	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -386,6 +399,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		}
 		// PgUp/PgDn 滚动聊天历史
 		if event.Key() == tcell.KeyPgUp {
+			m.userScrolledUp = true
 			row, _ := m.textView.GetScrollOffset()
 			if row >= 10 {
 				m.textView.ScrollTo(row-10, 0)
@@ -400,6 +414,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 			if row+10 < total {
 				m.textView.ScrollTo(row+10, 0)
 			} else {
+				m.userScrolledUp = false
 				m.textView.ScrollToEnd()
 			}
 			return nil
