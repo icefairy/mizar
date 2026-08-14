@@ -70,6 +70,7 @@ type tuiModel struct {
 	lines      []chatLine
 	stats      tuiStats
 	loading    bool
+	queuedTask string // loading 时排队等待发送的下一条任务
 	app        *tview.Application
 	textView   *tview.TextView
 	inputField *tview.InputField
@@ -81,9 +82,9 @@ type tuiModel struct {
 	evtCh  chan toolCallInfo
 }
 
-// sgrColor 生成 tview 动态颜色标记：[color:name]text[::]
+// sgrColor 生成 tview 动态颜色标记：[color]text[::-]
 func sgrColor(name, text string) string {
-	return "[#" + name + "]" + text + "[::]"
+	return "[" + name + "]" + text + "[::-]"
 }
 
 // =============================================================================
@@ -224,10 +225,24 @@ func (m *tuiModel) setLoading(loading bool) {
 // setLoadingAsync 从 goroutine 安全设置加载状态
 func (m *tuiModel) setLoadingAsync(loading bool) {
 	m.loading = loading
-	m.renderAll()
+	m.app.QueueUpdateDraw(func() {
+		m.renderAllDirect()
+		// 任务结束后，如果有排队的消息则立即发送（在事件循环中安全）
+		if !loading && m.queuedTask != "" {
+			q := m.queuedTask
+			m.queuedTask = ""
+			m.startTask(q)
+		}
+	})
 }
 
 func (m *tuiModel) startTask(input string) {
+	// 将用户消息 + bot 回复追加到会话历史（供下次 agent.Run 继承上下文）
+	if len(m.lines) > 0 && m.store != nil && m.sessionID != "" {
+		m.store.Append(m.sessionID, agent.Message{Role: agent.RoleUser, Content: input})
+	}
+	m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: input})
+
 	m.liveMu.Lock()
 	evtCh := make(chan toolCallInfo, 20)
 	m.evtCh = evtCh
@@ -261,9 +276,15 @@ func (m *tuiModel) startTask(input string) {
 			m.addChatLineAsync(chatLine{role: "err", content: err.Error(), ts: time.Now()})
 		} else {
 			m.addChatLineAsync(chatLine{role: "bot", content: reply, ts: time.Now()})
+			// 将 bot 回复追加到会话历史
+			if m.store != nil && m.sessionID != "" {
+				m.store.Append(m.sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+			}
+			m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 
 		m.setLoadingAsync(false)
+		// queuedTask 在 setLoadingAsync 的 QueueUpdateDraw 回调中处理
 	}()
 }
 
@@ -336,17 +357,14 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	m.inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyEnter:
-			// 回车发送
-			if m.loading {
-				return nil
-			}
+			// 回车发送（loading 时也允许排队）
 			s := strings.TrimSpace(m.inputField.GetText())
 			if s == "" {
 				return nil
 			}
 			m.inputField.SetText("")
 
-			// 斜杠命令
+			// 斜杠命令（即使 loading 也处理）
 			if strings.HasPrefix(s, "/") {
 				if handled, out, err := m.agent.Commands.Dispatch(s); handled {
 					if err != nil {
@@ -366,6 +384,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 
 			if s == "/quit" || s == "/exit" {
 				m.app.Stop()
+				return nil
+			}
+
+			if m.loading {
+				// 排队：任务结束后自动发送
+				m.queuedTask = s
+				m.addChatLine(chatLine{role: "err", content: "⏳ 当前任务执行中，消息已排队，稍后自动发送", ts: time.Now()})
 				return nil
 			}
 
