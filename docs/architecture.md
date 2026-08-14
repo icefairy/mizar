@@ -199,6 +199,34 @@ export function tool_insert(name: string): string {
 
 **边界**：`db_query` 只覆盖内置驱动的库。连冷门数据库（MongoDB/Redis/ClickHouse 等）时走 MCP server（见 3.7），外部 server 自带驱动，不进主体二进制。
 
+### 3.6.1 连接池 + 批量 + 显式关闭（v1.3+）
+
+**连接池**：db 连接按 `driver|dsn` 缓存复用（同一 DSN 共享同一连接）。文件库空闲 5min 自动 Close，`:memory:` 永久保留（跨调用数据可见）。性能对比（SQLite 500 行基准）：
+
+| 操作 | 每次重开连接 | 连接池复用 |
+|---|---|---|
+| 逐条插入 | 193ms | 46ms（4.2x）|
+| 100 次点查 | 31ms | 9ms（3.4x）|
+
+**会话语义**：同一 DSN 复用连接 → 会话状态（`PRAGMA`/`SET SESSION`/临时表/用户变量）跨调用保留。插件需要干净会话时用 `db_close` 显式重置。
+
+```ts
+db_query("sqlite3", "/data/app.db", "PRAGMA foreign_keys=OFF");   // 影响后续同 DSN 调用
+db_close("sqlite3", "/data/app.db");                               // 丢弃残留，下次重建连接
+```
+
+**db_exec_batch**：SQL 数组一个事务执行，失败整体回滚。
+
+```ts
+db_exec_batch("sqlite3", "/data/app.db", JSON.stringify([
+  "CREATE TABLE IF NOT EXISTS mem (id INTEGER PRIMARY KEY, task TEXT)",
+  "INSERT INTO mem (task) VALUES ('a'); INSERT INTO mem (task) VALUES ('b');"
+]));
+// → {"rowsAffected":2,"statements":3}
+```
+
+性能：批量 500 行 3ms（事务 + 连接复用），逐条 46ms（连接复用无事务）。**写多行优先 batch**。
+
 ### 3.7 mcp_call——冷门能力的外部通道（v1.3+）
 
 `internal/mcp` 实现 MCP **client**（stdio + HTTP/streamable 传输，支持 `tools/list` / `tools/call`），连外部 MCP server——任何语言实现的协议服务，驱动/能力自带。

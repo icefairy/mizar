@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,6 +116,156 @@ func TestDBQueryExecMultiStatement(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0]["n"] != float64(2) {
 		t.Fatalf("want 2 rows, got %v", rows)
+	}
+}
+
+// TestDBConnPoolReuse 验证连接池复用（:memory: 库跨调用数据可见 = 同连接）。
+func TestDBConnPoolReuse(t *testing.T) {
+	// :memory: 库若每次重开连接，第二次查询将看不到第一次插入的数据。
+	if _, err := DBQueryFn("sqlite3", ":memory:", "CREATE TABLE t (id INTEGER)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := DBQueryFn("sqlite3", ":memory:", "INSERT INTO t VALUES (42)"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	res, err := DBQueryFn("sqlite3", ":memory:", "SELECT id FROM t")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(res), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 1 || rows[0]["id"] != float64(42) {
+		t.Fatalf("连接池复用失败: %v", rows)
+	}
+}
+
+// TestDBExecBatch 验证事务批量：成功聚合 rowsAffected；失败整体回滚。
+func TestDBExecBatch(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "t4.db")
+	// 成功路径：DDL + 多行 INSERT 一个事务
+	res, err := DBExecBatchFn("sqlite3", dbFile, `[
+		"CREATE TABLE t (id INTEGER, name TEXT)",
+		"INSERT INTO t VALUES (1, 'a'); INSERT INTO t VALUES (2, 'b');",
+		"INSERT INTO t VALUES (3, 'c')"
+	]`)
+	if err != nil {
+		t.Fatalf("batch ok: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(res), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["rowsAffected"] != float64(3) || m["statements"] != float64(4) {
+		t.Fatalf("batch result: %v", m)
+	}
+	q, _ := DBQueryFn("sqlite3", dbFile, "SELECT COUNT(*) AS n FROM t")
+	var rows []map[string]any
+	json.Unmarshal([]byte(q), &rows)
+	if len(rows) != 1 || rows[0]["n"] != float64(3) {
+		t.Fatalf("batch 后行数: %v", rows)
+	}
+
+	// 失败路径：第二条非法，第一条（合法插入）必须回滚
+	_, err = DBExecBatchFn("sqlite3", dbFile, `[
+		"INSERT INTO t VALUES (99, 'x')",
+		"INSERT INTO t VALUES (999, 'y'); INSERT INTO bad_table VALUES (1)",
+		"INSERT INTO t VALUES (100, 'z')"
+	]`)
+	if err == nil {
+		t.Fatalf("batch 失败应报错")
+	}
+	q2, _ := DBQueryFn("sqlite3", dbFile, "SELECT COUNT(*) AS n FROM t")
+	json.Unmarshal([]byte(q2), &rows)
+	if rows[0]["n"] != float64(3) {
+		t.Fatalf("回滚失败，行数=%v want 3", rows[0]["n"])
+	}
+}
+
+// TestHostDBExecBatchVisible 验证 db_exec_batch 在 goja 中可见可调。
+func TestHostDBExecBatchVisible(t *testing.T) {
+	e, err := New(mockHost())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer e.Close()
+	js, _ := CompileTS("batch.ts", `export function tool_batch(): string { return db_exec_batch("sqlite3", "/tmp/mizar_bt_test.db", "[\"DROP TABLE IF EXISTS bt\", \"CREATE TABLE bt (id INTEGER)\", \"INSERT INTO bt VALUES (1)\"]"); }`)
+	if err := e.RunScript("batch.ts", js); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	out, err := e.Call("tool_batch")
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	want := `{"rowsAffected":1,"statements":3}`
+	if fmt.Sprintf("%v", out) != want {
+		t.Fatalf("want %s, got %v", want, out)
+	}
+}
+
+// TestDBClose 验证 db_close 丢弃会话残留（临时表/PRAGMA 状态）。
+func TestDBClose(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "t5.db")
+	// 建临时表（per-connection）：复用连接时跨调用可见
+	if _, err := DBQueryFn("sqlite3", dbFile, "CREATE TABLE t (id INTEGER)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 关闭连接 → 重建后临时表消失（此例用普通表验证连接重建语义：
+	// 普通表持久所以仍存在，但连接对象已变——用 :memory: 验证更彻底）
+	if _, err := DBCloseFn("sqlite3", dbFile); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// 关闭后再操作：应正常重建连接（不报错）
+	if _, err := DBQueryFn("sqlite3", dbFile, "INSERT INTO t VALUES (1)"); err != nil {
+		t.Fatalf("reuse after close: %v", err)
+	}
+	// 幂等：重复关闭不报错
+	if _, err := DBCloseFn("sqlite3", dbFile); err != nil {
+		t.Fatalf("close again: %v", err)
+	}
+}
+
+// TestDBCloseMemory 验证 :memory: 库 close 后数据确实消失（连接重建）。
+func TestDBCloseMemory(t *testing.T) {
+	dsn := ":memory:"
+	// 用唯一表名避免与其他测试撞表
+	DBQueryFn("sqlite3", dsn, "CREATE TABLE memc (id INTEGER)")
+	DBQueryFn("sqlite3", dsn, "INSERT INTO memc VALUES (7)")
+	res, err := DBQueryFn("sqlite3", dsn, "SELECT COUNT(*) AS n FROM memc")
+	if err != nil {
+		t.Fatalf("pre-close query: %v", err)
+	}
+	var rows []map[string]any
+	json.Unmarshal([]byte(res), &rows)
+	if rows[0]["n"] != float64(1) {
+		t.Fatalf("pre-close: %v", rows)
+	}
+	// close 后 :memory: 库重建，表不存在
+	DBCloseFn("sqlite3", dsn)
+	if _, err := DBQueryFn("sqlite3", dsn, "SELECT * FROM memc"); err == nil {
+		t.Fatalf("close 后 :memory: 表应消失")
+	}
+}
+
+// TestHostDBCloseVisible 验证 db_close 在 goja 中可见可调。
+func TestHostDBCloseVisible(t *testing.T) {
+	e, err := New(mockHost())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer e.Close()
+	js, _ := CompileTS("close.ts", `export function tool_dc(): string { return db_close("sqlite3", "/tmp/mizar_dc_test.db"); }`)
+	if err := e.RunScript("close.ts", js); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	out, err := e.Call("tool_dc")
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	want := `{"closed":true}`
+	if fmt.Sprintf("%v", out) != want {
+		t.Fatalf("want %s, got %v", want, out)
 	}
 }
 

@@ -136,7 +136,13 @@ func main() {
 		Log: func(msg string) { log.Print(msg) },
 		// DBQuery：内置数据库查询（sqlite3/mysql/postgres），插件 db_query() 直达
 		DBQuery: engine.DBQueryFn,
+		// DBExecBatch：事务批量执行，插件 db_exec_batch() 直达（连接池复用）
+		DBExecBatch: engine.DBExecBatchFn,
+		// DBClose：关闭连接丢弃会话残留，插件 db_close() 直达
+		DBClose: engine.DBCloseFn,
 	}
+	// 启动 db 连接池空闲回收（文件库 5min 未用自动 Close，:memory: 永久保留）
+	engine.StartDBReaper()
 	// MCPCall：外部 MCP server 长尾能力（Redis/Kafka/MongoDB 等），插件 mcp_call() 直达
 	mcpReg := engine.NewMCPRegistry(nil)
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && len(cfg.MCPServers) > 0 {
