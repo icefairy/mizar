@@ -347,7 +347,7 @@ func main() {
 	// 内置 /provider 命令：查看/切换/配置 LLM 供应商
 	a.Commands.Register(agent.Command{
 		Name:        "provider",
-		Description: "查看当前 LLM 供应商（/provider）、切换 URL（/provider <baseURL>）或配置完整信息（/provider <baseURL> <apiKey>）",
+		Description: "查看当前 LLM 供应商（/provider）、切换 URL（/provider  ＜baseURL＞）或配置完整信息（/provider ＜baseURL＞ ＜apiKey＞）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
@@ -387,7 +387,7 @@ func main() {
 	// 内置 /model 命令：查看/切换模型（对齐 pi 的 /model）
 	a.Commands.Register(agent.Command{
 		Name:        "model",
-		Description: "查看当前模型（/model）或切换（/model <name>）",
+		Description: "查看当前模型（/model）或切换（/model ＜name＞）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
@@ -411,7 +411,7 @@ func main() {
 	// 内置 /apikey 命令：查看/设置 API Key（与 /provider 配合使用）
 	a.Commands.Register(agent.Command{
 		Name:        "apikey",
-		Description: "查看当前 API Key（/apikey）或设置（/apikey <key>）",
+		Description: "查看当前 API Key（/apikey）或设置（/apikey ＜key＞）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
@@ -507,7 +507,7 @@ func main() {
 	// 内置 /think 命令：查看/切换思考等级（auto/off/low/medium/high）
 	a.Commands.Register(agent.Command{
 		Name:        "think",
-		Description: "查看/切换思考等级（/think 查看 | /think auto|off|low|medium|high 设置 | /think cycle 循环切换）",
+		Description: "查看/切换思考等级（/think 查看 ｜ /think auto/off/low/medium/high 设置 ｜ /think cycle 循环切换）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
@@ -544,14 +544,14 @@ func main() {
 	a.Commands.Register(agent.Command{
 		Name:        "help",
 		Description: "列出所有可用命令",
-Run: func(args string) (string, error) {
+		Run: func(args string) (string, error) {
 			cmds := a.Commands.List()
 			var sb strings.Builder
-			sb.WriteString("可用命令：\n")
+			sb.WriteString("**可用命令：**\n")
 			for _, c := range cmds {
-				sb.WriteString(fmt.Sprintf("  /%-12s  %s", c.Name, c.Description))
+				sb.WriteString(fmt.Sprintf("- `/%s` %s", c.Name, c.Description))
 				if c.PluginFile != "" {
-					sb.WriteString(" (插件: " + c.PluginFile + ")")
+					sb.WriteString("（插件：" + c.PluginFile + "）")
 				}
 				sb.WriteString("\n")
 			}

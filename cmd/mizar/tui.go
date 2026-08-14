@@ -256,7 +256,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.input, _ = m.input.Update(msg)
 
-case doneMsg:
+	case doneMsg:
 		m.loading = false
 		elapsed := time.Since(m.stats.RequestStartTime)
 
@@ -277,11 +277,11 @@ case doneMsg:
 			var tc strings.Builder
 			for i, call := range msg.toolCalls {
 				if i > 0 {
-								tc.WriteString("  ")
+					tc.WriteString("  ")
 				}
 				tc.WriteString(call.Tool)
 				if call.Args != "" && call.Args != "{}" {
-								tc.WriteString("(" + call.Args + ")")
+					tc.WriteString("(" + call.Args + ")")
 				}
 			}
 			m.lines = append(m.lines, chatLine{role: "tool", content: tc.String(), ts: time.Now()})
