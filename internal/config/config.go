@@ -25,6 +25,7 @@ type Config struct {
 	Thinking       bool   `json:"thinking,omitempty"`     // (deprecated) 旧版思考模式开关，由 ThinkingLevel 替代
 	ThinkingLevel     string `json:"thinking_level,omitempty"` // 思考等级：auto/off/low/medium/high（空=auto）
 	ContextWindow     int    `json:"context_window"`           // 上下文窗口（token）
+	MaxSteps          int    `json:"max_steps,omitempty"`        // 最大循环步数（0=默认30）
 	SkillEvolution    *bool  `json:"skill_evolution"`          // 技能自动沉淀（nil=默认开启）
 	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`      // 技能使用统计+周报（nil=默认开启）
 	SkillStatsTopN    int    `json:"skill_stats_top_n"`        // 周报建议禁用数（0=默认10）

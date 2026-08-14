@@ -103,26 +103,43 @@ func (a *Agent) Model() string {
 
 // SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
 // 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
+// defaultSystemPrompt 默认系统提示词：结构化为「身份 + 工具策略 + 工作方法 + 上下文指引」。
+// 学习自 pi：工具提供短描述、方法引导聚合为 guidelines、不设严格步数（默认 30，/config 可调）。
+const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。
+
+## 工作方法
+遵循以下高效工作流，避免盲目尝试：
+1. 先理解任务所需的信息类型，再选择工具。
+2. 优先使用 grep/find 进行定位搜索（快、便宜），再使用 read 读取具体行（offset/limit 精确指定）。
+3. 一次工具调用尽量完成，不要重复试探同一任务。
+4. 命令执行前考虑是否真的需要 bash；环境感知类问题（hostname、ip、进程、包）可用 bash 一次搞定，stderr 已并入 stdout。
+5. 读取文件时务必填写正确的 offset（行号）和 limit（行数），read 支持分段读，不要反复全量读。
+6. 工具失败时根据错误信息修正参数重试，不要盲目换工具。
+7. 修改代码前先读要改的文件，改完给出摘要。
+8. 回复要简洁，展示文件路径要清晰。
+
+## 会话上下文
+- 当前工作目录由用户所在目录决定，不确定时用 pwd 确认。
+- 项目可能有 AGENTS.md 或 .mizar 上下文文件，相关时先读取。
+- 技能（SKILL.md）通过 index 模式注入系统提示，可用 skill_manage 管理。
+
+## 可用工具
+`
+
+// SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
+// 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
 func (a *Agent) SystemPrompt() string {
 	if a.systemPromptCache != "" {
 		return a.systemPromptCache
 	}
 	tools := a.Plugins.Tools()
 	var sb strings.Builder
-	sb.WriteString(a.System)
-	sb.WriteString(`
-
-## 工作方法
-遵循以下高效工作流，避免盲目尝试：
-1. 先理解任务所需的信息类型。
-2. 优先使用 grep/find 进行定位搜索（快、便宜），再使用 read 读取具体行（offset/limit 精确指定）。
-3. 一次工具调用尽量完成，不要重复试探同一任务。
-4. 命令执行前考虑是否真的需要 bash；环境感知类问题（hostname、ip、进程、包）可用 bash 一次搞定。
-5. 读取文件时务必填写正确的 offset（行号）和 limit（行数），read 支持分段读，不要反复全量读。
-6. 工具失败时根据错误信息修正参数重试，不要盲目换工具。
-
-## 可用工具
-`)
+	sys := a.System
+	if sys == "" {
+		sys = defaultSystemPrompt
+	}
+	sb.WriteString(sys)
+	sb.WriteString("\n")
 	if len(tools) == 0 {
 		sb.WriteString("（无）\n")
 	} else {
@@ -151,7 +168,7 @@ func (a *Agent) ReloadTools() {
 // Run 执行任务。返回最终回复。
 func (a *Agent) Run(task string) (string, error) {
 	if a.MaxSteps <= 0 {
-		a.MaxSteps = 20
+		a.MaxSteps = 30
 	}
 	if a.Hooks == nil {
 		a.Hooks = NewHooks()
