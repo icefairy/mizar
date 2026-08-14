@@ -81,7 +81,7 @@ func New(llm LLM, pm *plugins.Manager) *Agent {
 	a := &Agent{
 		LLM:        llm,
 		Plugins:    pm,
-		MaxSteps:   20,
+		MaxSteps:   30,
 		callParser: parseCallJSON,
 		Commands:   NewCommandRegistry(),
 	}
@@ -292,6 +292,17 @@ func (a *Agent) Run(task string) (string, error) {
 		// 工具调用
 		q.BeginOperation("tool:" + req.Tool)
 		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args}, a.logf)
+		// 空参数兑底：不执行工具，把错误发回模型让它修正（防止"args {command} required"空转）
+		trimmedArgs := strings.TrimSpace(req.Args)
+		if trimmedArgs == "" || trimmedArgs == "{}" {
+			q.EndOperation("tool:" + req.Tool)
+			msg := fmt.Sprintf("⚠️ 工具 %s 调用缺少参数（args 为空）。请重新调用，并在 args 中传入正确的 JSON 参数。", req.Tool)
+			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+			msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			step++
+			continue
+		}
 		if a.Tuner != nil && a.Tuner.RecordToolCall(req.Tool, req.Args) {
 			q.EndOperation("tool:" + req.Tool)
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})

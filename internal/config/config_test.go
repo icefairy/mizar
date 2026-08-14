@@ -14,9 +14,9 @@ func TestConfigSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	c := &Config{
-		BaseURL:      "http://127.0.0.1:3002/v1",
-		APIKey:       "sk-test",
-		Model:        "deepseek-v4-flash",
+		BaseURL:       "http://127.0.0.1:3002/v1",
+		APIKey:        "sk-test",
+		Model:         "deepseek-v4-flash",
 		ThinkingLevel: "high",
 		ContextWindow: 1000000,
 	}

@@ -126,12 +126,15 @@ func pluginsToolToDef(t plugins.Tool) toolDef {
 // 新 schema 中 arguments 直接是原始参数（如 {"command":"hostname"}），
 // 用 json.Marshal 转成转义后的 JSON 字符串填入 args 字段。
 // 期望输出：{"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}
+//
+// 空 arguments 仍生成工具调用（args=""），由 agent 循环做空参数兜底。
 func toolCallsToText(tcs []toolCall) string {
 	if len(tcs) == 0 {
 		return ""
 	}
 	tc := tcs[0]
-	argsEscaped, _ := json.Marshal(tc.Function.Arguments)
+	argsRaw := tc.Function.Arguments
+	argsEscaped, _ := json.Marshal(argsRaw)
 	return fmt.Sprintf(`{"action":"tool","tool":"%s","args":%s}`, tc.Function.Name, argsEscaped)
 }
 
