@@ -104,7 +104,7 @@ func (m *tuiModel) renderAllDirect() {
 		case "system":
 			sb.WriteString(l.content + "\n")
 		case "user":
-			sb.WriteString(sgrColor("bold", fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
+			sb.WriteString(sgrColor("white", fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
 		case "bot":
 			sb.WriteString(sgrColor("green", fmt.Sprintf("▲ [%s]", t)) + "\n")
 			sb.WriteString(l.content + "\n\n")

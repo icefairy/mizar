@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mizar/internal/agent"
+	"mizar/internal/plugins"
 )
 
 // OpenAI 是 OpenAI 兼容客户端。
@@ -42,31 +43,224 @@ func NewOpenAI(baseURL, apiKey, model string) *OpenAI {
 	}
 }
 
+// ============================================================================
+// 原生工具调用（OpenAI function calling）
+// ============================================================================
+
+// toolDef OpenAI API 工具定义
+type toolDef struct {
+	Type     string  `json:"type"`
+	Function funcDef `json:"function"`
+}
+
+type funcDef struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Parameters  any    `json:"parameters"`
+}
+
+// toolCall OpenAI API 响应中的工具调用
+type toolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"` // JSON 字符串，如 {"command":"hostname"}
+	} `json:"function"`
+}
+
 type chatMsg struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
 type chatReq struct {
-	Model     string    `json:"model"`
-	Messages  []chatMsg `json:"messages"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
-	Thinking  *struct {
+	Model           string    `json:"model"`
+	Messages        []chatMsg `json:"messages"`
+	Tools           []toolDef `json:"tools,omitempty"`
+	MaxTokens       int       `json:"max_tokens,omitempty"`
+	Thinking        *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"` // openai beta: low/medium/high
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
-// SummarizeMessages 生成会话摘要（供 Compactor 使用）。
-func (o *OpenAI) ModelName() string {
-	return o.Model
+type chatResp struct {
+	Choices []struct {
+		Index        int `json:"index"`
+		Message      struct {
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []toolCall `json:"tool_calls,omitempty"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+	Usage *agent.Usage `json:"usage,omitempty"`
 }
 
+// pluginsToolToDef 将 plugins.Tool 转为 OpenAI tools 定义。
+// 参数统一使用 args: string（JSON 字符串），与 agent 的 callRequest 格式对齐。
+func pluginsToolToDef(t plugins.Tool) toolDef {
+	return toolDef{
+		Type: "function",
+		Function: funcDef{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"args": map[string]any{
+						"type":        "string",
+						"description": "JSON string arguments for the tool",
+					},
+				},
+				"required": []string{"args"},
+			},
+		},
+	}
+}
+
+// toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
+// agent 的 callParser 期望格式：
+//   {"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}
+func toolCallsToText(tcs []toolCall) string {
+	if len(tcs) == 0 {
+		return ""
+	}
+	tc := tcs[0] // 每次只处理第一个工具调用
+	// arguments 已经是 JSON 对象字符串（如 {"command":"hostname"}）
+	// 需要用 json.Marshal 把它包成 JSON 字符串值（带引号转义）
+	argsEscaped, _ := json.Marshal(tc.Function.Arguments)
+	return fmt.Sprintf(`{"action":"tool","tool":"%s","args":%s}`, tc.Function.Name, argsEscaped)
+}
+
+// setThinking 根据 ThinkingLevel 设置思考参数
+func (c *OpenAI) setThinking(req *chatReq) {
+	if send, typ := c.HasThinkingHeader(); send {
+		req.Thinking = &struct {
+			Type string `json:"type"`
+		}{Type: typ}
+		if effort := c.ReasoningEffort(); effort != "" {
+			req.ReasoningEffort = effort
+		}
+	}
+}
+
+// ============================================================================
+// 核心方法
+// ============================================================================
+
+// ChatWithTools 实现 agent.ToolCallLLM 接口：发送消息 + 原生工具定义。
+// 若模型返回原生 tool_calls，自动转为 agent 循环可解析的 JSON 文本；
+// 否则返回普通文本回复。
+// 消息在请求中保持文本格式（不改历史格式），仅额外发送 tools 参数。
+func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (string, error) {
+	req := chatReq{Model: c.Model}
+	for _, m := range messages {
+		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
+	}
+	// 工具定义
+	for _, t := range tools {
+		req.Tools = append(req.Tools, pluginsToolToDef(t))
+	}
+	c.setThinking(&req)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.Client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+
+	var out chatResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("llm error: %s", out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("llm: no choices")
+	}
+	c.lastUsage = out.Usage
+
+	msg := out.Choices[0].Message
+	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
+	if len(msg.ToolCalls) > 0 {
+		return toolCallsToText(msg.ToolCalls), nil
+	}
+	return msg.Content, nil
+}
+
+// Chat 实现 agent.LLM 接口。不发送 tools 参数，模型需从 system prompt 解析工具。
+func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
+	req := chatReq{Model: c.Model}
+	for _, m := range messages {
+		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
+	}
+	c.setThinking(&req)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+	httpReq, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	resp, err := c.Client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+	var out chatResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("llm error: %s", out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("llm: no choices")
+	}
+	c.lastUsage = out.Usage
+	return out.Choices[0].Message.Content, nil
+}
+
+// ============================================================================
+// 消息摘要（Compactor 用）
+// ============================================================================
+
 // SummarizeMessages 生成会话摘要（供 Compactor 使用）。
-// 缓存友好设计（参照 pi compaction）：摘要请求是独立的一次性请求，
-// 其 prompt 前缀与主对话不同，天然不会污染/命中主对话的 prefix cache。
-// 注意：这里显式使用随机 system 头，防止摘要请求自身反复命中同一缓存
-// 造成无意义开销（摘要每次内容都不同，缓存无复用价值）。
+// 使用随机 system 头防止自身反复命中缓存（摘要每次内容不同，缓存无复用价值）。
 func (o *OpenAI) SummarizeMessages(msgs []agent.Message, maxTokens int) (string, error) {
 	var sb bytes.Buffer
 	sb.WriteString(agent.SummaryPrompt)
@@ -111,19 +305,9 @@ func (o *OpenAI) SummarizeMessages(msgs []agent.Message, maxTokens int) (string,
 	return cr.Choices[0].Message.Content, nil
 }
 
-type chatResp struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
-	Usage *agent.Usage `json:"usage,omitempty"`
-}
-
-// OpenAI 是 OpenAI 兼容客户端。
+// ============================================================================
+// 思考等级（ThinkingLevel）
+// ============================================================================
 
 const (
 	thinkingAuto   = "auto"
@@ -135,7 +319,6 @@ const (
 
 var thinkingOrder = []string{thinkingOff, thinkingLow, thinkingMedium, thinkingHigh, thinkingAuto}
 
-// ThinkingEnabled 返回思考等级描述字符串
 func (o *OpenAI) ThinkingEnabled() string {
 	if o.ThinkingLevel == "" {
 		return thinkingAuto
@@ -143,17 +326,14 @@ func (o *OpenAI) ThinkingEnabled() string {
 	return o.ThinkingLevel
 }
 
-// SetThinkingLevel 设置思考等级（兼容 main.go 命名）
 func (o *OpenAI) SetThinkingLevel(level string) {
 	o.SetThinking(level)
 }
 
-// SetThinking 设置思考等级（auto/off/low/medium/high）
 func (o *OpenAI) SetThinking(level string) {
 	o.ThinkingLevel = level
 }
 
-// ToggleThinking 在 auto/off/low/medium/high 之间循环切换
 func (o *OpenAI) ToggleThinking() string {
 	for i, l := range thinkingOrder {
 		if o.ThinkingLevel == l {
@@ -166,9 +346,7 @@ func (o *OpenAI) ToggleThinking() string {
 	return o.ThinkingLevel
 }
 
-// HasThinkingHeader 返回是否应当发送 thinking 请求头
 func (o *OpenAI) HasThinkingHeader() (bool, string) {
-	// nil/auto = 不传；off = disabled；low/medium/high = enabled + reasoning_effort
 	switch o.ThinkingLevel {
 	case "":
 		return false, ""
@@ -182,7 +360,6 @@ func (o *OpenAI) HasThinkingHeader() (bool, string) {
 	return false, ""
 }
 
-// ReasoningEffort 返回 reasoning_effort 值（仅 enabled 时返回）
 func (o *OpenAI) ReasoningEffort() string {
 	send, typ := o.HasThinkingHeader()
 	if send && typ == "enabled" {
@@ -198,62 +375,18 @@ func (o *OpenAI) ReasoningEffort() string {
 	return ""
 }
 
-// LastUsage 返回最后一次响应的 token 用量
 func (o *OpenAI) LastUsage() *agent.Usage {
 	return o.lastUsage
 }
 
-// Chat 实现 agent.LLM 接口。
-func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
-	req := chatReq{Model: c.Model}
-	for _, m := range messages {
-		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
-	}
-	// 思考模式：根据 ThinkingLevel 设置 thinking + reasoning_effort
-	if send, typ := c.HasThinkingHeader(); send {
-		req.Thinking = &struct {
-			Type string `json:"type"`
-		}{Type: typ}
-		if effort := c.ReasoningEffort(); effort != "" {
-			req.ReasoningEffort = effort
-		}
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return "", err
-	}
-	httpReq, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-	resp, err := c.Client.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("http: %w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
-	}
-	var out chatResp
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", fmt.Errorf("decode: %w", err)
-	}
-	if out.Error != nil {
-		return "", fmt.Errorf("llm error: %s", out.Error.Message)
-	}
-	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("llm: no choices")
-	}
-	c.lastUsage = out.Usage // 记录用量供 TUI 展示
-	return out.Choices[0].Message.Content, nil
+func (o *OpenAI) ModelName() string {
+	return o.Model
 }
 
-// FromMessages 不再需要，agent.Message 直接使用。
+// ============================================================================
+// 辅助
+// ============================================================================
+
 func truncate(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {

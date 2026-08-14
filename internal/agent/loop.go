@@ -20,6 +20,14 @@ type LLM interface {
 	Chat(messages []Message) (string, error)
 }
 
+// ToolCallLLM 可选接口：支持原生工具调用的 LLM。
+// 若 LLM 实现此接口，Agent 循环会使用原生 tools 参数而非文本 JSON。
+type ToolCallLLM interface {
+	// ChatWithTools 发送消息 + 工具定义，返回模型回复文本。
+	// 若模型返回原生 tool_calls，实现方应将其转为 agent 循环可解析的 JSON 文本。
+	ChatWithTools(messages []Message, tools []plugins.Tool) (string, error)
+}
+
 // Message 对话消息（定义见 message.go：含 Kind 字段用于压缩切点）。
 // Role 常量见 message.go：RoleSystem/RoleUser/RoleAssistant。
 
@@ -196,9 +204,16 @@ func (a *Agent) Run(task string) (string, error) {
 		a.Hooks.fireLLMRequest(llmCtx, a.logf)
 		msgs = llmCtx.Messages
 
-		reply, err := a.LLM.Chat(msgs)
+		var reply string
+		var llmErr error
+		if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
+			// 原生工具调用：发送 tools 参数，模型结构化返回
+			reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
+		} else {
+			reply, llmErr = a.LLM.Chat(msgs)
+		}
 		q.EndOperation("llm")
-		if err != nil {
+		if llmErr != nil {
 			if a.Tuner != nil {
 				if retry, retryCnt := a.Tuner.LLMFailed(); retry {
 					time.Sleep(a.Tuner.RetryDelay(retryCnt))
@@ -206,9 +221,9 @@ func (a *Agent) Run(task string) (string, error) {
 					continue
 				}
 			}
-			q.Complete(err)
-			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: err}, a.logf)
-			return "", fmt.Errorf("llm chat: %w", err)
+			q.Complete(llmErr)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: llmErr}, a.logf)
+			return "", fmt.Errorf("llm chat: %w", llmErr)
 		}
 		if a.Tuner != nil {
 			a.Tuner.LLMSucceeded()
