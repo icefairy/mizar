@@ -19,7 +19,7 @@ import (
 type messageRole int
 
 const (
-	msgUser      messageRole = iota
+	msgUser messageRole = iota
 	msgAssistant
 	msgThinking
 	msgError
@@ -53,12 +53,12 @@ type chatMessage struct {
 }
 
 type tuiModel struct {
-	agent     *agent.Agent
-	store     *session.Store
-	sessionID string
-	width     int
-	height    int
-	input     textinput.Model
+	agent        *agent.Agent
+	store        *session.Store
+	sessionID    string
+	width        int
+	height       int
+	input        textinput.Model
 	pendingInput string
 
 	candidates       []string
@@ -69,12 +69,12 @@ type tuiModel struct {
 	viewport viewport.Model
 	renderer *glamour.TermRenderer
 
-	loading  bool
-	spinner  spinner.Model
-	status   string
+	loading    bool
+	spinner    spinner.Model
+	status     string
 	cmdHistory []string
 	historyIdx int
-	quitting bool
+	quitting   bool
 }
 
 func newTuiModel(a *agent.Agent, st *session.Store, sessionID string) tuiModel {
@@ -91,13 +91,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sessionID string) tuiModel {
 	renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle())
 
 	model := tuiModel{
-		agent:     a,
-		store:     st,
-		sessionID: sessionID,
-		input:     ti,
-		spinner:   sp,
-		viewport:  vm,
-		renderer:  renderer,
+		agent:      a,
+		store:      st,
+		sessionID:  sessionID,
+		input:      ti,
+		spinner:    sp,
+		viewport:   vm,
+		renderer:   renderer,
 		cmdHistory: []string{},
 		loading:    false,
 		status:     fmt.Sprintf("model=%s", a.Model()),
@@ -107,10 +107,12 @@ func newTuiModel(a *agent.Agent, st *session.Store, sessionID string) tuiModel {
 	model.messages = []chatMessage{
 		{
 			role:    msgSystem,
-			content: fmt.Sprintf("# 开阳 · Mizar v0.1.0\n\n输入任务开始对话。按 `Tab` 使用 `@` 补全，`/help` 查看命令，`/quit` 退出。"),
+			content: "# 开阳 · Mizar v0.1.0\n\n输入任务开始对话。按 `Tab` 使用 `@` 补全，`/help` 查看命令，`/quit` 退出。",
 			ts:      time.Now(),
 		},
 	}
+	// 关键：初始化后必须立即 SetContent，否则 Viewport 为空
+	model.viewport.SetContent(model.renderMessages())
 
 	return model
 }
@@ -220,7 +222,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.Type == tea.KeyEsc {
-			m.showAutocomplete = false
+			if m.loading {
+				// Esc 在思考中：取消任务（清空消息和 loading）
+				m.loading = false
+				m.viewport.GotoBottom()
+				m.addMessage(msgError, "任务已取消")
+			} else {
+				m.showAutocomplete = false
+			}
 			return m, nil
 		}
 
@@ -346,7 +355,7 @@ func (m tuiModel) View() string {
 	return sb.String()
 }
 
-func (m tuiModel) addMessage(role messageRole, content string) {
+func (m *tuiModel) addMessage(role messageRole, content string) {
 	m.messages = append(m.messages, chatMessage{role: role, content: content, ts: time.Now()})
 	m.viewport.SetContent(m.renderMessages())
 }
