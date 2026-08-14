@@ -36,11 +36,11 @@ type Agent struct {
 	LLM        LLM
 	Plugins    *plugins.Manager
 	System     string
-	Initial    []Message    // 会话恢复时的历史消息（置于 task 之前）
-	MaxSteps   int          // 最大循环步数（默认 20）
-	VerboseLog func(string) // 可选日志回调
-	Compactor  *Compactor   // 会话压缩器（nil = 不压缩）
-	Hooks      *Hooks       // 挂载点（nil = 无钩子）
+	Initial    []Message       // 会话恢复时的历史消息（置于 task 之前）
+	MaxSteps   int             // 最大循环步数（默认 20）
+	VerboseLog func(string)    // 可选日志回调
+	Compactor  *Compactor      // 会话压缩器（nil = 不压缩）
+	Hooks      *Hooks          // 挂载点（nil = 无钩子）
 	Tuner      *WeakModelTuner // 弱模型宽容策略（nil = 不启用）
 
 	// 工具调用解析策略

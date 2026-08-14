@@ -44,9 +44,8 @@ func main() {
 		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
 		task      = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer   = flag.Bool("version", false, "显示版本")
-		initWiz   = flag.Bool("init", false, "运行初始化向导（配置供应商/模型）")
-		lspBinary  = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
-		lspServer  = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
+		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
+		lspServer = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
 		// Server 模式（持久运行 daemon）
 		serve  = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
 		addr   = flag.String("addr", ":3003", "Server 监听地址")
@@ -69,20 +68,6 @@ func main() {
 		if err := lsp.ServeStdio(ctx, lsp.ProviderConfig{}); err != nil {
 			log.Fatalf("LSP server 退出: %v", err)
 		}
-		return
-	}
-
-	// 初始化向导：交互式配置供应商/模型/思考/上下文
-	if *initWiz {
-		cfg, err := config.RunWizard(config.DefaultPath())
-		if err != nil {
-			log.Fatalf("初始化失败: %v", err)
-		}
-		if cfg.BaseURL == "" {
-			fmt.Println("未配置供应商，退出。")
-			return
-		}
-		fmt.Printf("初始化完成，配置已保存到 %s\n", config.DefaultPath())
 		return
 	}
 
@@ -294,10 +279,10 @@ func main() {
 	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt + agentsPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
 
-	// 内置 /provider 命令：查看/切换 LLM 供应商（baseURL）
+	// 内置 /provider 命令：查看/切换/配置 LLM 供应商
 	a.Commands.Register(agent.Command{
 		Name:        "provider",
-		Description: "查看当前 LLM 供应商（/provider）或切换（/provider <baseURL>）",
+		Description: "查看当前 LLM 供应商（/provider）、切换 URL（/provider <baseURL>）或配置完整信息（/provider <baseURL> <apiKey>）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
@@ -305,11 +290,36 @@ func main() {
 				if client.Thinking != nil && *client.Thinking {
 					thinking = "on"
 				}
-				return fmt.Sprintf("当前供应商: %s\n模型: %s\n思考模式: %s", client.BaseURL, client.Model, thinking), nil
+				keyMask := "<set>"
+				if client.APIKey != "" {
+					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
+				}
+				return fmt.Sprintf("当前供应商: %s\n模型: %s\n思考模式: %s\nAPI Key: %s", client.BaseURL, client.Model, thinking, keyMask), nil
 			}
-			old := client.BaseURL
-			client.BaseURL = strings.TrimSuffix(args, "/")
-			return fmt.Sprintf("✓ 供应商已切换: %s → %s", old, client.BaseURL), nil
+			fields := strings.Fields(args)
+			baseURL := strings.TrimSuffix(fields[0], "/")
+			oldURL := client.BaseURL
+			client.BaseURL = baseURL
+			if len(fields) >= 2 {
+				client.APIKey = fields[1]
+			}
+			// 持久化
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				log.Printf("/provider 持久化失败: %v", err)
+			}
+			if len(fields) >= 2 {
+				return fmt.Sprintf("✓ 供应商已切换: %s → %s\n✓ API Key 已更新", oldURL, baseURL), nil
+			}
+			if oldURL == baseURL {
+				return fmt.Sprintf("URL 未变更: %s（设置 API Key: /provider <url> <key> 或 /apikey <key>）", baseURL), nil
+			}
+			return fmt.Sprintf("✓ 供应商已切换: %s → %s", oldURL, baseURL), nil
 		},
 	})
 	// 内置 /model 命令：查看/切换模型（对齐 pi 的 /model）
@@ -323,7 +333,48 @@ func main() {
 			}
 			old := client.Model
 			client.Model = args
+			// 持久化到 config.json
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				log.Printf("/model 持久化失败: %v", err)
+			}
 			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, args), nil
+		},
+	})
+	// 内置 /apikey 命令：查看/设置 API Key（与 /provider 配合使用）
+	a.Commands.Register(agent.Command{
+		Name:        "apikey",
+		Description: "查看当前 API Key（/apikey）或设置（/apikey <key>）",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			if args == "" {
+				keyMask := "<未设置>"
+				if client.APIKey != "" {
+					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
+				}
+				return fmt.Sprintf("当前 API Key: %s\n当前供应商: %s", keyMask, client.BaseURL), nil
+			}
+			old := client.APIKey
+			client.APIKey = args
+			// 持久化
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				log.Printf("/apikey 持久化失败: %v", err)
+			}
+			if old == "" {
+				return "✓ API Key 已设置", nil
+			}
+			return "✓ API Key 已更新", nil
 		},
 	})
 	// 内置 /reload 命令：重载 ~/.mizar/config.json + 插件热重载
@@ -333,7 +384,7 @@ func main() {
 		Run: func(args string) (string, error) {
 			cfg, err := config.Load(config.DefaultPath())
 			if err != nil || cfg.BaseURL == "" {
-				return "", fmt.Errorf("重载失败: %v（先运行 --init 或检查 %s）", err, config.DefaultPath())
+				return "", fmt.Errorf("重载失败: %v（检查 %s）", err, config.DefaultPath())
 			}
 			// 应用配置到客户端
 			client.BaseURL = cfg.BaseURL
@@ -390,6 +441,41 @@ func main() {
 			fmt.Println("再见")
 			os.Exit(0)
 			return "", nil
+		},
+	})
+	// 内置 /help 命令：列出所有可用命令
+	a.Commands.Register(agent.Command{
+		Name:        "help",
+		Description: "列出所有可用命令",
+		Run: func(args string) (string, error) {
+			cmds := a.Commands.List()
+			var sb strings.Builder
+			sb.WriteString("可用命令：\n")
+			for _, c := range cmds {
+				plugin := ""
+				if c.PluginFile != "" {
+					plugin = " (插件: " + c.PluginFile + ")"
+				}
+				sb.WriteString(fmt.Sprintf("  /%-10s %-60s%s\n", c.Name, c.Description, plugin))
+			}
+			return sb.String(), nil
+		},
+	})
+	// 内置 /save 命令：将当前配置持久化到 ~/.mizar/config.json
+	a.Commands.Register(agent.Command{
+		Name:        "save",
+		Description: "将当前配置保存到 ~/.mizar/config.json",
+		Run: func(args string) (string, error) {
+			cfg, _ := config.Load(config.DefaultPath())
+			cfg.BaseURL = client.BaseURL
+			cfg.Model = client.Model
+			cfg.APIKey = client.APIKey
+			cfg.ContextWindow = *ctxWindow
+			cfg.Thinking = (client.Thinking != nil && *client.Thinking)
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				return "", fmt.Errorf("保存失败: %v", err)
+			}
+			return fmt.Sprintf("✓ 配置已保存: %s", config.DefaultPath()), nil
 		},
 	})
 	if !*noCompact {
