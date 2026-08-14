@@ -262,7 +262,7 @@ func main() {
 	tools := pm.Tools()
 	log.Printf("工具 %d | 命令 %d", len(tools), len(pm.Commands()))
 	for _, t := range tools {
-		log.Print("  "+t.Name)
+		log.Print("  " + t.Name)
 	}
 
 	// 技能使用统计回调（每次工具调用 +1；周报每周提示，距上次 ≥7 天触发）

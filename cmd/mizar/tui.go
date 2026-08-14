@@ -16,11 +16,10 @@ import (
 	"mizar/internal/session"
 )
 
-// messageRole 消息类型。
 type messageRole int
 
 const (
-	msgUser messageRole = iota
+	msgUser      messageRole = iota
 	msgAssistant
 	msgThinking
 	msgError
@@ -47,21 +46,19 @@ func (r messageRole) prefix() string {
 	}
 }
 
-// chatMessage 一条聊天消息。
 type chatMessage struct {
 	role    messageRole
 	content string
 	ts      time.Time
 }
 
-// tuiModel Bubble Tea 主模型。
 type tuiModel struct {
-	agent        *agent.Agent
-	store        *session.Store
-	sessionID    string
-	width        int
-	height       int
-	input        textinput.Model
+	agent     *agent.Agent
+	store     *session.Store
+	sessionID string
+	width     int
+	height    int
+	input     textinput.Model
 	pendingInput string
 
 	candidates       []string
@@ -72,13 +69,12 @@ type tuiModel struct {
 	viewport viewport.Model
 	renderer *glamour.TermRenderer
 
-	loading    bool
-	spinner    spinner.Model
-	status     string
-	err        error
+	loading  bool
+	spinner  spinner.Model
+	status   string
 	cmdHistory []string
 	historyIdx int
-	quitting   bool
+	quitting bool
 }
 
 func newTuiModel(a *agent.Agent, st *session.Store, sessionID string) tuiModel {
@@ -92,31 +88,31 @@ func newTuiModel(a *agent.Agent, st *session.Store, sessionID string) tuiModel {
 	sp.Spinner = spinner.Dot
 
 	vm := viewport.New(60, 20)
-
 	renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle())
 
-	return tuiModel{
-		agent:      a,
-		store:      st,
-		sessionID:  sessionID,
-		input:      ti,
-		spinner:    sp,
-		viewport:   vm,
-		renderer:   renderer,
+	model := tuiModel{
+		agent:     a,
+		store:     st,
+		sessionID: sessionID,
+		input:     ti,
+		spinner:   sp,
+		viewport:  vm,
+		renderer:  renderer,
 		cmdHistory: []string{},
 		loading:    false,
 		status:     fmt.Sprintf("model=%s", a.Model()),
 	}
-}
 
-func fetchCmdToolNames(a *agent.Agent) (cmdNames, toolNames []string) {
-	for _, c := range a.Commands.List() {
-		cmdNames = append(cmdNames, "/"+c.Name)
+	// 初始欢迎消息
+	model.messages = []chatMessage{
+		{
+			role:    msgSystem,
+			content: fmt.Sprintf("# 开阳 · Mizar v0.1.0\n\n输入任务开始对话。按 `Tab` 使用 `@` 补全，`/help` 查看命令，`/quit` 退出。"),
+			ts:      time.Now(),
+		},
 	}
-	for _, t := range a.Plugins.Tools() {
-		toolNames = append(toolNames, t.Name)
-	}
-	return
+
+	return model
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -139,14 +135,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showAutocomplete {
 			inputAreaH += len(m.candidates) + 1
 		}
+		if m.height-inputAreaH < 10 {
+			m.height = inputAreaH + 10
+		}
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - inputAreaH
+		m.viewport.Height = m.height - inputAreaH
 		m.input.Width = msg.Width - 4
 		m.viewport.GotoBottom()
 		return m, nil
 
 	case tea.KeyMsg:
-		if msg.String() == "enter" {
+		// 使用 Key.Type 判断，比 String() 更可靠
+		// KeyMsg 就是 Key 类型别名，直接访问 .Type
+		isEnter := msg.Type == tea.KeyEnter
+
+		if isEnter {
 			if m.loading {
 				return m, nil
 			}
@@ -158,8 +161,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cmdHistory = append(m.cmdHistory, input)
 			m.historyIdx = len(m.cmdHistory)
 			m.showAutocomplete = false
+			m.input.SetValue("") // 清空输入
 
-			// 斜杠命令
 			if strings.HasPrefix(input, "/") {
 				if handled, out, err := m.agent.Commands.Dispatch(input); handled {
 					if err != nil {
@@ -168,6 +171,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if out != "" {
 						m.addMessage(msgAssistant, out)
 					}
+					// 更新状态（/model 后刷新）
+					m.status = fmt.Sprintf("model=%s", m.agent.Model())
 					return m, nil
 				}
 			}
@@ -184,7 +189,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.addMessage(msgThinking, "思考中...")
 
-			// 异步 LLM 调用
 			done := make(chan doneMsg, 1)
 			go func() {
 				reply, err := m.agent.Run(resolved)
@@ -199,35 +203,51 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
-		if msg.String() == "tab" || msg.String() == "shift+tab" {
+		// Tab 补全
+		isTab := msg.Type == tea.KeyTab
+		if isTab {
 			if len(m.candidates) == 0 {
 				m.triggerAutocomplete()
 			} else {
-				if msg.String() == "tab" {
-					m.candidateIdx = (m.candidateIdx + 1) % len(m.candidates)
+				if m.candidateIdx < len(m.candidates)-1 {
+					m.candidateIdx++
 				} else {
-					m.candidateIdx = (m.candidateIdx - 1 + len(m.candidates)) % len(m.candidates)
+					m.candidateIdx = 0
 				}
 				applyCandidate(&m, m.candidates[m.candidateIdx])
 			}
 			return m, nil
 		}
 
-		if msg.String() == "esc" {
+		if msg.Type == tea.KeyEsc {
 			m.showAutocomplete = false
 			return m, nil
 		}
 
-		if msg.String() == "up" {
-			if m.historyIdx > 0 {
+		if msg.Type == tea.KeyUp {
+			if m.showAutocomplete && len(m.candidates) > 0 {
+				if m.candidateIdx > 0 {
+					m.candidateIdx--
+				} else {
+					m.candidateIdx = len(m.candidates) - 1
+				}
+				applyCandidate(&m, m.candidates[m.candidateIdx])
+			} else if m.historyIdx > 0 {
 				m.historyIdx--
 				m.input.SetValue(m.cmdHistory[m.historyIdx])
 			}
 			return m, nil
 		}
 
-		if msg.String() == "down" {
-			if m.historyIdx < len(m.cmdHistory) {
+		if msg.Type == tea.KeyDown {
+			if m.showAutocomplete && len(m.candidates) > 0 {
+				if m.candidateIdx < len(m.candidates)-1 {
+					m.candidateIdx++
+				} else {
+					m.candidateIdx = 0
+				}
+				applyCandidate(&m, m.candidates[m.candidateIdx])
+			} else if m.historyIdx < len(m.cmdHistory) {
 				m.historyIdx++
 				if m.historyIdx < len(m.cmdHistory) {
 					m.input.SetValue(m.cmdHistory[m.historyIdx])
@@ -277,28 +297,42 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m tuiModel) View() string {
 	var sb strings.Builder
 
+	// 消息区
 	sb.WriteString(m.viewport.View())
+
 	sepLen := m.width - 2
 	if sepLen < 10 {
-		sepLen = 60 // 初始窗口尚未调整时
+		sepLen = 60
 	}
 	sb.WriteString(fmt.Sprintf("┌─%s┐\n", strings.Repeat("─", sepLen)))
 
-	if m.showAutocomplete {
-		sb.WriteString("  ")
-		for i, c := range m.candidates {
+	// 补全候选（垂直显示，最多 8 行）
+	if m.showAutocomplete && len(m.candidates) > 0 {
+		maxShow := 8
+		if len(m.candidates) < maxShow {
+			maxShow = len(m.candidates)
+		}
+		// 确定显示窗口：以 candidateIdx 为中心
+		start := m.candidateIdx - maxShow/2
+		if start < 0 {
+			start = 0
+		}
+		if start+maxShow > len(m.candidates) {
+			start = len(m.candidates) - maxShow
+		}
+		for i := start; i < start+maxShow; i++ {
 			if i == m.candidateIdx {
-				sb.WriteString(fmt.Sprintf("█ %s", c))
+				sb.WriteString(fmt.Sprintf("  ▸ %s\n", m.candidates[i]))
 			} else {
-				sb.WriteString(fmt.Sprintf("  %s", c))
-			}
-			if i < len(m.candidates)-1 {
-				sb.WriteString(" | ")
+				sb.WriteString(fmt.Sprintf("    %s\n", m.candidates[i]))
 			}
 		}
-		sb.WriteString("\n")
+		if len(m.candidates) > maxShow {
+			sb.WriteString(fmt.Sprintf("    ... (%d 个候选, ↑↓ 滚动)\n", len(m.candidates)))
+		}
 	}
 
+	// 输入区
 	if m.loading {
 		sb.WriteString(fmt.Sprintf("  %s %s\n", m.spinner.View(), m.status))
 	} else {
@@ -314,6 +348,7 @@ func (m tuiModel) View() string {
 
 func (m tuiModel) addMessage(role messageRole, content string) {
 	m.messages = append(m.messages, chatMessage{role: role, content: content, ts: time.Now()})
+	m.viewport.SetContent(m.renderMessages())
 }
 
 func (m tuiModel) renderMessages() string {
@@ -340,14 +375,26 @@ func (m tuiModel) renderMessages() string {
 		case msgToolCall:
 			sb.WriteString(fmt.Sprintf("**%s %s** `%s`\n\n", prefix, ts, msg.content))
 		case msgSystem:
-			sb.WriteString(fmt.Sprintf("**%s %s** `%s`\n\n", prefix, ts, msg.content))
+			sb.WriteString(fmt.Sprintf("**%s %s**\n\n", prefix, ts))
+			rendered, err := m.renderer.Render(msg.content)
+			if err != nil {
+				rendered = msg.content
+			}
+			sb.WriteString(rendered)
+			sb.WriteString("\n\n---\n\n")
 		}
 	}
 	return sb.String()
 }
 
 func (m *tuiModel) getCandidates() (cmdNames, toolNames []string) {
-	return fetchCmdToolNames(m.agent)
+	for _, c := range m.agent.Commands.List() {
+		cmdNames = append(cmdNames, "/"+c.Name)
+	}
+	for _, t := range m.agent.Plugins.Tools() {
+		toolNames = append(toolNames, t.Name)
+	}
+	return
 }
 
 func (m *tuiModel) triggerAutocomplete() {
@@ -370,6 +417,7 @@ func applyCandidate(m *tuiModel, candidate string) {
 	if idx := strings.LastIndex(m.pendingInput, "@"); idx >= 0 {
 		newLine := m.pendingInput[:idx] + candidate + " "
 		m.input.SetValue(newLine)
+		m.pendingInput = newLine
 	}
 }
 

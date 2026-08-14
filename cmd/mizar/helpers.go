@@ -97,30 +97,55 @@ func completeAtRaw(after string, cmdNames []string, toolNames []string) []string
 }
 
 // completeAtPath 文件路径补全。
+// 当 prefix 以 / 结尾时，列出目录下的所有条目（供用户浏览）。
+// 否则按文件名前缀过滤。返回最多 100 个候选。
 func completeAtPath(prefix string) []string {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		return nil
 	}
-	parent := filepath.Dir(prefix)
-	name := filepath.Base(prefix)
+
 	cdir, err := os.Getwd()
 	if err != nil {
 		return nil
 	}
+
+	// 判断是否为目录浏览模式（以 / 结尾）
+	isBrowseMode := strings.HasSuffix(prefix, "/")
+
+	// 取父目录
+	var parent string
+	if isBrowseMode {
+		parent = prefix // 保留末尾 / 供后续判断
+	} else {
+		parent = filepath.Dir(prefix)
+	}
+
 	if parent == "" || parent == "." {
 		parent = cdir
 	} else if !filepath.IsAbs(parent) {
 		parent = filepath.Join(cdir, parent)
 	}
+
+	// 计算文件名过滤前缀
+	var namePrefix string
+	if isBrowseMode {
+		namePrefix = "" // 浏览模式不过滤
+	} else {
+		namePrefix = filepath.Base(prefix)
+	}
+
 	es, err := os.ReadDir(parent)
 	if err != nil {
 		return nil
 	}
+
 	var result []string
 	for _, e := range es {
 		entryName := e.Name()
-		if name != "" && !strings.HasPrefix(entryName, name) {
+		// 浏览模式（/ 结尾）：列出所有
+		// 匹配模式：按 namePrefix 过滤
+		if namePrefix != "" && !strings.HasPrefix(entryName, namePrefix) {
 			continue
 		}
 		entryPath := filepath.Join(parent, entryName)
