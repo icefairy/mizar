@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,6 +28,13 @@ type Tool struct {
 	// Run 在引擎内执行；args 是字符串参数。
 	Run func(args string) (string, error)
 }
+
+// 插件生命周期钩子：插件导出 plugin_init() 在加载成功后调用（初始化），
+// plugin_cleanup() 在卸载/热重载替换前调用（反初始化，如关闭连接/释放端口）。
+const (
+	pluginInitFn    = "plugin_init"
+	pluginCleanupFn = "plugin_cleanup"
+)
 
 // Manager 管理插件加载、热重载与工具注册。
 type Manager struct {
@@ -220,7 +228,58 @@ func (m *Manager) loadAll(force bool) (loaded []string, failed map[string]error)
 			loaded = append(loaded, f)
 		}
 	}
+	// 清理已删除的插件（文件消失 → 调 plugin_cleanup + 注销工具/命令/RPC/hook/服务器）
+	for f := range m.pluginFilesLocked() {
+		if _, ok := filesSet(files)[f]; !ok {
+			m.unloadPlugin(f)
+		}
+	}
 	return loaded, failed
+}
+
+// filesSet 把文件名切片转成集合（删除检测用）。
+func filesSet(files []string) map[string]bool {
+	s := make(map[string]bool, len(files))
+	for _, f := range files {
+		s[f] = true
+	}
+	return s
+}
+
+// pluginFilesLocked 返回当前已加载插件的文件名集合。
+func (m *Manager) pluginFilesLocked() map[string]struct{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]struct{}, len(m.engines))
+	for f := range m.engines {
+		out[f] = struct{}{}
+	}
+	return out
+}
+
+// unloadPlugin 卸载插件：调 plugin_cleanup + 注销全部注册项 + 关闭引擎。
+func (m *Manager) unloadPlugin(filename string) {
+	m.mu.Lock()
+	if old, ok := m.engines[filename]; ok {
+		delete(m.engines, filename)
+		delete(m.modTime, filename)
+		m.removeToolsLocked(filename)
+		m.removeCommandsLocked(filename)
+		m.removeRPCLocked(filename)
+		m.removeLSPLocked(filename)
+		m.removeServersLocked(filename)
+		m.hookReg.RemoveFile(filename)
+		m.mu.Unlock()
+		// 生命周期回调（锁外）
+		if old.Has(pluginCleanupFn) {
+			if _, err := old.Call(pluginCleanupFn); err != nil {
+				log.Printf("plugin_cleanup %s: %v", filename, err)
+			}
+		}
+		old.Close()
+		return
+	}
+	m.mu.Unlock()
 }
 
 // 纯 JS 插件直接执行（跳过 esbuild 编译），TS 才需要转译。
@@ -277,7 +336,6 @@ func (m *Manager) loadPlugin(filename string) error {
 	}
 	// 原子替换：先收集再提交
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	// 移除旧引擎里属于该文件的工具、命令、RPC、LSP 提供者、Hook 回调
 	m.removeToolsLocked(filename)
 	m.removeCommandsLocked(filename)
@@ -293,12 +351,31 @@ func (m *Manager) loadPlugin(filename string) error {
 	for _, r := range rpcs {
 		m.rpcMethods[r.Name] = r
 	}
-	if old, ok := m.engines[filename]; ok {
-		old.Close()
+	var old *engine.Engine
+	if old, _ = m.engines[filename]; old != nil {
+		delete(m.engines, filename) // 先移出，plugin_cleanup 失败也不阻塞替换
 	}
 	m.engines[filename] = vm
 	if info, err := os.Stat(path); err == nil {
 		m.modTime[filename] = info.ModTime()
+	}
+	m.mu.Unlock()
+
+	// 生命周期回调（锁外执行，插件内可自由调宿主函数）：
+	// 1) 旧引擎 plugin_cleanup —— 热重载反初始化
+	if old != nil {
+		if old.Has(pluginCleanupFn) {
+			if _, err := old.Call(pluginCleanupFn); err != nil {
+				return fmt.Errorf("plugin_cleanup %s: %w", filename, err)
+			}
+		}
+		old.Close()
+	}
+	// 2) 新引擎 plugin_init —— 加载初始化
+	if vm.Has(pluginInitFn) {
+		if _, err := vm.Call(pluginInitFn); err != nil {
+			return fmt.Errorf("plugin_init %s: %w", filename, err)
+		}
 	}
 	return nil
 }

@@ -255,10 +255,44 @@ export function tool_cache_get(key: string): string {
 
 **分层总览**：`db_query`（内置关系型）→ `mcp_call`（外部任意服务），插件按场景选，互不阻塞。内置 3 驱动保持主体轻量，长尾能力全部外置，二进制永不膨胀。
 
+### 3.8 插件生命周期（v1.3+）
+
+插件可导出两个可选钩子，做初始化和反初始化：
+
+| 钩子 | 触发时机 | 用途 |
+|---|---|---|
+| `plugin_init()` | 加载成功后（含首次加载、热重载新版本） | 建表、注册 hook、连外部服务、启动后台任务 |
+| `plugin_cleanup()` | 卸载前：热重载替换旧版本、**插件文件被删除**、进程退出前 | 关闭连接、释放端口、持久化状态、注销 hook |
+
+```ts
+// extensions/worker.ts —— 生命周期示例
+var timer: any = null;
+
+export function plugin_init(): void {
+  db_exec_batch("sqlite3", "/data/worker.db", JSON.stringify([
+    "CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, task TEXT)",
+  ]));
+  // 注册 RunEnd hook：任务结束记一笔
+  hook_on("RunEnd", (ctx: string): string => {
+    db_query("sqlite3", "/data/worker.db", "INSERT INTO jobs (task) VALUES ('" + ctx + "')");
+    return "recorded";
+  });
+}
+
+export function plugin_cleanup(): void {
+  if (timer) { clearInterval(timer); timer = null; }   // 停后台任务
+  db_close("sqlite3", "/data/worker.db");              // 断开连接
+}
+```
+
+**稳定性语义**：
+- 单插件加载失败/panic 不影响其他插件和主程序（失败进 `failed` map，其余照常）
+- 热重载 = 原子替换：新版本 `plugin_init` 成功才生效，失败保留旧版本
+- **删除插件文件 → 自动卸载**：调 `plugin_cleanup` + 注销全部工具/命令/hook/HTTP 服务器，无幽灵残留
+- 生命周期回调在锁外执行，插件内可自由调宿主函数
 
 
 ## 4. 自举闭环（核心卖点）
-
 ```
 用户需求
    │
