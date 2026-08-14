@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -135,6 +134,13 @@ type doneMsg struct {
 	toolCalls []toolCallInfo
 }
 
+// liveToolMsg 工具调用实时通知（任务进行中）
+type liveToolMsg struct {
+	tool string
+	args string
+	seq  int // 序号，防止乱序
+}
+
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -183,14 +189,22 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.stats.RequestStartTime = time.Now()
 
-			// 注册工具调用捕获钩子
-			var toolMu sync.Mutex
-			var toolCalls []toolCallInfo
+			// 实时工具调用通知 channel
+			liveCh := make(chan liveToolMsg, 20)
+			var allCalls []toolCallInfo
+			var seq int
+
+			// 注册工具调用捕获钩子（实时通知 + 收集）
 			if m.agent.Hooks != nil {
 				m.agent.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
-					toolMu.Lock()
-					defer toolMu.Unlock()
-					toolCalls = append(toolCalls, toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)})
+					seq++
+					call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
+					allCalls = append(allCalls, call)
+					// 非阻塞发送实时通知
+					select {
+					case liveCh <- liveToolMsg{tool: call.Tool, args: call.Args, seq: seq}:
+					default:
+					}
 					return nil
 				})
 			}
@@ -198,12 +212,20 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			done := make(chan doneMsg, 1)
 			go func() {
 				reply, err := m.agent.Run(s)
-				toolMu.Lock()
-				calls := append([]toolCallInfo(nil), toolCalls...)
-				toolMu.Unlock()
-				done <- doneMsg{reply: reply, err: err, toolCalls: calls}
+				close(liveCh)
+				done <- doneMsg{reply: reply, err: err, toolCalls: append([]toolCallInfo(nil), allCalls...)}
 			}()
-			return m, func() tea.Msg { return <-done }
+
+			// 返回两个合并的 tea.Cmd：优先读实时工具调用，否则等待完成
+			return m, func() tea.Msg {
+				select {
+				case evt, ok := <-liveCh:
+					if !ok {
+						return <-done
+					}
+					return evt
+				}
+			}
 		}
 
 		if msg.Type == tea.KeyTab {
@@ -256,6 +278,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.input, _ = m.input.Update(msg)
 
+	case liveToolMsg:
+		// 实时工具调用展示（思考过程中立即显示）
+		m.lines = append(m.lines, chatLine{role: "tool", content: msg.tool + "(" + msg.args + ")", ts: time.Now()})
+
 	case doneMsg:
 		m.loading = false
 		elapsed := time.Since(m.stats.RequestStartTime)
@@ -272,20 +298,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.stats.ModelName = m.agent.Model()
 
-		// 工具调用摘要
-		if len(msg.toolCalls) > 0 {
-			var tc strings.Builder
-			for i, call := range msg.toolCalls {
-				if i > 0 {
-					tc.WriteString("  ")
-				}
-				tc.WriteString(call.Tool)
-				if call.Args != "" && call.Args != "{}" {
-					tc.WriteString("(" + call.Args + ")")
-				}
-			}
-			m.lines = append(m.lines, chatLine{role: "tool", content: tc.String(), ts: time.Now()})
-		}
+		// 工具调用已在思考过程中实时显示（liveToolMsg），此处不再重复添加
 
 		if msg.err != nil {
 			m.lines = append(m.lines, chatLine{role: "err", content: msg.err.Error(), ts: time.Now()})
@@ -337,7 +350,8 @@ func (m *tuiModel) View() string {
 
 	// 输入区
 	if m.loading {
-		sb.WriteString("  ⏳ [思考中...] " + m.status + "\n")
+		elapsed := time.Since(m.stats.RequestStartTime).Seconds()
+		sb.WriteString(fmt.Sprintf("  ⏳ [思考中...] %s 耗时%.0fs", m.status, elapsed))
 	} else {
 		sb.WriteString(m.input.View() + "\n")
 	}
