@@ -86,40 +86,39 @@ func sgrColor(name, text string) string {
 	return "[#" + name + "]" + text + "[::]"
 }
 
-func (m *tuiModel) addChatLine(line chatLine) {
-	m.lines = append(m.lines, line)
-	m.renderAll()
+// =============================================================================
+// 直接渲染（仅在事件循环中调用，不用 QueueUpdateDraw 避免死锁）
+// =============================================================================
+
+// renderAllDirect 直接渲染聊天区 + 状态栏（事件循环内用）
+func (m *tuiModel) renderAllDirect() {
+	var sb strings.Builder
+	start := 0
+	if len(m.lines) > 30 {
+		start = len(m.lines) - 30
+	}
+	for _, l := range m.lines[start:] {
+		t := l.ts.Format("15:04")
+		switch l.role {
+		case "system":
+			sb.WriteString(l.content + "\n")
+		case "user":
+			sb.WriteString(sgrColor("bold", fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
+		case "bot":
+			sb.WriteString(sgrColor("green", fmt.Sprintf("▲ [%s]", t)) + "\n")
+			sb.WriteString(l.content + "\n\n")
+		case "err":
+			sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, l.content)) + "\n")
+		case "tool":
+			sb.WriteString(sgrColor("cyan", fmt.Sprintf("🔧 [%s] %s", t, l.content)) + "\n")
+		}
+	}
+	m.textView.SetText(sb.String()).SetDynamicColors(true).ScrollToEnd()
+	m.statusBarDirect()
 }
 
-func (m *tuiModel) renderAll() {
-	m.app.QueueUpdateDraw(func() {
-		var sb strings.Builder
-		start := 0
-		if len(m.lines) > 30 {
-			start = len(m.lines) - 30
-		}
-		for _, l := range m.lines[start:] {
-			t := l.ts.Format("15:04")
-			switch l.role {
-			case "system":
-				sb.WriteString(l.content + "\n")
-			case "user":
-				sb.WriteString(sgrColor("bold", fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
-			case "bot":
-				sb.WriteString(sgrColor("green", fmt.Sprintf("▲ [%s]", t)) + "\n")
-				sb.WriteString(l.content + "\n\n")
-			case "err":
-				sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, l.content)) + "\n")
-			case "tool":
-				sb.WriteString(sgrColor("cyan", fmt.Sprintf("🔧 [%s] %s", t, l.content)) + "\n")
-			}
-		}
-		m.textView.SetText(sb.String()).SetDynamicColors(true).ScrollToEnd()
-		m.updateStatusBar()
-	})
-}
-
-func (m *tuiModel) updateStatusBar() {
+// statusBarDirect 直接渲染状态栏（事件循环内用）
+func (m *tuiModel) statusBarDirect() {
 	s := &m.stats
 	var sb strings.Builder
 
@@ -179,22 +178,53 @@ func (m *tuiModel) updateStatusBar() {
 		sb.WriteString(sgrColor("magenta", level))
 	}
 
+	m.statusBar.SetText(sb.String()).SetDynamicColors(true)
+}
+
+// =============================================================================
+// 从 goroutine 安全渲染（用 QueueUpdateDraw，但不会造成死锁）
+// =============================================================================
+
+// renderAll 从任意 goroutine 安全更新 UI
+func (m *tuiModel) renderAll() {
 	m.app.QueueUpdateDraw(func() {
-		m.statusBar.SetText(sb.String()).SetDynamicColors(true)
+		m.renderAllDirect()
 	})
 }
 
+// updateStatusBar 从任意 goroutine 安全更新状态栏
+func (m *tuiModel) updateStatusBar() {
+	m.app.QueueUpdateDraw(func() {
+		m.statusBarDirect()
+	})
+}
+
+// =============================================================================
+// 添加消息（事件循环内调用直接版，goroutine 调用 QueueUpdate 版）
+// =============================================================================
+
+// addChatLine 添加消息并渲染（仅从事件循环调用）
+func (m *tuiModel) addChatLine(line chatLine) {
+	m.lines = append(m.lines, line)
+	m.renderAllDirect()
+}
+
+// addChatLineAsync 从 goroutine 安全添加消息
+func (m *tuiModel) addChatLineAsync(line chatLine) {
+	m.lines = append(m.lines, line)
+	m.renderAll()
+}
+
+// setLoading 设置加载状态（仅从事件循环调用）
 func (m *tuiModel) setLoading(loading bool) {
 	m.loading = loading
-	m.app.QueueUpdateDraw(func() {
-		if loading {
-			m.inputField.SetPlaceholder("思考中...")
-			m.inputField.SetLabel("> ")
-		} else {
-			m.inputField.SetPlaceholder("输入任务，/help 查看命令，/quit 退出")
-		}
-		m.updateStatusBar()
-	})
+	m.renderAllDirect()
+}
+
+// setLoadingAsync 从 goroutine 安全设置加载状态
+func (m *tuiModel) setLoadingAsync(loading bool) {
+	m.loading = loading
+	m.renderAll()
 }
 
 func (m *tuiModel) startTask(input string) {
@@ -228,12 +258,12 @@ func (m *tuiModel) startTask(input string) {
 		m.stats.ModelName = m.agent.Model()
 
 		if err != nil {
-			m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+			m.addChatLineAsync(chatLine{role: "err", content: err.Error(), ts: time.Now()})
 		} else {
-			m.addChatLine(chatLine{role: "bot", content: reply, ts: time.Now()})
+			m.addChatLineAsync(chatLine{role: "bot", content: reply, ts: time.Now()})
 		}
 
-		m.setLoading(false)
+		m.setLoadingAsync(false)
 	}()
 }
 
@@ -299,7 +329,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 			m.addChatLine(chatLine{role: "err", content: "任务已取消", ts: time.Now()})
 			return nil
 		}
-		return event // 转发
+		return event
 	})
 
 	// 输入框按键捕获（Enter 发送，Tab 补全）
@@ -329,7 +359,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 					if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 						m.stats.ThinkingLevel = ut.ThinkingEnabled()
 					}
-					m.updateStatusBar()
+					m.statusBarDirect()
 					return nil
 				}
 			}
@@ -377,18 +407,8 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	// 钩子只注册一次：从 m.evtCh 发送工具调用
 	if a.Hooks != nil {
 		a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
-			m.liveMu.Lock()
-			ch := m.evtCh
-			m.liveMu.Unlock()
-			if ch == nil {
-				return nil
-			}
 			call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
-			select {
-			case ch <- call:
-				m.addChatLine(chatLine{role: "tool", content: call.Tool + "(" + call.Args + ")", ts: time.Now()})
-			default:
-			}
+			m.addChatLineAsync(chatLine{role: "tool", content: call.Tool + "(" + call.Args + ")", ts: time.Now()})
 			return nil
 		})
 	}
@@ -397,7 +417,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 }
 
 func (m *tuiModel) Run() error {
-	// 初始渲染 banner（直接设 text 而非 QueueUpdateDraw，因事件循环尚未启动）
+	// 初始渲染 banner（直接 SetText，因事件循环尚未启动）
 	var sb strings.Builder
 	sb.WriteString(banner() + "\n")
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
