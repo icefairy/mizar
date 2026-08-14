@@ -164,7 +164,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if out != "" {
 						m.lines = append(m.lines, chatLine{role: "bot", content: out, ts: time.Now()})
 					}
-					// 更新思考等级状态
+					// 更新状态栏信息
+					m.stats.ModelName = m.agent.Model()
+					m.status = fmt.Sprintf("model=%s", m.agent.Model())
 					if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 						m.stats.ThinkingLevel = ut.ThinkingEnabled()
 					}
