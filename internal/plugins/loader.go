@@ -3,6 +3,7 @@
 package plugins
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -363,7 +364,10 @@ func (m *Manager) removeLSPLocked(filename string) {
 func (m *Manager) removeServersLocked(filename string) {
 	for _, srv := range m.activeServers[filename] {
 		if srv != nil {
-			_ = srv.Close()
+			// 优雅关闭：等待现有连接完成（最多 2s），强制关闭监听
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = srv.Shutdown(ctx)
+			cancel()
 		}
 	}
 	delete(m.activeServers, filename)
