@@ -495,6 +495,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 			m.addChatLineAsync(chatLine{role: "tool", content: call.Tool + "(" + call.Args + ")", ts: time.Now()})
 			return nil
 		})
+		a.Hooks.OnToolResult(func(ctx *agent.HookContext) error {
+			// 工具结果：仅显示错误，正常结果不显示（避免刷屏）
+			if ctx.Err != nil {
+				m.addChatLineAsync(chatLine{role: "err", content: ctx.Tool + " 失败: " + ctx.Err.Error(), ts: time.Now()})
+			}
+			return nil
+		})
 	}
 
 	return m

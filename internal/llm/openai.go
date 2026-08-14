@@ -102,18 +102,22 @@ type chatResp struct {
 }
 
 // pluginsToolToDef 将 plugins.Tool 转为 OpenAI tools 定义。
-// 参数使用 additionalProperties: true 让模型直接传原始参数，
-// 不使用 args: string 包裹层（会导致模型困惑）。
+// 参数 schema 优先从 Tool.Description 解析（ArgsSchema），
+// 解析失败时兜底 additionalProperties: true。
 func pluginsToolToDef(t plugins.Tool) toolDef {
+	params := t.ArgsSchema()
+	if params == nil {
+		params = map[string]any{
+			"type":                 "object",
+			"additionalProperties": true,
+		}
+	}
 	return toolDef{
 		Type: "function",
 		Function: funcDef{
 			Name:        t.Name,
 			Description: t.Description,
-			Parameters: map[string]any{
-				"type":                 "object",
-				"additionalProperties": true,
-			},
+			Parameters:  params,
 		},
 	}
 }

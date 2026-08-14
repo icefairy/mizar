@@ -80,8 +80,8 @@ func TestWizardFlow(t *testing.T) {
 	if c.Model != "mock-model" {
 		t.Errorf("Model = %q", c.Model)
 	}
-	if !c.Thinking {
-		t.Error("Thinking should be true")
+	if c.ThinkingLevel != "medium" {
+		t.Errorf("ThinkingLevel = %q, want medium", c.ThinkingLevel)
 	}
 	if c.ContextWindow != 256000 {
 		t.Errorf("ContextWindow = %d, want 256000", c.ContextWindow)

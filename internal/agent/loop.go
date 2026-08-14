@@ -110,7 +110,19 @@ func (a *Agent) SystemPrompt() string {
 	tools := a.Plugins.Tools()
 	var sb strings.Builder
 	sb.WriteString(a.System)
-	sb.WriteString("\n\n## 可用工具\n")
+	sb.WriteString(`
+
+## 工作方法
+遵循以下高效工作流，避免盲目尝试：
+1. 先理解任务所需的信息类型。
+2. 优先使用 grep/find 进行定位搜索（快、便宜），再使用 read 读取具体行（offset/limit 精确指定）。
+3. 一次工具调用尽量完成，不要重复试探同一任务。
+4. 命令执行前考虑是否真的需要 bash；环境感知类问题（hostname、ip、进程、包）可用 bash 一次搞定。
+5. 读取文件时务必填写正确的 offset（行号）和 limit（行数），read 支持分段读，不要反复全量读。
+6. 工具失败时根据错误信息修正参数重试，不要盲目换工具。
+
+## 可用工具
+`)
 	if len(tools) == 0 {
 		sb.WriteString("（无）\n")
 	} else {
