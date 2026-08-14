@@ -544,16 +544,16 @@ func main() {
 	a.Commands.Register(agent.Command{
 		Name:        "help",
 		Description: "列出所有可用命令",
-		Run: func(args string) (string, error) {
+Run: func(args string) (string, error) {
 			cmds := a.Commands.List()
 			var sb strings.Builder
 			sb.WriteString("可用命令：\n")
 			for _, c := range cmds {
-				plugin := ""
+				sb.WriteString(fmt.Sprintf("  /%-12s  %s", c.Name, c.Description))
 				if c.PluginFile != "" {
-					plugin = " (插件: " + c.PluginFile + ")"
+					sb.WriteString(" (插件: " + c.PluginFile + ")")
 				}
-				sb.WriteString(fmt.Sprintf("  /%-10s %-60s%s\n", c.Name, c.Description, plugin))
+				sb.WriteString("\n")
 			}
 			return sb.String(), nil
 		},
