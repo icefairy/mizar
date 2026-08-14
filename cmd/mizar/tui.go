@@ -348,83 +348,92 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 			m.addChatLine(chatLine{role: "err", content: "任务已取消", ts: time.Now()})
 			return nil
 		}
-		return event
-	})
-
-	// 输入框按键捕获（Enter 发送，Tab 补全）
-	m.inputField.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEnter:
-			// 回车发送（loading 时也允许排队）
-			s := strings.TrimSpace(m.inputField.GetText())
-			if s == "" {
-				return nil
-			}
+		// Ctrl+C 不退出：清空输入框
+		if event.Key() == tcell.KeyCtrlC {
 			m.inputField.SetText("")
-
-			// 斜杠命令（即使 loading 也处理）
-			if strings.HasPrefix(s, "/") {
-				if handled, out, err := m.agent.Commands.Dispatch(s); handled {
-					if err != nil {
-						m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
-					}
-					if out != "" {
-						m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
-					}
-					m.stats.ModelName = m.agent.Model()
-					if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
-						m.stats.ThinkingLevel = ut.ThinkingEnabled()
-					}
-					m.statusBarDirect()
-					return nil
-				}
-			}
-
-			if s == "/quit" || s == "/exit" {
-				m.app.Stop()
-				return nil
-			}
-
-			if m.loading {
-				// 排队：任务结束后自动发送
-				m.queuedTask = s
-				m.addChatLine(chatLine{role: "err", content: "⏳ 当前任务执行中，消息已排队，稍后自动发送", ts: time.Now()})
-				return nil
-			}
-
-			m.startTask(s)
-			return nil
-
-		case tcell.KeyTab:
-			// Tab 补全
-			val := m.inputField.GetText()
-			if strings.HasPrefix(val, "/") {
-				for _, c := range m.agent.Commands.List() {
-					full := "/" + c.Name
-					if strings.HasPrefix(full, val) && full != val {
-						m.inputField.SetText(full + " ")
-						return nil
-					}
-				}
-			} else if idx := strings.LastIndex(val, "@"); idx >= 0 {
-				after := strings.TrimSpace(val[idx+1:])
-				cmds := make([]string, 0)
-				for _, c := range m.agent.Commands.List() {
-					cmds = append(cmds, "/"+c.Name)
-				}
-				tools := make([]string, 0)
-				for _, t := range m.agent.Plugins.Tools() {
-					tools = append(tools, t.Name)
-				}
-				cands := completeAtRaw(after, cmds, tools)
-				if len(cands) > 0 {
-					newVal := val[:idx+1] + cands[0] + " "
-					m.inputField.SetText(newVal)
-				}
-			}
 			return nil
 		}
 		return event
+	})
+
+	// 自动补全候选列表（支持上下方向键选择，Enter/Tab 确认）
+	m.inputField.SetAutocompleteFunc(func(currentText string) []string {
+		// 斜杠命令补全
+		if strings.HasPrefix(currentText, "/") {
+			var cands []string
+			for _, c := range m.agent.Commands.List() {
+				full := "/" + c.Name
+				if strings.HasPrefix(full, currentText) {
+					cands = append(cands, full)
+				}
+			}
+			return cands
+		}
+		// @ 引用补全（@cmd: / @tool: / @路径）
+		if idx := strings.LastIndex(currentText, "@"); idx >= 0 {
+			after := strings.TrimSpace(currentText[idx+1:])
+			cmds := make([]string, 0)
+			for _, c := range m.agent.Commands.List() {
+				cmds = append(cmds, "/"+c.Name)
+			}
+			tools := make([]string, 0)
+			for _, t := range m.agent.Plugins.Tools() {
+				tools = append(tools, t.Name)
+			}
+			return completeAtRaw(after, cmds, tools)
+		}
+		return nil
+	})
+	// 选择候选后应用到输入框：保留 @ 前缀，替换 @ 之后的部分
+	m.inputField.SetAutocompletedFunc(func(text string, index int, source int) bool {
+		val := m.inputField.GetText()
+		if idx := strings.LastIndex(val, "@"); idx >= 0 {
+			m.inputField.SetText(val[:idx+1] + text + " ")
+		} else if strings.HasPrefix(val, "/") {
+			m.inputField.SetText(text + " ")
+		}
+		return true // 关闭列表
+	})
+	// Enter 发送消息（仅在 autocomplete 列表关闭时触发）
+	m.inputField.SetDoneFunc(func(key tcell.Key) {
+		if key != tcell.KeyEnter {
+			return
+		}
+		s := strings.TrimSpace(m.inputField.GetText())
+		if s == "" {
+			return
+		}
+		m.inputField.SetText("")
+
+		if strings.HasPrefix(s, "/") {
+			if handled, out, err := m.agent.Commands.Dispatch(s); handled {
+				if err != nil {
+					m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+				}
+				if out != "" {
+					m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
+				}
+				m.stats.ModelName = m.agent.Model()
+				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+					m.stats.ThinkingLevel = ut.ThinkingEnabled()
+				}
+				m.statusBarDirect()
+				return
+			}
+		}
+
+		if s == "/quit" || s == "/exit" {
+			m.app.Stop()
+			return
+		}
+
+		if m.loading {
+			m.queuedTask = s
+			m.addChatLine(chatLine{role: "err", content: "⏳ 当前任务执行中，消息已排队，稍后自动发送", ts: time.Now()})
+			return
+		}
+
+		m.startTask(s)
 	})
 
 	// 钩子只注册一次：从 m.evtCh 发送工具调用
