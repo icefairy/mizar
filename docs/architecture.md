@@ -144,6 +144,7 @@ vm.Set("base64_encode", ...)      // base64_decode(s)
 vm.Set("hash_sha256", ...)        // SHA-256 hex
 vm.Set("path_join", ...)          // path_base(p) / path_dir(p)，POSIX 语义
 vm.Set("url_parse", ...)          // URL → JSON {scheme,host,path,query,fragment,user}
+vm.Set("count_tokens", ...)       // 估算 token 数（CJK 按字符、其他按 4 字符/token，与压缩器同口径）
 ```
 
 **HTTP 统一化**（v0.2.4+）：早期只有 `http_get`/`http_post` 两个固定方法，无法覆盖 PUT/DELETE/PATCH 等场景，且 `main.go` 里 host 实际未实现这两个函数（架构文档画饼）。现统一为 `http_request(method, url, body, headersJSON)`：

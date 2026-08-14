@@ -18,6 +18,31 @@ func callStr(t *testing.T, e *Engine, fn string, args ...any) string {
 	return fmt.Sprintf("%v", out)
 }
 
+// TestStdlibCountTokens 验证 count_tokens 估算与压缩器同口径。
+func TestStdlibCountTokens(t *testing.T) {
+	e, err := New(mockHost())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	// 中文按字符：5 个汉字 = 5
+	if got := callStr(t, e, "count_tokens", "你好世界啊"); got != "5" {
+		t.Fatalf("中文 count_tokens = %q, want 5", got)
+	}
+	// 英文按 4 字符/token：20 字符 = 5（向上取整）
+	if got := callStr(t, e, "count_tokens", "abcdefghijklmnopqrst"); got != "5" {
+		t.Fatalf("英文 count_tokens = %q, want 5", got)
+	}
+	// 空串 = 0
+	if got := callStr(t, e, "count_tokens", ""); got != "0" {
+		t.Fatalf("空串 count_tokens = %q, want 0", got)
+	}
+	// 混合：2 中文 + 5 英文 = 2 + ceil(5/4) = 2+2 = 4
+	if got := callStr(t, e, "count_tokens", "你好hello"); got != "4" {
+		t.Fatalf("混合 count_tokens = %q, want 4", got)
+	}
+}
+
 // TestStdlibTimeNow 验证 time_now 返回可解析的 RFC3339 时间。
 func TestStdlibTimeNow(t *testing.T) {
 	e, err := New(mockHost())

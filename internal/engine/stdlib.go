@@ -12,6 +12,24 @@ import (
 	"time"
 )
 
+// countTokensEstimate 估算文本 token 数（保守启发式：CJK 按字符，其他按 4 字符/token）。
+// 与 internal/agent 压缩器 EstimateTokens 同口径，保证插件估算与 Agent 压缩触发一致。
+func countTokensEstimate(s string) int {
+	if s == "" {
+		return 0
+	}
+	chars := 0
+	cjk := 0
+	for _, r := range s {
+		chars++
+		if r >= 0x4E00 && r <= 0x9FFF {
+			cjk++
+		}
+	}
+	nonCJK := chars - cjk
+	return cjk + (nonCJK+3)/4
+}
+
 // registerStdlib 注册纯函数宿主函数（无 I/O、无状态、零副作用）。
 // 这类函数是插件日用的高频缺口：时间、UUID、编解码、哈希、路径、URL。
 // 不依赖 host 配置，引擎创建时无条件注册（与 db_query/mcp_call 不同）。
@@ -76,4 +94,8 @@ func registerStdlib(reg func(name string, fn any)) {
 		}
 		return string(b), nil
 	})
+
+	// count_tokens(text) → int：估算 token 数（CJK 按字符、其他按 4 字符/token）。
+	// 与 Agent 压缩触发同口径；估算用，精确值以 LLM API usage 为准。
+	reg("count_tokens", func(s string) int { return countTokensEstimate(s) })
 }
