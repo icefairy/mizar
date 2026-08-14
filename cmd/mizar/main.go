@@ -46,6 +46,7 @@ func main() {
 		showVer   = flag.Bool("version", false, "显示版本")
 		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
 		lspServer = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
+		tui       = flag.Bool("tui", true, "使用 Bubble Tea TUI 界面（默认开启，--no-tui 用经典 readline）")
 		// Server 模式（持久运行 daemon）
 		serve  = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
 		addr   = flag.String("addr", ":3003", "Server 监听地址")
@@ -608,7 +609,11 @@ func main() {
 	}
 
 	// 交互模式
-	interactive(a, st, *sessionID)
+	if *tui {
+		runTUI(a, st, *sessionID)
+	} else {
+		interactive(a, st, *sessionID)
+	}
 }
 
 // mcpNames 返回 MCP server 名列表（日志用）。
