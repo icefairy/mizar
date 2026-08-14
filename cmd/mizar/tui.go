@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -95,6 +96,11 @@ type tuiModel struct {
 	status    string
 	stats     tuiStats
 	renderer  *glamour.TermRenderer
+	// 实时工具调用：结构体字段持有 channel，钩子只注册一次
+	liveCh   chan liveToolMsg
+	liveMu   sync.Mutex
+	allCalls []toolCallInfo
+	lastSeq  int
 }
 
 func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
@@ -107,7 +113,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		glamour.WithAutoStyle(),
 	)
 
-	return &tuiModel{
+	m := &tuiModel{
 		agent:     a,
 		store:     st,
 		sessionID: sid,
@@ -124,6 +130,27 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		},
 		status: fmt.Sprintf("model=%s", a.Model()),
 	}
+
+	// 钩子只注册一次：从结构体字段读取当前 liveCh，每次任务更新字段即可
+	if a.Hooks != nil {
+		a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
+			m.liveMu.Lock()
+			defer m.liveMu.Unlock()
+			if m.liveCh == nil {
+				return nil // 任务间无活跃监听，跳过
+			}
+			m.lastSeq++
+			call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
+			m.allCalls = append(m.allCalls, call)
+			select {
+			case m.liveCh <- liveToolMsg{tool: call.Tool, args: call.Args, seq: m.lastSeq}:
+			default:
+			}
+			return nil
+		})
+	}
+
+	return m
 }
 
 func (m *tuiModel) Init() tea.Cmd { return nil }
@@ -189,34 +216,25 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.stats.RequestStartTime = time.Now()
 
-			// 实时工具调用通知 channel
-			liveCh := make(chan liveToolMsg, 20)
-			var allCalls []toolCallInfo
-			var seq int
-
-			// 注册工具调用捕获钩子（实时通知 + 收集）
-			if m.agent.Hooks != nil {
-				m.agent.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
-					seq++
-					call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
-					allCalls = append(allCalls, call)
-					// 非阻塞发送实时通知
-					select {
-					case liveCh <- liveToolMsg{tool: call.Tool, args: call.Args, seq: seq}:
-					default:
-					}
-					return nil
-				})
-			}
+			// 重置实时工具调用状态（新 channel + 清空收集列表）
+			m.liveMu.Lock()
+			m.liveCh = make(chan liveToolMsg, 20)
+			m.allCalls = nil
+			m.lastSeq = 0
+			liveCh := m.liveCh
+			m.liveMu.Unlock()
 
 			done := make(chan doneMsg, 1)
 			go func() {
 				reply, err := m.agent.Run(s)
-				close(liveCh)
-				done <- doneMsg{reply: reply, err: err, toolCalls: append([]toolCallInfo(nil), allCalls...)}
+				m.liveMu.Lock()
+				close(liveCh) // 关闭本地副本（与 m.liveCh 同引用）
+				m.liveCh = nil // 标记无活跃监听，让钩子跳过
+				calls := append([]toolCallInfo(nil), m.allCalls...)
+				m.liveMu.Unlock()
+				done <- doneMsg{reply: reply, err: err, toolCalls: calls}
 			}()
 
-			// 返回两个合并的 tea.Cmd：优先读实时工具调用，否则等待完成
 			return m, func() tea.Msg {
 				select {
 				case evt, ok := <-liveCh:
