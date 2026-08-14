@@ -64,20 +64,20 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 }
 
 type tuiModel struct {
-	agent         *agent.Agent
-	store         *session.Store
-	sessionID     string
-	lines         []chatLine
-	stats         tuiStats
-	loading       bool
-	queue         []string // 排队的待发送消息（LIFO）
-	app           *tview.Application
-	textView      *tview.TextView
-	queueView     *tview.TextView // 排队消息列表（显示在输入框上方）
-	inputField    *tview.InputField
-	statusBar     *tview.TextView
-	flex          *tview.Flex
-	userScrolledUp bool   // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
+	agent          *agent.Agent
+	store          *session.Store
+	sessionID      string
+	lines          []chatLine
+	stats          tuiStats
+	loading        bool
+	queue          []string // 排队的待发送消息（LIFO）
+	app            *tview.Application
+	textView       *tview.TextView
+	queueView      *tview.TextView // 排队消息列表（显示在输入框上方）
+	inputField     *tview.InputField
+	statusBar      *tview.TextView
+	flex           *tview.Flex
+	userScrolledUp bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
 
 	// 钩子通信：每次任务用新 channel
 	liveMu sync.Mutex
@@ -367,6 +367,18 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	// 应用
 	m.app = tview.NewApplication()
 	m.app.EnableMouse(true)
+
+	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
+	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
+		// 左键点击/拖拽：消耗掉，焦点保持在输入框
+		// 鼠标滚轮滚动：正常传递（TextView 自带 MouseHandler 处理）
+		// 文本选择：按住 Shift 拖动，由终端模拟器处理（tcell 鼠标跟踪模式下不拦截 Shift+拖拽）
+		switch action {
+		case tview.MouseLeftDown, tview.MouseLeftUp, tview.MouseLeftClick, tview.MouseLeftDoubleClick:
+			return nil, tview.MouseConsumed
+		}
+		return event, action
+	})
 
 	// 全局按键捕获（Ctrl+T 切换思考等级）
 	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
