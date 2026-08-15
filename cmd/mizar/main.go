@@ -39,7 +39,7 @@ func main() {
 		extDir    = flag.String("ext", "", "插件目录 (默认 ~/.mizar/extensions)")
 		skillDir  = flag.String("skills", "skills", "技能目录")
 		workDir   = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
-		sessDir   = flag.String("sessions", "sessions", "会话目录")
+		sessDir   = flag.String("sessions", "~/.mizar/sessions", "会话目录 (默认 ~/.mizar/sessions，按工作路径自动分目录)")
 		sessionID = flag.String("session", "", "会话 ID (续接对话)")
 		history   = flag.Int("history", 50, "会话恢复的最大历史消息数")
 		ctxWindow = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
@@ -334,8 +334,30 @@ func main() {
 		log.Printf("AGENTS.md 注入: %s", strings.Join(context.AGENTSFiles(wd), ", "))
 	}
 
-	// 会话存储
-	st := session.New(*sessDir)
+	// 会话存储（模仿 pi Agent：按工作路径自动分目录，路径记忆）
+	sessAbs := *sessDir
+	if strings.HasPrefix(sessAbs, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			sessAbs = filepath.Join(home, strings.TrimPrefix(sessAbs, "~/"))
+		}
+	}
+	st := session.New(sessAbs)
+	pathKey := session.EncodePathKey(wd)
+	if pathKey != "" {
+		st = st.Scoped(pathKey)
+		log.Printf("路径记忆: 会话目录 %s/%s", sessAbs, pathKey)
+	}
+	// 路径记忆：未指定 -session 时，自动恢复当前路径最近的会话；无历史则自动创建新会话 ID
+	// （task 单次执行不自动恢复也不自动创建，保持显式 -session 才落盘的原行为）
+	if *sessionID == "" && pathKey != "" && *task == "" && !*serve {
+		if latest := st.Latest(); latest != "" {
+			*sessionID = latest
+			log.Printf("路径记忆: 自动恢复最近会话 %s", latest)
+		} else {
+			*sessionID = time.Now().Format("2006-01-02T15-04-05")
+			log.Printf("路径记忆: 新会话 %s（当前路径首次）", *sessionID)
+		}
+	}
 
 	a := agent.New(client, pm)
 	a.PluginDir = extAbs
