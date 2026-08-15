@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,6 +60,13 @@ func main() {
 		genDoc    = flag.Bool("plugin-doc", false, "生成宿主函数文档（精简清单 + doc_get 指引）")
 		genDocOut = flag.String("plugin-doc-out", "docs/host-funcs.md", "文档输出路径")
 	)
+	// 兼容别名：-server → -serve（Go flag 无别名机制，解析前替换）
+	// 避免用户拼写 -server 时直接 flag 报错
+	for i, a := range os.Args[1:] {
+		if a == "-server" || a == "--server" {
+			os.Args[i+1] = "-serve"
+		}
+	}
 	flag.Parse()
 
 	if *showVer {
@@ -690,9 +698,25 @@ func main() {
 		log.Printf("  JSON-RPC 2.0:   POST %s/rpc (agent.run/steer/abort)", *addr)
 		log.Printf("  WebSocket:      %s/ws (实时事件 + 快速纠正)", *addr)
 		log.Printf("  admin:          GET %s/admin/status  POST %s/admin/switch", *addr, *addr)
-		if err := srv.Start(); err != nil {
-			log.Fatalf("Server 启动失败: %v", err)
+		// 先探测端口可用性，避免"正在运行"横幅后跟启动失败的尴尬
+		probe, err := net.Listen("tcp", *addr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\n❌ Server 启动失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "   端口被占用? 用 -addr 指定其他端口，例如: -addr :3005\n")
+			fmt.Fprintf(os.Stderr, "   查看占用: ss -tlnp | grep %s\n", strings.TrimPrefix(*addr, ":"))
+			os.Exit(1)
 		}
+		probe.Close()
+		// 正常运行中横幅（Start 内部阻塞，必须打印在调用前）
+		fmt.Printf("\n✅ Mizar Server 正在运行: %s\n", *addr)
+		fmt.Printf("   OpenAI 兼容: POST %s/v1/chat/completions\n", *addr)
+		fmt.Printf("   JSON-RPC:    POST %s/rpc   WebSocket: %s/ws\n", *addr, *addr)
+		fmt.Printf("   Ctrl+C 停止服务\n\n")
+		if err := srv.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "\n❌ Server 运行异常退出: %v\n", err)
+			os.Exit(1)
+		}
+		// Start 正常情况不会走到这里（ListenAndServe 阻塞）；走到说明服务已退出
 		return
 	}
 
