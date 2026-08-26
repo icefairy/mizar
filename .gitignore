@@ -1,4 +1,13 @@
-/mizar
-/dist/
-*.db
-*.exe
+node_modules/
+dist/
+# Mizar 场景测试产物
+scenarios/logs/
+scenarios/__pycache__/
+*.pyc
+# Mizar 自建二进制
+mizar
+# 场景生成的文件(非源码)
+sqrt.go
+sqrt_test.go
+throttle.js
+workerpool.go

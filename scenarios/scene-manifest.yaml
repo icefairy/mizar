@@ -1,0 +1,26 @@
+# 开阳(Mizar) 100 常用场景验证清单
+# 结构: 开发域70 + 运维域30 | 模式: task(非交互一次性) / interactive(TUI/readline / 无tui) / rpc(serve+JSON-RPC)
+# 用法: 由 run_scenarios.py 驱动, 每条记录(时间戳/退出码/stdout/stderr/耗时)到日志, 供与 pi 比对
+
+dev_scenes:   # 开发 70
+  codegen: 16   # 代码生成
+  debug: 12     # 调试排障
+  refactor: 8   # 重构
+  test: 8       # 测试
+  fs: 8         # 读写/搜索/文件
+  git: 6        # git 操作
+  lsp: 6        # LSP 代码补全/诊断/定义/引用
+  skill: 3      # 技能加载/沉淀
+  mem: 3        # 记忆读写/检索
+  plugin: 3     # 插件工具/编译
+  doc: 4        # 文档生成/解释/注释
+  misc: 3       # 其他
+ops_scenes:     # 运维 30
+  shell: 6      # shell 命令/脚本
+  log: 4        # 日志分析
+  proc: 4       # 进程/系统
+  net: 3        # 网络/端口
+  file: 4       # 文件/权限/归档
+  cfg: 3        # 配置维护
+  svc: 3        # 服务/守护
+  remote: 3     # 远程/SSH
