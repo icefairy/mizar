@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -30,6 +31,9 @@ import (
 )
 
 var version = "v0.1.0"
+
+// startupHint 首次运行未配置供应商时，banner 末尾追加的引导提示。
+var startupHint string
 
 func main() {
 	var (
@@ -184,7 +188,7 @@ func main() {
 		req.Header.Set("Content-Type", "application/json")
 		if headersJSON != "" {
 			var hdr map[string]string
-			if err := jsonUnmarshal(headersJSON, &hdr); err != nil {
+			if err := json.Unmarshal([]byte(headersJSON), &hdr); err != nil {
 				return "", fmt.Errorf("http headers: %w", err)
 			}
 			for k, v := range hdr {
@@ -216,7 +220,7 @@ func main() {
 	}
 	host.LLMChat = func(messagesJSON string) (string, error) {
 		var msgs []agent.Message
-		if err := jsonUnmarshal(messagesJSON, &msgs); err != nil {
+		if err := json.Unmarshal([]byte(messagesJSON), &msgs); err != nil {
 			return "", err
 		}
 		return client.Chat(msgs)
@@ -361,11 +365,20 @@ func main() {
 
 	a := agent.New(client, pm)
 	a.PluginDir = extAbs
-	// 从配置读取最大步数（0=默认30）
+	// 默认启用弱模型宽容策略：死循环检测 + 解析失败降级 + LLM 故障重试
+	a.Tuner = agent.DefaultTuner()
+	// 从配置读取最大步数（0=默认 60）
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.MaxSteps > 0 {
 		a.MaxSteps = cfg.MaxSteps
 	}
-	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。` + skPrompt + agentsPrompt
+	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。
+
+## 任务聚焦（重要）
+- 工具拿来即用：可用工具列表中的工具（如 mem_write/bash/read/write 等）描述已说明用途与参数，直接调用即可，不要为了确认功能而先读取插件源码或二进制。插件源码只在「开发新工具」时读。
+- 工具出错先看错误信息：根据错误修正调用参数重试，而不是一开始就修改工具本身的实现（插件改动需 /reload 后才生效，日常任务不要中途改已加载的插件）。
+- 写代码/插件时：按系统提示末尾「插件」段给出的宿主函数清单与最小示例直接创建文件，不要在源码或二进制里搜索 API 定义。
+- 避免空转：同一方向最多探索 2 次；连续 2 次工具调用未获得新信息立即换更直接的方案。strings/find/grep 换花样搜同一目标属于空转。
+- 分步交付：任务无法在几步内完成时，先完成核心部分并及时给出阶段性回复。` + skPrompt + agentsPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
 
 	// 桥接 Agent Hooks → 插件 hook_on 回调：所有挂载点转发给插件
@@ -395,16 +408,27 @@ func main() {
 	// 内置 /provider 命令：查看/切换/配置 LLM 供应商
 	a.Commands.Register(agent.Command{
 		Name:        "provider",
-		Description: "查看当前 LLM 供应商（/provider）、切换 URL（/provider  ＜baseURL＞）或配置完整信息（/provider ＜baseURL＞ ＜apiKey＞）",
+		Description: "查看当前 LLM 供应商（/provider）、切换 URL（/provider <baseURL>）或配置完整信息（/provider <baseURL> <apiKey>）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
 				thinking := client.ThinkingEnabled()
-				keyMask := "<set>"
+				keyMask := "<未设置>"
 				if client.APIKey != "" {
 					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
 				}
-				return fmt.Sprintf("当前供应商: %s\n模型: %s\n思考模式: %s\nAPI Key: %s", client.BaseURL, client.Model, thinking, keyMask), nil
+				return fmt.Sprintf(`当前 LLM 配置:
+  供应商 baseURL: %s
+  模型 model:     %s
+  思考模式 thinking: %s
+  API Key:       %s
+
+设置方法（修改后自动保存到 %s）：
+  /provider <baseURL> <apiKey>   一次设置 base URL 与 API Key
+  /provider <baseURL>            仅切换 base URL
+  /apikey <apiKey>               单独设置 API Key
+  /model <name>                  切换模型
+  示例: /provider https://api.deepseek.com/v1 sk-xxxx 然后 /model deepseek-chat`, client.BaseURL, client.Model, thinking, keyMask, config.DefaultPath()), nil
 			}
 			fields := strings.Fields(args)
 			baseURL := strings.TrimSuffix(fields[0], "/")
@@ -432,14 +456,33 @@ func main() {
 			return fmt.Sprintf("✓ 供应商已切换: %s → %s", oldURL, baseURL), nil
 		},
 	})
-	// 内置 /model 命令：查看/切换模型（对齐 pi 的 /model）
+	// 内置 /model 命令：查看/切换模型；无参数时从供应商拉取可用模型清单（/v1/models）
 	a.Commands.Register(agent.Command{
 		Name:        "model",
-		Description: "查看当前模型（/model）或切换（/model ＜name＞）",
+		Description: "查看/列出模型（/model 列出供应商可用模型）或切换（/model <name>）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
+			// 拉取供应商模型清单（网络失败不阻断，仅提示）
+			models, listErr := config.ListModels(client.BaseURL, client.APIKey)
 			if args == "" {
-				return fmt.Sprintf("当前模型: %s", client.Model), nil
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "当前模型: %s\n", client.Model)
+				if listErr == nil && len(models) > 0 {
+					fmt.Fprintf(&sb, "供应商可用模型（%s，共 %d 个，* 为当前）：\n", client.BaseURL, len(models))
+					for _, m := range models {
+						mark := " "
+						if m == client.Model {
+							mark = "*"
+						}
+						fmt.Fprintf(&sb, "  %s %s\n", mark, m)
+					}
+					sb.WriteString("切换: /model <名称>")
+				} else if listErr != nil {
+					fmt.Fprintf(&sb, "获取模型清单失败: %v\n可 /model <名字> 直接指定模型名（不依赖清单）", listErr)
+				} else {
+					sb.WriteString("供应商未返回可用模型，可 /model <名字> 直接指定模型名")
+				}
+				return sb.String(), nil
 			}
 			old := client.Model
 			client.Model = args
@@ -453,13 +496,27 @@ func main() {
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/model 持久化失败: %v", err)
 			}
-			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, args), nil
+			out := fmt.Sprintf("✓ 模型已切换: %s → %s", old, args)
+			// 清单可获取但目标不在内：警告不阻断（网关代理场景可能接受任意名）
+			if listErr == nil && len(models) > 0 {
+				found := false
+				for _, m := range models {
+					if m == args {
+						found = true
+						break
+					}
+				}
+				if !found {
+					out += fmt.Sprintf("\n⚠ 模型 %q 不在供应商清单中（可执行 /model 查看可用清单）", args)
+				}
+			}
+			return out, nil
 		},
 	})
 	// 内置 /apikey 命令：查看/设置 API Key（与 /provider 配合使用）
 	a.Commands.Register(agent.Command{
 		Name:        "apikey",
-		Description: "查看当前 API Key（/apikey）或设置（/apikey ＜key＞）",
+		Description: "查看当前 API Key（/apikey）或设置（/apikey <key>）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
@@ -467,7 +524,7 @@ func main() {
 				if client.APIKey != "" {
 					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
 				}
-				return fmt.Sprintf("当前 API Key: %s\n当前供应商: %s", keyMask, client.BaseURL), nil
+				return fmt.Sprintf("当前 API Key: %s\n当前供应商: %s\n设置方法: /apikey <key>（或 /provider <baseURL> <key> 一步到位）", keyMask, client.BaseURL), nil
 			}
 			old := client.APIKey
 			client.APIKey = args
@@ -588,16 +645,16 @@ func main() {
 			return "", fmt.Errorf("未知参数 %q，支持: auto/off/low/medium/high/cycle", args)
 		},
 	})
-	// 内置 /help 命令：列出所有可用命令
+	// 内置 /help 命令：列出所有可用命令（纯文本格式，TUI/readline 通用）
 	a.Commands.Register(agent.Command{
 		Name:        "help",
 		Description: "列出所有可用命令",
 		Run: func(args string) (string, error) {
 			cmds := a.Commands.List()
 			var sb strings.Builder
-			sb.WriteString("**可用命令：**\n")
+			sb.WriteString("可用命令：\n")
 			for _, c := range cmds {
-				sb.WriteString(fmt.Sprintf("- `/%s` %s", c.Name, c.Description))
+				sb.WriteString(fmt.Sprintf("  /%-12s %s", c.Name, c.Description))
 				if c.PluginFile != "" {
 					sb.WriteString("（插件：" + c.PluginFile + "）")
 				}
@@ -748,6 +805,21 @@ func main() {
 	}
 
 	// 交互模式
+	// 未配置供应商时给出引导（banner 末尾追加提示）
+	if cfg, err := config.Load(config.DefaultPath()); err != nil || cfg.BaseURL == "" {
+		explicit := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		if !explicit["base-url"] {
+			startupHint = fmt.Sprintf(
+				"  ⚠ 尚未配置 LLM 供应商（baseURL + API Key），当前使用默认地址 %s\n"+
+					"  在对话中配置（修改后自动保存到 %s）：\n"+
+					"    /provider <baseURL> <apiKey>   一次设置 base URL 与 API Key\n"+
+					"    /model <name>                   选择模型\n"+
+					"  或命令行启动: mizar -base-url <baseURL> -api-key <key> -model <model>\n"+
+					"  查看当前配置: /provider  ｜ 全部命令: /help",
+				*baseURL, config.DefaultPath())
+		}
+	}
 	if *tui {
 		runTUI(a, st, *sessionID)
 	} else {

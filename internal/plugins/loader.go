@@ -380,6 +380,77 @@ func (m *Manager) loadPlugin(filename string) error {
 	return nil
 }
 
+// pluginSourceText 读取插件源码文本（用于提取工具/命令描述）。读取失败返回空串。
+func (m *Manager) pluginSourceText(filename string) string {
+	b, err := os.ReadFile(filepath.Join(m.dir, filename))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// describePluginFunc 从插件源码提取函数用途描述，让模型无需读源码即可理解工具/命令。
+// 收集函数定义前紧邻的注释块（支持 // 行注释与 /** JSDoc 块），遇空行或代码行即止；
+// 无注释时返回兜底说明。
+func describePluginFunc(src, funcName string) string {
+	fallback := "插件提供的能力，直接调用（参数为 JSON 字符串，如有疑问可 /help 查看）"
+	if src == "" {
+		return fallback
+	}
+	lines := strings.Split(src, "\n")
+	needle := "function " + funcName + "("
+	for i, ln := range lines {
+		if !strings.Contains(ln, needle) {
+			continue
+		}
+		// 从定义行向上收集紧邻注释（最多 8 行）；头插保证顺序与源码一致。
+		// 允许函数上方 1 个空行的留白（常见风格），但已收集到注释后遇到空行即截止，
+		// 避免跨块合并（如插件头部说明把每个工具注释都吞掉）。
+		var block []string
+		skippedBlank := false
+		for j := i - 1; j >= 0 && j >= i-8; j-- {
+			t := strings.TrimSpace(lines[j])
+			if t == "" {
+				if len(block) > 0 || skippedBlank {
+					break
+				}
+				skippedBlank = true
+				continue
+			}
+			if strings.HasPrefix(t, "*/") {
+				continue // JSDoc 结束行，继续向上找起点
+			}
+			if strings.HasPrefix(t, "/**") || strings.HasPrefix(t, "/*") {
+				body := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(t, "/**"), "/*"))
+				if body != "" && !strings.HasPrefix(body, "@") {
+					block = append([]string{body}, block...)
+				}
+				break
+			}
+			if strings.HasPrefix(t, "*") { // JSDoc 中间行
+				body := strings.TrimSpace(strings.TrimPrefix(t, "*"))
+				if body != "" && !strings.HasPrefix(body, "@") {
+					block = append([]string{body}, block...)
+				}
+				continue
+			}
+			if strings.HasPrefix(t, "//") {
+				content := strings.TrimSpace(strings.TrimPrefix(t, "//"))
+				if content != "" {
+					block = append([]string{content}, block...)
+				}
+				continue
+			}
+			break // 其他代码行结束注释块
+		}
+		if len(block) > 0 {
+			return strings.Join(block, " ")
+		}
+		return fallback
+	}
+	return fallback
+}
+
 func (m *Manager) collectTools(filename string, vm *engine.Engine) []Tool {
 	var tools []Tool
 	// 通过 JS 侧枚举全局函数名
@@ -387,6 +458,7 @@ func (m *Manager) collectTools(filename string, vm *engine.Engine) []Tool {
 	if err != nil {
 		return nil
 	}
+	src := m.pluginSourceText(filename)
 	for _, name := range names {
 		if !strings.HasPrefix(name, "tool_") {
 			continue
@@ -396,8 +468,9 @@ func (m *Manager) collectTools(filename string, vm *engine.Engine) []Tool {
 		}
 		toolName := strings.TrimPrefix(name, "tool_")
 		tools = append(tools, Tool{
-			Name:       toolName,
-			PluginFile: filename,
+			Name:        toolName,
+			Description: describePluginFunc(src, name),
+			PluginFile:  filename,
 			Run: func(args string) (string, error) {
 				res, err := vm.Call(name, args)
 				if err != nil {

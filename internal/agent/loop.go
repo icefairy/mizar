@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"mizar/internal/engine"
 	"mizar/internal/lifecycle"
 	"mizar/internal/plugins"
 )
@@ -39,6 +40,13 @@ type ToolResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// maxStepsDefault 默认最大循环步数。写插件/多文件任务常需 30+ 步（bash 探测→读文件→写码→测试→修复），
+// 默认 60 步留出余量；仍可用 /config max_steps 调整（1-1000）。
+const maxStepsDefault = 60
+
+// maxStepsWarnRemain 步数预算预警阈值：剩余步数 ≤ 此值时向模型注入收敛提醒（只提醒一次）。
+const maxStepsWarnRemain = 3
+
 // Agent 是主循环。
 type Agent struct {
 	LLM        LLM
@@ -46,7 +54,7 @@ type Agent struct {
 	System     string
 	PluginDir  string          // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
 	Initial    []Message       // 会话恢复时的历史消息（置于 task 之前）
-	MaxSteps   int             // 最大循环步数（默认 20）
+	MaxSteps   int             // 最大循环步数（默认 maxStepsDefault=60）
 	VerboseLog func(string)    // 可选日志回调
 	Compactor  *Compactor      // 会话压缩器（nil = 不压缩）
 	Hooks      *Hooks          // 挂载点（nil = 无钩子）
@@ -82,7 +90,7 @@ func New(llm LLM, pm *plugins.Manager) *Agent {
 	a := &Agent{
 		LLM:        llm,
 		Plugins:    pm,
-		MaxSteps:   30,
+		MaxSteps:   maxStepsDefault,
 		callParser: parseCallJSON,
 		Commands:   NewCommandRegistry(),
 	}
@@ -105,7 +113,7 @@ func (a *Agent) Model() string {
 // SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
 // 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
 // defaultSystemPrompt 默认系统提示词：结构化为「身份 + 工具策略 + 工作方法 + 上下文指引」。
-// 学习自 pi：工具提供短描述、方法引导聚合为 guidelines、不设严格步数（默认 30，/config 可调）。
+// 学习自 pi：工具提供短描述、方法引导聚合为 guidelines、不设严格步数（默认 60，/config 可调）。
 const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。
 
 ## 工作方法
@@ -170,8 +178,25 @@ func (a *Agent) SystemPrompt() string {
 				sb.WriteString(fmt.Sprintf("- %s\n", p))
 			}
 		}
-		sb.WriteString("\n如需扩展能力，在插件目录新建 .ts 文件，导出 tool_* 函数或 command_* 函数，" +
-			"然后调用 /reload 加载。支持 host_listen 宿主函数启动 HTTP 服务器。\n")
+		sb.WriteString("\n如需扩展能力，在插件目录新建 .ts 文件，导出 tool_* 函数（工具）或 command_* 函数（斜杠命令），" +
+			"然后调用 /reload 加载；也可直接写文件后用 host 函数验证。支持 host_listen 宿主函数启动 HTTP 服务器。\n")
+		// 宿主函数清单：插件 TS/JS 内可直接调用这些 API（信息来自 internal/engine 权威文档）
+		sb.WriteString("\n插件中可用的宿主函数（插件代码内可直接调用，无需 import）：\n")
+		sb.WriteString(engine.HostDocBriefs())
+		// 最小可运行示例：让模型照着写而不用去逆向源码/二进制
+		sb.WriteString("\n最小插件示例（存入插件目录后 /reload 生效）：\n")
+		sb.WriteString(
+			"```ts\n" +
+				"// hello.ts — 导出 tool_* 即注册为工具，参数是 JSON 字符串\n" +
+				"export function tool_hello(args: string): string {\n" +
+				"  const p = JSON.parse(args);\n" +
+				"  return \"你好, \" + (p.name || \"朋友\");\n" +
+				"}\n" +
+				"// 导出 command_* 即注册为斜杠命令，args 为命令后的参数文本\n" +
+				"export function command_greet(args: string): string {\n" +
+				"  return \"你好, \" + args;\n" +
+				"}\n" +
+				"```\n")
 	}
 	a.systemPromptCache = sb.String()
 	return a.systemPromptCache
@@ -187,7 +212,7 @@ func (a *Agent) ReloadTools() {
 // Run 执行任务。返回最终回复。
 func (a *Agent) Run(task string) (string, error) {
 	if a.MaxSteps <= 0 {
-		a.MaxSteps = 30
+		a.MaxSteps = maxStepsDefault
 	}
 	if a.Hooks == nil {
 		a.Hooks = NewHooks()
@@ -210,6 +235,7 @@ func (a *Agent) Run(task string) (string, error) {
 	msgs = append(msgs, Message{Role: RoleUser, Content: task})
 
 	step := 0
+	stepWarned := false // 步数预算预警只提醒一次
 	var qc lifecycle.QueryContext
 	for step < a.MaxSteps {
 		q.BeginStep()
@@ -217,6 +243,15 @@ func (a *Agent) Run(task string) (string, error) {
 		stepCtx := &HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}
 		// StepStart 挂载点（🟡 中等：可读，不建议改 Messages）
 		a.Hooks.fireStepStart(stepCtx, a.logf)
+
+		// 步数预算预警：剩余步数不足时提醒模型收敛（只注入一次，避免刷屏）
+		if remain := a.MaxSteps - step; remain <= maxStepsWarnRemain && !stepWarned {
+			stepWarned = true
+			msgs = append(msgs, Message{Role: RoleUser, Content: fmt.Sprintf(
+				"【系统提醒】剩余步骤仅 %d 步（当前上限 %d）。若任务已基本完成，请立即用 reply 输出最终回答；"+
+					"若仍需操作，请合并为一次工具调用（如一次 bash 完成多项检查/修改）快速收尾", remain, a.MaxSteps)})
+			a.log("%s", q.FormatLog("step_budget_warn", "remain=", fmt.Sprintf("%d", remain)))
+		}
 
 		// 快速插入检查
 		if sm := a.drainSteer(); sm != nil {
@@ -344,9 +379,10 @@ func (a *Agent) Run(task string) (string, error) {
 		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		step++
 	}
-	q.Complete(errors.New("max steps exceeded"))
-	a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Task: task, Err: errors.New("max steps exceeded")}, a.logf)
-	return "", ErrMaxSteps
+	stepExceededErr := fmt.Errorf("%w（已用满 %d 步）。可调大上限: 输入 /config max_steps 60 立即生效并持久化，或在 ~/.mizar/config.json 设置 \"max_steps\" 字段", ErrMaxSteps, a.MaxSteps)
+	q.Complete(stepExceededErr)
+	a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Task: task, Err: stepExceededErr}, a.logf)
+	return "", stepExceededErr
 }
 
 // summaryOf 提取消息流中的摘要（供 CompactionAfter 查看），无则返回空。

@@ -25,7 +25,7 @@ type Config struct {
 	Thinking          bool   `json:"thinking,omitempty"`       // (deprecated) 旧版思考模式开关，由 ThinkingLevel 替代
 	ThinkingLevel     string `json:"thinking_level,omitempty"` // 思考等级：auto/off/low/medium/high（空=auto）
 	ContextWindow     int    `json:"context_window"`           // 上下文窗口（token）
-	MaxSteps          int    `json:"max_steps,omitempty"`      // 最大循环步数（0=默认30）
+	MaxSteps          int    `json:"max_steps,omitempty"`      // 最大循环步数（0=默认 60）
 	SkillEvolution    *bool  `json:"skill_evolution"`          // 技能自动沉淀（nil=默认开启）
 	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`      // 技能使用统计+周报（nil=默认开启）
 	SkillStatsTopN    int    `json:"skill_stats_top_n"`        // 周报建议禁用数（0=默认10）
@@ -126,7 +126,27 @@ func Load(path string) (*Config, error) {
 // ListModels 从 /v1/models 拉取模型列表。
 func ListModels(baseURL, apiKey string) ([]string, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("GET", strings.TrimSuffix(baseURL, "/")+"/models", nil)
+	// 模型清单 URL：优先 OpenAI 规范路径 /v1/models。
+	// 用户习惯把 baseURL 配成 http://host/v1（含 /v1）或 http://host（不带）。
+	b := strings.TrimSuffix(baseURL, "/")
+	candidates := []string{b + "/models"}
+	if !strings.HasSuffix(b, "/v1") {
+		candidates = append([]string{b + "/v1/models"}, candidates...) // /v1/models 优先
+	}
+	var lastErr error
+	for _, u := range candidates {
+		models, err := fetchModels(client, u, apiKey)
+		if err == nil {
+			return models, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// fetchModels 请求单个模型清单 URL。
+func fetchModels(client *http.Client, url, apiKey string) ([]string, error) {
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}

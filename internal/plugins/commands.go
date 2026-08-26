@@ -27,6 +27,7 @@ func (m *Manager) collectCommands(filename string, vm *engine.Engine) []Command 
 	if err != nil {
 		return nil
 	}
+	src := m.pluginSourceText(filename)
 	for _, name := range names {
 		if !strings.HasPrefix(name, "command_") {
 			continue
@@ -36,8 +37,9 @@ func (m *Manager) collectCommands(filename string, vm *engine.Engine) []Command 
 		}
 		cmdName := strings.TrimPrefix(name, "command_")
 		cmds = append(cmds, Command{
-			Name:       cmdName,
-			PluginFile: filename,
+			Name:        cmdName,
+			Description: describePluginFunc(src, name),
+			PluginFile:  filename,
 			Run: func(args string) (string, error) {
 				res, err := vm.Call(name, args)
 				if err != nil {

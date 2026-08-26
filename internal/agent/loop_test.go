@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,3 +123,52 @@ type scriptLLM struct {
 }
 
 func (s *scriptLLM) Chat(msgs []Message) (string, error) { return s.fn(msgs) }
+
+func TestMaxStepsErrorHasHint(t *testing.T) {
+	// 耗尽时应返回带调大提示的错误，且 errors.Is 兼容 ErrMaxSteps（abortreason 分类依赖）。
+	a, _, _ := newTestAgent(
+		`{"action":"tool","tool":"calc","args":"1*1"}`,
+		`{"action":"tool","tool":"calc","args":"1*1"}`,
+		`{"action":"tool","tool":"calc","args":"1*1"}`,
+	)
+	a.MaxSteps = 3
+	_, err := a.Run("x")
+	if err == nil {
+		t.Fatal("expected max steps error")
+	}
+	if !errors.Is(err, ErrMaxSteps) {
+		t.Fatalf("expected ErrMaxSteps wrapping, got: %v", err)
+	}
+	for _, kw := range []string{"/config max_steps", "max_steps"} {
+		if !strings.Contains(err.Error(), kw) {
+			t.Fatalf("error should hint how to raise the limit (missing %q): %v", kw, err)
+		}
+	}
+}
+
+func TestStepBudgetWarningInjected(t *testing.T) {
+	// 剩余步数 ≤ 3 时向 LLM 注入预算预警（检查出现在发给模型的消息里）。
+	warned := false
+	calls := 0
+	a, _, _ := newTestAgent()
+	a.MaxSteps = 5
+	s := &scriptLLM{fn: func(msgs []Message) (string, error) {
+		calls++
+		for _, msg := range msgs {
+			if msg.Role == RoleUser && strings.Contains(msg.Content, "剩余步骤") {
+				warned = true
+			}
+		}
+		return `{"action":"tool","tool":"calc","args":"1*1"}`, nil
+	}}
+	a.LLM = s
+	if _, err := a.Run("x"); err == nil {
+		t.Fatal("expected max steps error")
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 LLM calls, got %d", calls)
+	}
+	if !warned {
+		t.Fatal("expected step budget warning message to be injected before LLM calls")
+	}
+}

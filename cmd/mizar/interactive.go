@@ -11,13 +11,9 @@ import (
 	"mizar/internal/session"
 )
 
-func jsonUnmarshal(s string, v any) error {
-	return fmt.Errorf("jsonUnmarshal is unused; use json.Unmarshal directly")
-}
-
-// banner 启动标语。
+// banner 启动标语。若设置了 startupHint（首次运行未配置供应商），追加热示。
 func banner() string {
-	return fmt.Sprintf(`
+	b := fmt.Sprintf(`
   ███╗   ███╗██╗███████╗ █████╗ ██████╗
   ████╗ ████║██║╚══███╔╝██╔══██╗██╔══██╗
   ██╔████╔██║██║  ███╔╝ ███████║██████╔╝
@@ -35,6 +31,10 @@ func banner() string {
   ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
   ◆ 鼠标：Shift+拖拽 选择复制 ｜ 滚轮滚动 ｜ PgUp/PgDn 翻页
 `, version)
+	if startupHint != "" {
+		b += startupHint + "\n"
+	}
+	return b
 }
 
 // interactive 运行交互式对话（readline 支持：退格删除 / 历史上下键 / Tab 补全）。

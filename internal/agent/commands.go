@@ -94,14 +94,17 @@ func (r *CommandRegistry) List() []Command {
 	return out
 }
 
-// Help 生成 /help 文本。
+// Help 生成 /help 文本（兜底实现；若注册了 help 命令则优先用注册命令）。
+// 注册了 help 命令时列表已含 /help 项，因此不再追加硬编码行，避免重复。
 func (r *CommandRegistry) Help() string {
 	var sb strings.Builder
 	sb.WriteString("可用命令：\n")
 	for _, c := range r.List() {
 		fmt.Fprintf(&sb, "  /%-10s %s\n", c.Name, c.Description)
 	}
-	sb.WriteString("  /help      显示本帮助")
+	if _, ok := r.Get("help"); !ok {
+		sb.WriteString("  /help      显示本帮助")
+	}
 	return sb.String()
 }
 
@@ -118,6 +121,11 @@ func (r *CommandRegistry) Dispatch(line string) (handled bool, out string, err e
 		args = strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0]))
 	}
 	if name == "help" {
+		// 优先执行注册的 help 命令（描述更完整）；未注册时回退兜底文本。
+		if c, ok := r.Get("help"); ok && c.Run != nil {
+			out, err = c.Run(args)
+			return true, out, err
+		}
 		return true, r.Help(), nil
 	}
 	c, ok := r.Get(name)
