@@ -15,6 +15,47 @@ import (
 	"mizar/internal/plugins"
 )
 
+// CacheStats 系统提示词缓存命中率统计。
+// 由 Agent 维护，启动/重启时打印摘要。
+type CacheStats struct {
+	mu      sync.Mutex
+	hits    int // SystemPrompt() 命中缓存的调用次数
+	misses  int // 缓存失效后重建的次数
+	total   int // hits + misses
+}
+
+// RecordHit 记录一次缓存命中。
+func (c *CacheStats) RecordHit() {
+	c.mu.Lock()
+	c.hits++
+	c.total++
+	c.mu.Unlock()
+}
+
+// RecordMiss 记录一次缓存未命中（首次构建或 ReloadTools 后）。
+func (c *CacheStats) RecordMiss() {
+	c.mu.Lock()
+	c.misses++
+	c.total++
+	c.mu.Unlock()
+}
+
+// Summary 返回人类可读摘要。
+func (c *CacheStats) Summary() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.total == 0 {
+		return "缓存统计: 未使用"
+	}
+	hitRate := float64(c.hits) / float64(c.total) * 100
+	return fmt.Sprintf("缓存统计: %d 次查询，命中 %d/%d（%.1f%%），失效 %d 次",
+		c.total, c.hits, c.total, hitRate, c.misses)
+}
+
+func (a *Agent) CacheStats() *CacheStats {
+	return a.cacheStats
+}
+
 // LLM 抽象：任何 OpenAI 兼容客户端或测试 mock 都可实现。
 type LLM interface {
 	// Chat 发送消息列表，返回模型回复文本。
@@ -68,6 +109,9 @@ type Agent struct {
 	// 任何一次调用都返回完全相同的文本，否则整个前缀缓存全部失效。
 	systemPromptCache string
 
+	// cacheStats 系统提示词缓存命中率统计
+	cacheStats *CacheStats
+
 	// 快速插入（steer/abort，见 steer.go）
 	steerMu  sync.Mutex // 保护 steer 槽位
 	steer    *steerMsg  // 待插入消息（nil = 无）
@@ -100,6 +144,7 @@ func New(llm LLM, pm *plugins.Manager) *Agent {
 		MaxSteps:   maxStepsDefault,
 		callParser: parseCallJSON,
 		Commands:   NewCommandRegistry(),
+		cacheStats: &CacheStats{},
 	}
 	// 插件导出的 command_* 函数注册为斜杠命令
 	for _, c := range pm.Commands() {
@@ -119,9 +164,7 @@ func (a *Agent) Model() string {
 
 // SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
 // 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
-// defaultSystemPrompt 默认系统提示词：结构化为「身份 + 工具策略 + 工作方法 + 上下文指引」。
-// 学习自 pi：工具提供短描述、方法引导聚合为 guidelines、不设严格步数（默认 60，/config 可调）。
-const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。
+	const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。
 
 ## 工作方法
 遵循以下高效工作流，避免盲目尝试：
@@ -138,8 +181,6 @@ const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码�
 - 当前工作目录由用户所在目录决定，不确定时用 pwd 确认。
 - 项目可能有 AGENTS.md 或 .mizar 上下文文件，相关时先读取。
 - 技能（SKILL.md）通过 index 模式注入系统提示，可用 skill_manage 管理。
-
-## 可用工具
 `
 
 // HostPlugins 定位插件目录（如 ~/.mizar/extensions）。
@@ -149,8 +190,10 @@ const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码�
 // 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
 func (a *Agent) SystemPrompt() string {
 	if a.systemPromptCache != "" {
+		a.cacheStats.RecordHit()
 		return a.systemPromptCache
 	}
+	a.cacheStats.RecordMiss()
 	tools := a.Plugins.Tools()
 	var sb strings.Builder
 	sys := a.System
@@ -167,11 +210,17 @@ func (a *Agent) SystemPrompt() string {
 		}
 	}
 	sb.WriteString(`
-## 调用格式
-当需要调用工具时，回复如下 JSON（不要有其他内容）：
-{"action":"tool","tool":"工具名","args":"参数字符串"}
-任务完成时，回复：
-{"action":"reply","text":"最终回答"}
+## 回复格式
+你的每轮回复必须是以下两种 JSON 之一，不要输出其他文字：
+- 调用工具：{"action":"tool","tool":"工具名","args":"参数JSON字符串"}
+- 回答用户或任务完成：{"action":"reply","text":"回答内容"}
+
+示例：
+用户: 你好
+你: {"action":"reply","text":"你好！有什么可以帮你的？"}
+
+用户: 列出当前目录
+你: {"action":"tool","tool":"ls","args":"{}"}
 `)
 
 	// 插件目录信息（引导模型自己创建/扩展插件）

@@ -208,9 +208,19 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	c.lastUsage = out.Usage
 
 	msg := out.Choices[0].Message
+	fr := out.Choices[0].FinishReason
 	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
 	if len(msg.ToolCalls) > 0 {
 		return toolCallsToText(msg.ToolCalls), nil
+	}
+	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
+	// 若模型已自行输出合法 JSON（如 {"action":"reply",...}），直接透传避免双重包装。
+	if fr == "stop" {
+		s := strings.TrimSpace(msg.Content)
+		if strings.HasPrefix(s, "{") {
+			return s, nil
+		}
+		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(msg.Content)), nil
 	}
 	return msg.Content, nil
 }
@@ -315,6 +325,7 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 	var content, thinking strings.Builder
 	toolCalls := map[int]*toolCall{} // index → 累积中的工具调用
 	var toolOrder []int
+	var lastFinishReason string
 
 	br := bufio.NewReader(resp.Body)
 	for {
@@ -345,6 +356,10 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 		}
 		if len(chunk.Choices) == 0 {
 			continue
+		}
+		// 记录最后一个 chunk 的 finish_reason，用于判断模型是否正常结束
+		if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
+			lastFinishReason = chunk.Choices[0].FinishReason
 		}
 		d := chunk.Choices[0].Delta
 		if th := d.Thinking(); th != "" {
@@ -386,6 +401,15 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 			tcs = append(tcs, *toolCalls[idx])
 		}
 		return toolCallsToText(tcs), nil
+	}
+	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
+	// 若模型已自行输出合法 JSON，直接透传避免双重包装。
+	if lastFinishReason == "stop" {
+		s := strings.TrimSpace(content.String())
+		if strings.HasPrefix(s, "{") {
+			return s, nil
+		}
+		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
 	}
 	return content.String(), nil
 }
@@ -571,4 +595,32 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "..."
+}
+
+// escapeJSONString 将字符串中的特殊字符转义，使其可安全嵌入 JSON 字符串值。
+// 仅处理必须转义的字符（"、\、控制字符），不转义 Unicode。
+func escapeJSONString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r < 0x20 {
+				b.WriteString(fmt.Sprintf(`\u%04x`, r))
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
 }

@@ -30,6 +30,8 @@ type Config struct {
 	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`      // 技能使用统计+周报（nil=默认开启）
 	SkillStatsTopN    int    `json:"skill_stats_top_n"`        // 周报建议禁用数（0=默认10）
 	SkillInjectMode   string `json:"skill_inject_mode"`        // 技能注入: index(默认,缓存友好)|full(全量正文)
+	UserColor         string `json:"user_color,omitempty"`     // TUI 用户消息颜色（默认 white）
+	AiColor           string `json:"ai_color,omitempty"`       // TUI AI 回复颜色（默认 green）
 	// MCPServers 外部 MCP server 列表（mcp_call 宿主函数用）。
 	// 每项: name + (command/args | url)。覆盖内置 db_query 之外的长尾能力。
 	MCPServers []engine.MCPServerConf `json:"mcp_servers,omitempty"`

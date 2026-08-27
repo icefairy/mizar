@@ -12,6 +12,7 @@ import (
 	"github.com/rivo/tview"
 
 	"mizar/internal/agent"
+	"mizar/internal/config"
 	"mizar/internal/session"
 )
 
@@ -70,6 +71,8 @@ type tuiModel struct {
 	sessionID      string
 	lines          []chatLine
 	stats          tuiStats
+	userColor      string // 用户消息颜色（默认 white）
+	aiColor        string // AI 回复颜色（默认 green）
 	loading        bool
 	queue          []string // 排队的待发送消息（LIFO）
 	app            *tview.Application
@@ -121,9 +124,9 @@ func (m *tuiModel) renderAllDirect() {
 		case "system":
 			sb.WriteString(l.content + "\n")
 		case "user":
-			sb.WriteString(sgrColor("white", fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
+			sb.WriteString(sgrColor(m.userColor, fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
 		case "bot":
-			sb.WriteString(sgrColor("green", fmt.Sprintf("▲ [%s]", t)) + "\n")
+			sb.WriteString(sgrColor(m.aiColor, fmt.Sprintf("▲ [%s]", t)) + "\n")
 			sb.WriteString(l.content + "\n\n")
 		case "err":
 			sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, l.content)) + "\n")
@@ -138,9 +141,9 @@ func (m *tuiModel) renderAllDirect() {
 	text := m.extr.Text()
 	m.streamMu.Unlock()
 	if active && text != "" {
-		sb.WriteString(sgrColor("green", "▲ 回复中" + "\n"))
+		sb.WriteString(sgrColor(m.aiColor, "▲ 回复中" + "\n"))
 		sb.WriteString(text)
-		sb.WriteString(sgrColor("green", "▍\n\n"))
+		sb.WriteString(sgrColor(m.aiColor, "▍\n\n"))
 	}
 
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
@@ -480,10 +483,21 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		agent:     a,
 		store:     st,
 		sessionID: sid,
+		userColor: "white",
+		aiColor:   "green",
 		lines: []chatLine{
 			{role: "system", content: banner(), ts: time.Now()},
 		},
 		stats: tuiStats{ModelName: a.Model()},
+	}
+	// 从配置加载颜色设置
+	if cfg, err := config.Load(config.DefaultPath()); err == nil {
+		if cfg.UserColor != "" {
+			m.userColor = cfg.UserColor
+		}
+		if cfg.AiColor != "" {
+			m.aiColor = cfg.AiColor
+		}
 	}
 
 	// 文本视图（聊天区，可滚动）
@@ -650,7 +664,12 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 					m.stats.ThinkingLevel = ut.ThinkingEnabled()
 				}
-				m.statusBarDirect()
+				// /color 命令立即重绘聊天区使新颜色生效
+				if strings.HasPrefix(s, "/color") {
+					m.app.QueueUpdateDraw(m.renderAllDirect)
+				} else {
+					m.statusBarDirect()
+				}
 				return
 			}
 		}

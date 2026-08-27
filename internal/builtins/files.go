@@ -22,6 +22,20 @@ const (
 	readMaxFileBytes = 10 * 1024 * 1024
 )
 
+// bomUTF8 UTF-8 BOM 字节序列（编辑器常见，编辑时剥去，写回时还原）
+var bomUTF8 = []byte{0xEF, 0xBB, 0xBF}
+
+// detectLineEndings 检测文件行尾风格：\r\n=CRLF, \n=LF, 其他=LF（兜底）。
+// 返回原始行尾标记（"\r\n" 或 "\n"），供写回时保真。
+func detectLineEndings(content string) string {
+	cr := strings.Count(content, "\r\n")
+	nl := strings.Count(content, "\n")
+	if cr > 0 && nl > cr {
+		return "\r\n"
+	}
+	return "\n"
+}
+
 // dumpToTemp 将超限输出落盘到临时文件，返回路径
 func dumpToTemp(content string) (string, error) {
 	f, err := os.CreateTemp("", "mizar-bash-*.log")
@@ -196,6 +210,12 @@ func toolEdit() plugins.Tool {
 				return "", err
 			}
 			content := string(b)
+			// BOM 剥离 + 行尾检测（保真写回）
+			lineEnding := detectLineEndings(content)
+			if strings.HasPrefix(content, "\xef\xbb\xbf") || string(b[:3]) == string(bomUTF8) {
+				content = content[1:] // 剥去 BOM
+				b = b[3:]
+			}
 			edits := p.Edits
 			if len(edits) == 0 && p.OldText != "" {
 				edits = []struct {
@@ -237,6 +257,20 @@ func toolEdit() plugins.Tool {
 			}
 			if err := os.WriteFile(p.Path, []byte(content), 0o644); err != nil {
 				return "", err
+			}
+			// 若原始文件有 BOM 或 CRLF，写回时补上（保真）
+			if strings.HasPrefix(string(b), string(bomUTF8)) || lineEnding == "\r\n" {
+				// 重建带 BOM/CRLF 的内容
+				final := content
+				if lineEnding == "\r\n" && !strings.Contains(content, "\r\n") {
+					final = strings.ReplaceAll(content, "\n", "\r\n")
+				}
+				if strings.HasPrefix(string(b), string(bomUTF8)) {
+					final = string(bomUTF8) + final
+				}
+				if err := os.WriteFile(p.Path, []byte(final), 0o644); err != nil {
+					return "", err
+				}
 			}
 			return fmt.Sprintf("applied %d edit(s) to %s", len(reps), p.Path), nil
 		},

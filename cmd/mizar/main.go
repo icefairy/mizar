@@ -25,6 +25,7 @@ import (
 	"mizar/internal/llm"
 	"mizar/internal/lsp"
 	"mizar/internal/plugins"
+	"mizar/internal/prompts"
 	"mizar/internal/server"
 	"mizar/internal/session"
 	"mizar/internal/skills"
@@ -381,6 +382,44 @@ func main() {
 - 分步交付：任务无法在几步内完成时，先完成核心部分并及时给出阶段性回复。` + skPrompt + agentsPrompt
 	a.VerboseLog = func(msg string) { log.Print(msg) }
 
+	// Prompt Templates：~/.mizar/prompts/*.md + 项目 .mizar/prompts/*.md
+	promptReg := prompts.NewRegistry()
+	promptReg.AddDir(filepath.Join(config.ConfigDir(), "prompts"))
+	if projDir := findMizarDir(wd); projDir != "" {
+		promptReg.AddDir(filepath.Join(projDir, ".mizar", "prompts"))
+	}
+	promptReg.Reload()
+	log.Printf("Prompt 模板加载 %d 个", len(promptReg.List()))
+	// 注入 /templates 命令
+	a.Commands.Register(agent.Command{
+		Name:        "templates",
+		Description: "列出可用 prompt 模板（/name [args] 展开）",
+		Run: func(args string) (string, error) {
+			return promptReg.Help(), nil
+		},
+	})
+	// 注入 /template 命令（别名 /prompt）
+	a.Commands.Register(agent.Command{
+		Name:        "template",
+		Description: "展开 prompt 模板（/template <name> [args]）",
+		Run: func(args string) (string, error) {
+			fields := strings.Fields(strings.TrimSpace(args))
+			if len(fields) == 0 {
+				return promptReg.Help(), nil
+			}
+			name := fields[0]
+			rest := ""
+			if len(fields) > 1 {
+				rest = strings.Join(fields[1:], " ")
+			}
+			out, err := promptReg.Expand(name, rest)
+			if err != nil {
+				return "", err
+			}
+			return out, nil
+		},
+	})
+
 	// 桥接 Agent Hooks → 插件 hook_on 回调：所有挂载点转发给插件
 	a.Hooks = agent.NewHooks()
 	bridgeHook := func(evt string) agent.HookFunc {
@@ -578,6 +617,8 @@ func main() {
 				cmds = append(cmds, agent.Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
 			}
 			a.Commands.SyncFromPlugins(cmds)
+			// Prompt 模板热重载
+			promptReg.Reload()
 			// 汇总
 			var sb strings.Builder
 			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%s\n", cfg.Model, cfg.ContextWindow, cfg.ThinkingStr())
@@ -608,6 +649,82 @@ func main() {
 			os.Exit(0)
 			return "", nil
 		},
+	})
+	// 内置 /color 命令：查看/设置聊天颜色（/color 查看 ｜ /color user <颜色> ｜ /color ai <颜色>）
+	a.Commands.Register(agent.Command{
+		Name:        "color",
+		Description: "查看/设置聊天颜色（/color 查看 ｜ /color user <颜色> ｜ /color ai <颜色> ｜ /color reset 恢复默认）",
+		Run: func(args string) (string, error) {
+			cfg, _ := config.Load(config.DefaultPath())
+			userColor := cfg.UserColor
+			aiColor := cfg.AiColor
+			if userColor == "" {
+				userColor = "white"
+			}
+			if aiColor == "" {
+				aiColor = "green"
+			}
+			args = strings.TrimSpace(args)
+			if args == "" {
+				return fmt.Sprintf(`当前颜色设置:
+  用户消息颜色: %s
+  AI 回复颜色: %s
+
+可用颜色: black, red, green, yellow, blue, magenta, cyan, white, grey, default
+
+示例:
+  /color user blue    设置用户消息为蓝色
+  /color ai cyan      设置 AI 回复为青色
+  /color reset        恢复默认颜色（用户 white, AI green）`, userColor, aiColor), nil
+		}
+		fields := strings.Fields(args)
+		if len(fields) < 2 {
+			return "", fmt.Errorf("用法: /color <user|ai|reset> [<颜色>]\n示例: /color user blue  或 /color reset")
+		}
+		target := fields[0]
+		color := ""
+		if len(fields) > 1 {
+			color = fields[1]
+		}
+		// 验证颜色值
+		validColors := map[string]bool{
+			"black": true, "red": true, "green": true, "yellow": true,
+			"blue": true, "magenta": true, "cyan": true, "white": true,
+			"grey": true, "default": true,
+		}
+		if color != "" && !validColors[color] {
+			return "", fmt.Errorf("无效颜色 %q，可用: black, red, green, yellow, blue, magenta, cyan, white, grey, default", color)
+		}
+		switch target {
+		case "user":
+			if color == "" {
+				return "", fmt.Errorf("用法: /color user <颜色>，示例: /color user blue")
+			}
+			cfg.UserColor = color
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				return "", fmt.Errorf("保存失败: %v", err)
+			}
+			return fmt.Sprintf("✓ 用户消息颜色已设置为: %s（下次启动生效，当前会话需重启 TUI）", color), nil
+		case "ai":
+			if color == "" {
+				return "", fmt.Errorf("用法: /color ai <颜色>，示例: /color ai cyan")
+			}
+			cfg.AiColor = color
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				return "", fmt.Errorf("保存失败: %v", err)
+			}
+			return fmt.Sprintf("✓ AI 回复颜色已设置为: %s（下次启动生效，当前会话需重启 TUI）", color), nil
+		case "reset":
+			cfg.UserColor = ""
+			cfg.AiColor = ""
+			if err := config.Save(config.DefaultPath(), cfg); err != nil {
+				return "", fmt.Errorf("保存失败: %v", err)
+			}
+			return "✓ 颜色已恢复默认（用户 white, AI green）", nil
+		default:
+			return "", fmt.Errorf("未知目标 %q，支持: user, ai, reset", target)
+		}
+	},
 	})
 	// 内置 /think 命令：查看/切换思考等级（auto/off/low/medium/high）
 	a.Commands.Register(agent.Command{
@@ -717,6 +834,156 @@ func main() {
 			return fmt.Sprintf("✓ 配置已保存: %s", config.DefaultPath()), nil
 		},
 	})
+	// 内置 /mcp 命令：查看/管理 MCP server
+	a.Commands.Register(agent.Command{
+		Name:        "mcp",
+		Description: "MCP server 管理（/mcp 列表 ｜ /mcp add <name> <url|command> [args...] ｜ /mcp remove <name> ｜ /mcp test <name> ｜ /mcp reload）",
+		Run: func(args string) (string, error) {
+			cfg, err := config.Load(config.DefaultPath())
+			if err != nil {
+				return "", fmt.Errorf("读取配置失败: %v", err)
+			}
+			args = strings.TrimSpace(args)
+			if args == "" {
+				// 列表模式
+				var sb strings.Builder
+				sb.WriteString("MCP servers（配置来源: ~/.mizar/config.json）:\n")
+				if len(cfg.MCPServers) == 0 {
+					sb.WriteString("  （未配置，使用 /mcp add 添加）\n")
+				} else {
+					for _, s := range cfg.MCPServers {
+						transport := "stdio"
+						addr := s.Command
+						if s.URL != "" {
+							transport = "http"
+							addr = s.URL
+						}
+						if s.Timeout > 0 {
+							sb.WriteString(fmt.Sprintf("  %-15s [%s] %s  timeout=%ds\n", s.Name, transport, addr, s.Timeout))
+						} else {
+							sb.WriteString(fmt.Sprintf("  %-15s [%s] %s\n", s.Name, transport, addr))
+						}
+						if len(s.Args) > 0 {
+							sb.WriteString(fmt.Sprintf("    args: %s\n", strings.Join(s.Args, " ")))
+						}
+					}
+				}
+				sb.WriteString("\n用法:\n")
+				sb.WriteString("  /mcp add <name> <url>           添加 HTTP server\n")
+				sb.WriteString("  /mcp add <name> <command> [args] 添加 stdio server\n")
+				sb.WriteString("  /mcp remove <name>              删除 server\n")
+				sb.WriteString("  /mcp test <name>                测试连接并列出工具\n")
+				sb.WriteString("  /mcp reload                     重新加载配置\n")
+				return sb.String(), nil
+			}
+			fields := strings.Fields(args)
+			cmd := fields[0]
+			switch cmd {
+			case "add":
+				if len(fields) < 3 {
+					return "", fmt.Errorf("用法: /mcp add <name> <url|command> [args...]\n示例:\n  /mcp add myserver http://127.0.0.1:3001/mcp\n  /mcp add sqlite npx -y @modelcontextprotocol/server-sqlite")
+				}
+				name := fields[1]
+				addr := fields[2]
+				rest := fields[3:]
+				// 判断是 URL 还是 command
+				var serverConf engine.MCPServerConf
+				serverConf.Name = name
+				if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+					serverConf.URL = addr
+				} else {
+					serverConf.Command = addr
+					serverConf.Args = rest
+				}
+				// 检查是否已存在
+				found := false
+				for i := range cfg.MCPServers {
+					if cfg.MCPServers[i].Name == name {
+						cfg.MCPServers[i] = serverConf
+						found = true
+						break
+					}
+				}
+				if !found {
+					cfg.MCPServers = append(cfg.MCPServers, serverConf)
+				}
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("保存失败: %v", err)
+				}
+				return fmt.Sprintf("✓ MCP server %q 已添加/更新", name), nil
+
+			case "remove":
+				if len(fields) < 2 {
+					return "", fmt.Errorf("用法: /mcp remove <name>")
+				}
+				name := fields[1]
+				var remain []engine.MCPServerConf
+				removed := false
+				for _, s := range cfg.MCPServers {
+					if s.Name == name {
+						removed = true
+					} else {
+						remain = append(remain, s)
+					}
+				}
+				if !removed {
+					return "", fmt.Errorf("未找到 server %q（可用: %s）", name, mcpNames(cfg.MCPServers))
+				}
+				cfg.MCPServers = remain
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("保存失败: %v", err)
+				}
+				return fmt.Sprintf("✓ 已移除 MCP server %q", name), nil
+
+			case "test":
+				if len(fields) < 2 {
+					return "", fmt.Errorf("用法: /mcp test <name>")
+				}
+				name := fields[1]
+				var found *engine.MCPServerConf
+				for i := range cfg.MCPServers {
+					if cfg.MCPServers[i].Name == name {
+						found = &cfg.MCPServers[i]
+						break
+					}
+				}
+				if found == nil {
+					return "", fmt.Errorf("未找到 server %q（可用: %s）", name, mcpNames(cfg.MCPServers))
+				}
+				timeout := 30 * time.Second
+				if found.Timeout > 0 {
+					timeout = time.Duration(found.Timeout) * time.Second
+				}
+				ctxpkg.WithTimeout(ctxpkg.Background(), timeout)
+				reg := engine.NewMCPRegistry([]engine.MCPServerConf{*found})
+				defer reg.Close()
+				fn := reg.CallFn()
+				// 尝试列出工具（通过调用一个特殊工具名触发）
+				// mcp_call 本身不暴露 list，我们直接用 registry 测试初始化
+				result, err := fn(name, "__ping__", "{}")
+				if err != nil {
+					// __ping__ 不存在是正常的，只要连接成功就行
+					if strings.Contains(err.Error(), "tool not found") || strings.Contains(err.Error(), "Unknown tool") || strings.Contains(err.Error(), "not found") {
+						return fmt.Sprintf("✓ MCP server %q 连接正常（工具列表需通过 mcp_call 调用）", name), nil
+					}
+					return fmt.Sprintf("✗ MCP server %q 连接失败: %v", name, err), nil
+				}
+				return fmt.Sprintf("✓ MCP server %q 连接正常，响应: %s", name, result), nil
+
+			case "reload":
+				// 重新从配置文件加载
+				newCfg, err := config.Load(config.DefaultPath())
+				if err != nil {
+					return "", fmt.Errorf("读取配置失败: %v", err)
+				}
+				cfg.MCPServers = newCfg.MCPServers
+				return fmt.Sprintf("✓ MCP 配置已重新加载（%d 个 server: %s）", len(cfg.MCPServers), mcpNames(cfg.MCPServers)), nil
+
+			default:
+				return "", fmt.Errorf("未知子命令 %q，支持: add/remove/test/reload（输入 /mcp 查看帮助）", cmd)
+			}
+		},
+	})
 	if !*noCompact {
 		client2 := client // SummarizeMessages 用同一客户端
 		a.Compactor = agent.DefaultCompactor(func(msgs []agent.Message) (string, error) {
@@ -735,6 +1002,11 @@ func main() {
 			a.Compactor.KeepRecentTokens = 500
 		}
 		log.Printf("会话压缩开启 (window=%d, reserve=%d, keep=%d)", a.Compactor.ContextWindow, a.Compactor.ReserveTokens, a.Compactor.KeepRecentTokens)
+	}
+
+	// 启动时打印缓存统计（首次调用 SystemPrompt() 后会在运行时更新）
+	if a.CacheStats() != nil {
+		log.Printf("%s", a.CacheStats().Summary())
 	}
 
 	if *sessionID != "" {
@@ -834,4 +1106,20 @@ func mcpNames(servers []engine.MCPServerConf) string {
 		names = append(names, s.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+// findMizarDir 从 workDir 向上递归查找包含 .mizar/prompts/ 的项目目录。
+// 空字符串表示未找到。
+func findMizarDir(dir string) string {
+	for {
+		candidate := filepath.Join(dir, ".mizar", "prompts")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
