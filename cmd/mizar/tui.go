@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -82,6 +83,20 @@ type tuiModel struct {
 	// 钩子通信：每次任务用新 channel
 	liveMu sync.Mutex
 	evtCh  chan toolCallInfo
+
+	// 流式显示状态（streamMu 保护）：LLM 回复逐 token 回调 → 增量提取 → TUI 实时渲染
+	streamMu        sync.Mutex
+	streamStep      int                // 当前流式步骤（agent 循环 step）
+	streamActive    bool               // 当前步骤是否正在流式输出
+	extr            agent.StreamTextExtractor // 增量提取器（提取 reply 的 text 字段）
+	streamLastFlush time.Time          // 上次刷新时间戳（节流）
+	streamFlushBusy bool               // 一次刷新进行中（防止重入）
+
+	// 等待进度指示（spinner 动画 + 宣传语轮换，状态栏显示）
+	spinnerOn   atomic.Bool  // spinner 循环是否运行中
+	spinnerIdx  atomic.Int32 // 当前动画帧下标
+	spinnerLine atomic.Int32 // 当前宣传语下标
+	spinnerSet  atomic.Int64 // 开始时间戳（UnixNano，用于显示已等待秒数）
 }
 
 // sgrColor 生成 tview 动态颜色标记：[color]text[::-]
@@ -116,6 +131,18 @@ func (m *tuiModel) renderAllDirect() {
 			sb.WriteString(sgrColor("cyan", fmt.Sprintf("🔧 [%s] %s", t, l.content)) + "\n")
 		}
 	}
+
+	// 流式尾行：当前步骤正在输出的回复（增量渲染，不进 lines 历史）
+	m.streamMu.Lock()
+	active := m.streamActive && m.extr.Replying()
+	text := m.extr.Text()
+	m.streamMu.Unlock()
+	if active && text != "" {
+		sb.WriteString(sgrColor("green", "▲ 回复中" + "\n"))
+		sb.WriteString(text)
+		sb.WriteString(sgrColor("green", "▍\n\n"))
+	}
+
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
 	// 仅在首次渲染或新 bot 回复时自动滚动到底部
 	if !m.userScrolledUp {
@@ -128,6 +155,19 @@ func (m *tuiModel) renderAllDirect() {
 func (m *tuiModel) statusBarDirect() {
 	s := &m.stats
 	var sb strings.Builder
+
+	// 等待进度指示：spinner 动画 + 轮换宣传语 + 已等待秒数
+	// （固定在状态栏，不影响聊天区；流式回复开始后由「▲ 回复中」接管，spinner 自动消失）
+	m.streamMu.Lock()
+	streaming := m.streamActive
+	m.streamMu.Unlock()
+	if m.loading && !streaming {
+		frame := spinnerFrames[int(m.spinnerIdx.Load())%len(spinnerFrames)]
+		line := spinnerLines[int(m.spinnerLine.Load())%len(spinnerLines)]
+		secs := int((time.Now().UnixNano() - m.spinnerSet.Load()) / int64(time.Second))
+		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%s %s 已等待 %d 秒 ", frame, line, secs)))
+		sb.WriteString(sgrColor("magenta", "| "))
+	}
 
 	sb.WriteString(sgrColor("magenta", "tokens: "))
 	sb.WriteString(fmt.Sprintf("%d", s.CumulativeTotalTokens))
@@ -229,10 +269,50 @@ func (m *tuiModel) addChatLineAsync(line chatLine) {
 	m.renderAll()
 }
 
-// setLoading 设置加载状态（仅从事件循环调用）
+// setLoading 设置加载状态（仅从事件循环调用）。loading 变化联动 spinner 启停。
 func (m *tuiModel) setLoading(loading bool) {
 	m.loading = loading
+	if loading {
+		m.startSpinner()
+	} else {
+		m.stopSpinner()
+	}
 	m.renderAllDirect()
+}
+
+// startSpinner 启动等待指示（仅从事件循环调用）。重复调用安全（已在跑则仅重置计时）。
+func (m *tuiModel) startSpinner() {
+	m.spinnerSet.Store(time.Now().UnixNano())
+	if m.spinnerOn.Swap(true) {
+		return // 循环已在运行
+	}
+	go m.spinnerLoop()
+}
+
+// stopSpinner 停止等待指示（仅从事件循环调用）。
+func (m *tuiModel) stopSpinner() {
+	m.spinnerOn.Store(false)
+}
+
+// spinnerLoop spinner 动画循环：每 100ms 换一帧，每 4s 轮换一条宣传语。
+// 仅在 loading 且未进入流式回复时刷新状态栏（流式后由「▲ 回复中」接管）。
+func (m *tuiModel) spinnerLoop() {
+	i := 0
+	lineStart := time.Now()
+	for m.spinnerOn.Load() {
+		m.spinnerIdx.Store(int32(i % len(spinnerFrames)))
+		if time.Since(lineStart) >= 4*time.Second {
+			lineStart = time.Now()
+			m.spinnerLine.Add(1)
+		}
+		i++
+		m.app.QueueUpdateDraw(func() {
+			if m.loading {
+				m.statusBarDirect()
+			}
+		})
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // renderQueue 渲染排队消息列表（仅从事件循环调用）
@@ -250,10 +330,13 @@ func (m *tuiModel) renderQueue() {
 	m.queueView.SetText(sb.String()).SetDynamicColors(true)
 }
 
-// setLoadingAsync 从 goroutine 安全设置加载状态
+// setLoadingAsync 从 goroutine 安全设置加载状态（loading 赋值挪入事件循环回调，避免数据竞争）
 func (m *tuiModel) setLoadingAsync(loading bool) {
-	m.loading = loading
 	m.app.QueueUpdateDraw(func() {
+		m.loading = loading
+		if !loading {
+			m.stopSpinner()
+		}
 		m.renderAllDirect()
 		// 任务结束后，如果有排队的消息则立即发送（在事件循环中安全）
 		if !loading && len(m.queue) > 0 {
@@ -275,15 +358,67 @@ func (m *tuiModel) startTask(input string) {
 	m.evtCh = evtCh
 	m.liveMu.Unlock()
 
+	// 挂载流式回调：LLM 逐 token 增量 → 增量提取（reply 的 text 字段）→ 节流刷新聊天区。
+	// 每次任务重新挂载（闭包捕获本次提取器状态）；任务结束/被替换时由 goroutine 卸载。
+	m.streamMu.Lock()
+	m.streamStep = -1
+	m.streamActive = false
+	m.extr.Reset()
+	m.streamLastFlush = time.Now()
+	m.streamFlushBusy = false
+	m.agent.OnLLMStream = func(step int, d agent.StreamDelta) {
+		m.streamMu.Lock()
+		if step != m.streamStep {
+			// 新步骤（新一轮 LLM 调用）：重置提取器
+			m.streamStep = step
+			m.streamActive = true
+			m.extr.Reset()
+		}
+		if d.Content != "" {
+			m.extr.Feed(d.Content)
+		}
+		// 节流（60ms）：避免每个 token 都触发一次全量渲染
+		flush := !m.streamFlushBusy && time.Since(m.streamLastFlush) >= 60*time.Millisecond
+		if flush {
+			m.streamFlushBusy = true
+			m.streamLastFlush = time.Now()
+			m.streamMu.Unlock()
+			m.flushStream()
+			return
+		}
+		m.streamMu.Unlock()
+	}
+	m.streamMu.Unlock()
+
 	m.setLoading(true)
 	m.stats.RequestStartTime = time.Now()
 	m.addChatLine(chatLine{role: "user", content: input, ts: time.Now()})
 
 	go func() {
 		reply, err := m.agent.Run(input)
+
+		// 任务结束：卸载流式回调、停止流式渲染，并强制刷新一次补上尾部增量
+		m.streamMu.Lock()
+		m.streamActive = false
+		m.agent.OnLLMStream = nil
+		m.streamMu.Unlock()
+		m.app.QueueUpdateDraw(func() {
+			m.renderAllDirect()
+			if !m.userScrolledUp {
+				m.textView.ScrollToEnd()
+			}
+		})
+
+		// 任务有效性检查：若用户已取消并发出新任务（evtCh 被替换），丢弃本次结果
 		m.liveMu.Lock()
-		m.evtCh = nil
+		mine := m.evtCh == evtCh
+		if mine {
+			m.evtCh = nil
+		}
 		m.liveMu.Unlock()
+		if !mine {
+			return
+		}
 
 		elapsed := time.Since(m.stats.RequestStartTime)
 
@@ -314,6 +449,26 @@ func (m *tuiModel) startTask(input string) {
 		m.setLoadingAsync(false)
 		// queue 在 setLoadingAsync 的 QueueUpdateDraw 回调中处理
 	}()
+}
+
+// flushStream 流式刷新：把当前提取到的回复文本快照送到事件循环渲染。
+// 从流式回调 goroutine 调用；通过 QueueUpdateDraw 在事件循环中安全更新 TUI。
+func (m *tuiModel) flushStream() {
+	m.app.QueueUpdateDraw(func() {
+		m.streamMu.Lock()
+		active := m.streamActive && m.extr.Replying()
+		text := m.extr.Text()
+		m.streamFlushBusy = false
+		m.streamMu.Unlock()
+
+		if !active || text == "" {
+			return
+		}
+		m.renderAllDirect()
+		if !m.userScrolledUp {
+			m.textView.ScrollToEnd()
+		}
+	})
 }
 
 // =============================================================================
@@ -519,6 +674,12 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	if a.Hooks != nil {
 		a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
 			call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
+			// 工具调用步：流式控制文本不显示——重置提取器、停止流式渲染（后续由工具行接替）
+			m.streamMu.Lock()
+			m.streamActive = false
+			m.streamStep = -1
+			m.extr.Reset()
+			m.streamMu.Unlock()
 			m.addChatLineAsync(chatLine{role: "tool", content: call.Tool + "(" + call.Args + ")", ts: time.Now()})
 			return nil
 		})

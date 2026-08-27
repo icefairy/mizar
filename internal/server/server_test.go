@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -355,4 +356,77 @@ func rpcCall(t *testing.T, baseURL, method string, params any) map[string]any {
 	}
 	result, _ := out["result"].(map[string]any)
 	return result
+}
+
+// streamMockLLM 支持流式的 mock：按分片回调后返回完整 reply。
+type streamMockLLM struct {
+	chunks []string // 依次回调的 content 分片
+}
+
+func (m *streamMockLLM) Chat(msgs []agent.Message) (string, error) { return strings.Join(m.chunks, ""), nil }
+func (m *streamMockLLM) ModelName() string                          { return "mock-stream" }
+func (m *streamMockLLM) ChatStream(msgs []agent.Message, onToken func(agent.StreamDelta)) (string, error) {
+	for _, c := range m.chunks {
+		onToken(agent.StreamDelta{Content: c})
+	}
+	return strings.Join(m.chunks, ""), nil
+}
+
+// TestChatCompletionsStream 验证 stream=true 时输出 OpenAI 兼容 SSE。
+func TestChatCompletionsStream(t *testing.T) {
+	// 流式 mock：分片为协议 JSON 增量（agent 循环可解析；提取器转发干净 reply 文本）
+	llm := &streamMockLLM{chunks: []string{"{\"action\":\"reply\",\"text\":\"第", "一段，", "第二段\"}"}}
+	pm := testPluginManager(t)
+	a := agent.New(llm, pm)
+	cfg := NewConfig("127.0.0.1:0", "test-token")
+	cfg.SetAll(true, true, true)
+	srv := New(cfg, a, session.New(t.TempDir()))
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	body := `{"model":"mock-stream","stream":true,"messages":[{"role":"user","content":"讲故事"}]}`
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/chat/completions", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("expected text/event-stream, got %s", resp.Header.Get("Content-Type"))
+	}
+	data, _ := io.ReadAll(resp.Body)
+	s := string(data)
+	// 断言各增量分片均出现在 SSE 流中（分片是独立的 content 增量，不保证连续子串）
+	for _, want := range []string{"data: [DONE]", `"role":"assistant"`, `"content":"第"`, `"content":"一段，"`, `"content":"第二段"`} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("SSE 缺少 %q:\n%s", want, s)
+		}
+	}
+	// 回复应为提取后的干净文本，不应泄漏协议 JSON 控制字符
+	if strings.Contains(s, `"action"`) {
+		t.Fatalf("SSE 泄漏协议 JSON:\n%s", s)
+	}
+}
+
+// TestChatCompletionsStreamFallback 验证不支持流式时以 SSE 格式一次性输出。
+func TestChatCompletionsStreamFallback(t *testing.T) {
+	srv, ts, _ := testServer(t) // mockLLM 不支持流式
+	_ = srv
+	body := `{"model":"mock","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/chat/completions", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	s := string(data)
+	if !strings.Contains(s, "data: [DONE]") {
+		t.Fatalf("回退 SSE 缺少 [DONE]:\n%s", s)
+	}
+	if !strings.Contains(s, `"content":"回答完毕"`) {
+		t.Fatalf("回退 SSE 缺少完整回复:\n%s", s)
+	}
 }

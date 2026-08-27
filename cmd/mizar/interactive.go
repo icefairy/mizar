@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/charmbracelet/glamour"
 	"github.com/peterh/liner"
@@ -107,23 +108,50 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		// 处理 @file: / @cmd: / @tool: 引用，解析成实际输入
 		input := resolveAtRef(line, cmdNames, toolNames)
 
-		// LLM 调用
+		// LLM 调用（流式）：先显示等待提示（spinner + 宣传语），模型回复时逐 token 输出内容；
+		// 纯工具任务（无回复文本流）完成后统一 Markdown 渲染最终回复。
+		var extr agent.StreamTextExtractor
+		var streamed atomic.Bool
+		spinnerStop := make(chan struct{})
+		go classicSpinner(spinnerStop, &streamed)
+		a.OnLLMStream = func(step int, d agent.StreamDelta) {
+			if d.Content == "" {
+				return
+			}
+			inc := extr.Feed(d.Content)
+			if inc == "" {
+				return
+			}
+			if !streamed.Swap(true) {
+				// 首个内容分片：清除等待提示行
+				fmt.Print("\r\x1b[K")
+			}
+			// 逐 token 增量追加显示（只打印新增部分，避免重复）
+			fmt.Print(inc)
+		}
 		reply, err := a.Run(input)
+		a.OnLLMStream = nil
+		close(spinnerStop)
 		if err != nil {
-			fmt.Printf("错误: %v\n", err)
+			fmt.Printf("\r\x1b[K错误: %v\n", err)
 			continue
 		}
-
-		// Markdown 渲染输出
-		rendered, renderErr := renderer.Render(reply)
-		if renderErr != nil {
-			// 渲染失败回退到纯文本
-			fmt.Println(reply)
-		} else {
-			fmt.Print(rendered)
-			if !strings.HasSuffix(rendered, "\n") {
-				fmt.Println()
+		if !streamed.Load() {
+			// 纯工具任务：清除等待提示行后渲染最终回复
+			fmt.Print("\r\x1b[K")
+			rendered, renderErr := renderer.Render(reply)
+			if renderErr != nil {
+				// 渲染失败回退到纯文本
+				fmt.Println(reply)
+			} else {
+				fmt.Print(rendered)
+				if !strings.HasSuffix(rendered, "\n") {
+					fmt.Println()
+				}
 			}
+		} else {
+			// 流式内容已逐 token 输出，补一个换行收尾
+			fmt.Println()
 		}
 
 		if sessionID != "" {

@@ -172,3 +172,100 @@ func TestStepBudgetWarningInjected(t *testing.T) {
 		t.Fatal("expected step budget warning message to be injected before LLM calls")
 	}
 }
+
+// streamMockLLM 实现 StreamLLM：按轮次分发流式分片（每轮 = agent 循环一次 LLM 调用的完整回复）。
+type streamMockLLM struct {
+	steps [][]string // steps[i] = 第 i 次 LLM 调用的流式分片
+	calls int
+}
+
+func (m *streamMockLLM) Chat(msgs []Message) (string, error) {
+	if m.calls >= len(m.steps) {
+		return "", fmt.Errorf("mock exhausted")
+	}
+	chunks := m.steps[m.calls]
+	m.calls++
+	return strings.Join(chunks, ""), nil
+}
+
+func (m *streamMockLLM) ChatStream(msgs []Message, onToken func(StreamDelta)) (string, error) {
+	if m.calls >= len(m.steps) {
+		return "", fmt.Errorf("mock exhausted")
+	}
+	chunks := m.steps[m.calls]
+	m.calls++
+	full := ""
+	for _, c := range chunks {
+		full += c
+		onToken(StreamDelta{Content: c})
+	}
+	return full, nil
+}
+
+// TestRunStreamReply 验证 OnLLMStream 收到流式分片且 agent 返回最终回复。
+func TestRunStreamReply(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "mizar-agent-*")
+	m := plugins.NewManager(dir, &engine.HostFuncs{Log: func(string) {}})
+	llm := &streamMockLLM{steps: [][]string{{`{"action":"reply","text":"第一`, `段，`, `第二段"}`}}}
+	a := New(llm, m)
+	var steps []int
+	var got []string
+	a.OnLLMStream = func(step int, d StreamDelta) {
+		steps = append(steps, step)
+		if d.Content != "" {
+			got = append(got, d.Content)
+		}
+	}
+	reply, err := a.Run("测试流式")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if reply != "第一段，第二段" {
+		t.Fatalf("want 第一段，第二段 got %q", reply)
+	}
+	if len(steps) == 0 {
+		t.Fatal("OnLLMStream 未被调用")
+	}
+	if strings.Join(got, "") != `{"action":"reply","text":"第一段，第二段"}` {
+		t.Fatalf("增量回调不符: %v", got)
+	}
+}
+
+// TestRunStreamReplyWithTool 验证工具调用步（tool JSON）不会破坏流式回复步。
+func TestRunStreamReplyWithTool(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "mizar-agent-*")
+	os.WriteFile(filepath.Join(dir, "calc.ts"), []byte(`export function tool_calc(args: string): string {
+    const p = args.split(/[+\-*\/]/);
+    if (p.length !== 2) return "bad";
+    const a = parseFloat(p[0]), b = parseFloat(p[1]);
+    if (args.includes("+")) return String(a+b);
+    return "bad";
+}`), 0o644)
+	m := plugins.NewManager(dir, &engine.HostFuncs{Log: func(string) {}})
+	if _, failed := m.LoadAll(); len(failed) > 0 {
+		t.Fatalf("plugin load failed: %v", failed)
+	}
+	llm := &streamMockLLM{steps: [][]string{
+		// 第一步：工具调用（流式分片）
+		{`{"action":"tool","tool":"calc","args":"2+3"}`},
+		// 第二步：最终回复（流式分片）
+		{`{"action":"reply","text":"结果是`, `5"}`},
+	}}
+	a := New(llm, m)
+	var got []string
+	a.OnLLMStream = func(step int, d StreamDelta) {
+		if d.Content != "" {
+			got = append(got, d.Content)
+		}
+	}
+	reply, err := a.Run("2加3等于几")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if reply != "结果是5" {
+		t.Fatalf("want 结果是5 got %q", reply)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 个分片回调（工具 JSON 1 + 回复 2），got %d: %v", len(got), got)
+	}
+}

@@ -74,6 +74,13 @@ type Agent struct {
 	steerSeq uint64     // 序号，最新覆盖用
 	aborted  atomic.Bool
 
+	// OnLLMStream 可选：LLM 回复流式增量回调（step = 当前循环步，从 0 起）。
+	// 在 Run 的 LLM 请求 goroutine 内同步调用，必须快速返回（勿阻塞/勿做重 IO）。
+	// 每个分片同时携带 Thinkings（思考过程）与 Content（内容，含控制 JSON）；
+	// 步骤切换时由调用方观察 step 变化自行重置状态。
+	// 为 nil 时不走流式路径（保持原一次性调用，用于纯非流式场景）。
+	OnLLMStream func(step int, delta StreamDelta)
+
 	// Commands 斜杠命令注册表（内置 + 插件 command_*）
 	Commands *CommandRegistry
 }
@@ -289,11 +296,27 @@ func (a *Agent) Run(task string) (string, error) {
 
 		var reply string
 		var llmErr error
-		if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
-			// 原生工具调用：发送 tools 参数，模型结构化返回
-			reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
+		if a.OnLLMStream != nil {
+			// 流式路径：回调每个分片（含思考/内容），UI 侧增量渲染
+			emit := func(d StreamDelta) { a.OnLLMStream(qc.Step, d) }
+			if toolLLM, ok := a.LLM.(StreamToolCallLLM); ok {
+				reply, llmErr = toolLLM.ChatWithToolsStream(msgs, a.Plugins.Tools(), emit)
+			} else if sllm, ok := a.LLM.(StreamLLM); ok {
+				reply, llmErr = sllm.ChatStream(msgs, emit)
+			} else if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
+				// LLM 不支持流式但支持原生工具：回退一次性调用
+				reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
+			} else {
+				reply, llmErr = a.LLM.Chat(msgs)
+			}
 		} else {
-			reply, llmErr = a.LLM.Chat(msgs)
+			// 非流式路径（原逻辑）
+			if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
+				// 原生工具调用：发送 tools 参数，模型结构化返回
+				reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
+			} else {
+				reply, llmErr = a.LLM.Chat(msgs)
+			}
 		}
 		q.EndOperation("llm")
 		if llmErr != nil {
