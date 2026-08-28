@@ -589,8 +589,8 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		// tcell 把 \x1bOx 拆成 Alt+O 事件 + 普通字母事件
 		// 我们需要组合它们并映射为数字
 		numpadMap := map[rune]rune{
-			'p': '0', 'q': '7', 'r': '8', 's': '9', 't': '1',
-			'u': '2', 'v': '3', 'w': '4', 'x': '5', 'y': '6',
+			'q': '1', 'r': '2', 's': '3', 't': '4', 'u': '5',
+			'v': '6', 'w': '7', 'x': '8', 'y': '9', 'p': '0',
 		}
 		switch m.numpadState {
 		case 0: // 等待 Alt+O
