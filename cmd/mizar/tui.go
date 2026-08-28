@@ -78,6 +78,8 @@ type tuiModel struct {
 	queueVisible   bool     // queueView 当前是否在 flex 中可见
 	histIdx        int      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
 	histSnapshot   string   // 浏览历史时保存的输入框快照
+	numpadState    int      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
+	numpadWait     rune     // 小键盘状态机：存储第一个字符
 	app            *tview.Application
 	textView       *tview.TextView
 	queueView      *tview.TextView // 排队消息列表（显示在输入框上方）
@@ -568,7 +570,6 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	m.app = tview.NewApplication()
 	m.app.EnableMouse(true)
 	m.app.EnablePaste(true)  // 启用 bracketed paste：粘贴多行文本时作为整体处理
-	fmt.Print("\x1b[?1h")   // 启用 keypad numeric mode：小键盘数字键发送普通数字而非 \x1bOx 序列
 
 	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
 	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
@@ -584,6 +585,28 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 
 	// 全局按键捕获：Enter 发送、Alt+Enter 换行
 	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// 小键盘数字键状态机：\x1bOx → 数字
+		// tcell 把 \x1bOx 拆成 Alt+O 事件 + 普通字母事件
+		// 我们需要组合它们并映射为数字
+		numpadMap := map[rune]rune{
+			'p': '0', 'q': '7', 'r': '8', 's': '9', 't': '1',
+			'u': '2', 'v': '3', 'w': '4', 'x': '5', 'y': '6',
+		}
+		switch m.numpadState {
+		case 0: // 等待 Alt+O
+			if event.Key() == tcell.KeyRune && event.Rune() == 'O' && event.Modifiers()&tcell.ModAlt != 0 {
+				m.numpadState = 1
+				return nil
+			}
+		case 1: // 已收到 Alt+O，等待第二个字符
+			m.numpadState = 0
+			if digit, ok := numpadMap[event.Rune()]; ok {
+				// 替换为普通数字事件
+				return tcell.NewEventKey(tcell.KeyRune, digit, tcell.ModNone)
+			}
+			// 不是小键盘序列，正常处理
+		}
+
 		// Enter 发送时退出历史浏览模式
 		if event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModAlt == 0 {
 			m.histIdx = -1
@@ -784,8 +807,6 @@ func (m *tuiModel) Run() error {
 
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)
-	// 退出时恢复 keypad 模式
-	defer fmt.Print("\x1b[?1l\x1b[?1l")
 	return m.app.Run()
 }
 
