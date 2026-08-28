@@ -16,6 +16,7 @@ import (
 	"time"
 
 	ctxpkg "context"
+	"github.com/google/uuid"
 
 	"mizar/internal/agent"
 	"mizar/internal/builtins"
@@ -352,16 +353,12 @@ func main() {
 		st = st.Scoped(pathKey)
 		log.Printf("路径记忆: 会话目录 %s/%s", sessAbs, pathKey)
 	}
-	// 路径记忆：未指定 -session 时，自动恢复当前路径最近的会话；无历史则自动创建新会话 ID
-	// （task 单次执行不自动恢复也不自动创建，保持显式 -session 才落盘的原行为）
+	// 路径记忆：未指定 -session 时，自动创建新 UUID 会话（不再自动恢复 latest）
+	// 用户需显式用 -session <id> 续接历史会话
+	// （task 单次执行不自动创建，保持显式 -session 才落盘的原行为）
 	if *sessionID == "" && pathKey != "" && *task == "" && !*serve {
-		if latest := st.Latest(); latest != "" {
-			*sessionID = latest
-			log.Printf("路径记忆: 自动恢复最近会话 %s", latest)
-		} else {
-			*sessionID = time.Now().Format("2006-01-02T15-04-05")
-			log.Printf("路径记忆: 新会话 %s（当前路径首次）", *sessionID)
-		}
+		*sessionID = uuid.New().String()
+		log.Printf("路径记忆: 新会话 %s（当前路径）", *sessionID)
 	}
 
 	a := agent.New(client, pm)
@@ -1075,6 +1072,88 @@ func main() {
 	if *tui {
 		a.VerboseLog = nil
 	}
+	// 内置 /sessions 命令：列出当前路径下的所有会话
+	a.Commands.Register(agent.Command{
+		Name:        "sessions",
+		Description: "列出当前路径下的所有会话 ID（短 ID 前 8 位）",
+		Run: func(args string) (string, error) {
+			ids := st.List()
+			if len(ids) == 0 {
+				return "（无会话）", nil
+			}
+			var sb strings.Builder
+			for _, id := range ids {
+				suffix := ""
+				if id == *sessionID {
+					suffix = " ← 当前"
+				}
+				short := id
+				if len(id) > 8 {
+					short = id[:8]
+				}
+				fmt.Fprintf(&sb, "  %-12s%s\n", short, suffix)
+			}
+			fmt.Fprintf(&sb, "\n当前会话: %s\n", *sessionID)
+			fmt.Fprintf(&sb, "续接会话: /session <id> 或 mizar -session <id>\n")
+			return sb.String(), nil
+		},
+	})
+	// 内置 /session 命令：切换当前会话
+	a.Commands.Register(agent.Command{
+		Name:        "session",
+		Description: "切换会话（/session 当前 ｜ /session <id> 续接 ｜ /session new 新建）",
+		Run: func(args string) (string, error) {
+			aargs := strings.TrimSpace(args)
+			if aargs == "" || aargs == "current" || aargs == "当前" {
+				short := *sessionID
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				return fmt.Sprintf("当前会话: %s", short), nil
+			}
+			if aargs == "new" || aargs == "新建" {
+				*sessionID = uuid.New().String()
+				a.Initial = nil
+				short := *sessionID
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				log.Printf("切换到新会话: %s", short)
+				return fmt.Sprintf("✓ 新会话: %s", short), nil
+			}
+			// 尝试加载指定会话（支持完整 ID 或前缀匹配）
+			msgs, err := st.Load(aargs)
+			if err != nil {
+				// 尝试短 ID 前缀匹配
+				found := false
+				for _, id := range st.List() {
+					if strings.HasPrefix(id, aargs) {
+						msgs, err = st.Load(id)
+						if err == nil {
+							*sessionID = id
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					return "", fmt.Errorf("会话 %q 不存在: %v", aargs, err)
+				}
+			}
+			if err == nil && len(msgs) > 0 {
+				if len(msgs) > *history {
+					msgs = msgs[len(msgs)-*history:]
+				}
+				a.Initial = msgs
+				log.Printf("切换到会话 %s: %d 条历史", *sessionID, len(msgs))
+			}
+			short := *sessionID
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			return fmt.Sprintf("✓ 切换到会话: %s", short), nil
+		},
+	})
 
 	// 交互模式
 	// 未配置供应商时给出引导（banner 末尾追加提示）
