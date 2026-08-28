@@ -130,7 +130,7 @@ func (m *tuiModel) renderAllDirect() {
 			sb.WriteString(sgrColor(m.userColor, fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
 		case "bot":
 			sb.WriteString(sgrColor(m.aiColor, fmt.Sprintf("▲ [%s]", t)) + "\n")
-			sb.WriteString(l.content + "\n\n")
+			sb.WriteString(sgrColor(m.aiColor, l.content) + "\n\n")
 		case "err":
 			sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, l.content)) + "\n")
 		case "tool":
