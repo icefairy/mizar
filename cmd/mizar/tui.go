@@ -76,6 +76,8 @@ type tuiModel struct {
 	loading        bool
 	queue          []string // 排队的待发送消息（LIFO）
 	queueVisible   bool     // queueView 当前是否在 flex 中可见
+	histIdx        int      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
+	histSnapshot   string   // 浏览历史时保存的输入框快照
 	app            *tview.Application
 	textView       *tview.TextView
 	queueView      *tview.TextView // 排队消息列表（显示在输入框上方）
@@ -553,12 +555,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		SetDynamicColors(true).
 		SetRegions(false)
 
-	// 布局：垂直排列（聊天区 flex → 排队列表 → 输入框 → 状态栏）
+	// 布局：垂直排列（聊天区占满剩余空间 → 排队列表 → 输入框 → 状态栏）
+	// 输入框固定 5 行高度（内容多时内部滚动），聊天区独占剩余空间
 	m.flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(m.textView, 0, 1, true).
 		AddItem(m.queueView, 0, 0, false).
-		AddItem(m.inputField, 1, 0, false).
+		AddItem(m.inputField, 5, 0, false).
 		AddItem(m.statusBar, 1, 0, false)
 
 	// 应用
@@ -580,7 +583,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 
 	// 全局按键捕获：Enter 发送、Alt+Enter 换行
 	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// Enter 发送时退出历史浏览模式
 		if event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModAlt == 0 {
+			m.histIdx = -1
+			m.histSnapshot = ""
 			send := m.inputField.GetText()
 			m.inputField.SetText("", true)
 			m.submitInput(send)
@@ -599,9 +605,61 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 			m.addChatLine(chatLine{role: "err", content: "任务已取消", ts: time.Now()})
 			return nil
 		}
-		// Ctrl+C 不退出：清空输入框
+		// Ctrl+C 不退出：清空输入框并退出历史浏览
 		if event.Key() == tcell.KeyCtrlC {
+			m.histIdx = -1
+			m.histSnapshot = ""
 			m.inputField.SetText("", true)
+			return nil
+		}
+		// 历史消息浏览：↑ 上一条，↓ 下一条
+		if event.Key() == tcell.KeyUp && event.Modifiers()&tcell.ModAlt == 0 && !m.loading {
+			if m.histIdx == -1 {
+				// 首次按↑：保存当前输入快照，从最新历史开始
+				m.histSnapshot = m.inputField.GetText()
+				m.histIdx = 0
+			} else {
+				m.histIdx++
+			}
+			// m.agent.Initial 是 [user1, bot1, user2, bot2, ...]
+			// 只显示 user 消息（偶数索引）
+			userMsgs := make([]string, 0, len(m.agent.Initial)/2+1)
+			for i, msg := range m.agent.Initial {
+				if msg.Role == agent.RoleUser {
+					userMsgs = append(userMsgs, msg.Content)
+				}
+				_ = i
+			}
+			if m.histIdx < len(userMsgs) {
+				m.inputField.SetText(userMsgs[m.histIdx], true)
+				m.renderAllDirect()
+			} else {
+				// 超出范围：回到最新
+				m.histIdx = 0
+				if len(userMsgs) > 0 {
+					m.inputField.SetText(userMsgs[0], true)
+				}
+			}
+			return nil
+		}
+		if event.Key() == tcell.KeyDown && event.Modifiers()&tcell.ModAlt == 0 && m.histIdx != -1 && !m.loading {
+			m.histIdx--
+			if m.histIdx < 0 {
+				// 回到当前输入
+				m.histIdx = -1
+				m.inputField.SetText(m.histSnapshot, true)
+			} else {
+				userMsgs := make([]string, 0, len(m.agent.Initial)/2+1)
+				for _, msg := range m.agent.Initial {
+					if msg.Role == agent.RoleUser {
+						userMsgs = append(userMsgs, msg.Content)
+					}
+				}
+				if m.histIdx < len(userMsgs) {
+					m.inputField.SetText(userMsgs[m.histIdx], true)
+				}
+			}
+			m.renderAllDirect()
 			return nil
 		}
 		// Alt+↑ 取回最后一条排队消息
