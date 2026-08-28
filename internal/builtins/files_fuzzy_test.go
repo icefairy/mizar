@@ -65,7 +65,7 @@ func TestTruncateOutput(t *testing.T) {
 
 	// 字节截断
 	long := ""
-	for i := 0; i < 20000; i++ {
+	for i := 0; i < 60000; i++ {
 		long += "x"
 	}
 	long += "\n"

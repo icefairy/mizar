@@ -80,7 +80,7 @@ func nfkcNormalize(s string) string {
 		case r == 0xFB02: // ﬂ → fl
 			out.WriteString("fl")
 		case r == 0xFB03: // ﬃ → ffi
-			out.WriteString("fl")
+			out.WriteString("ffi")
 		case r == 0xFB04: // ﬄ → fl
 			out.WriteString("fl")
 		case r == 0xFB05: // ﬅ → st
@@ -127,12 +127,15 @@ func nfkcNormalize(s string) string {
 	return out.String()
 }
 
-// detectLineEndings 检测文件行尾风格：\r\n=CRLF, \n=LF, 其他=LF（兜底）。
-// 返回原始行尾标记（"\r\n" 或 "\n"），供写回时保真。
+// detectLineEndings 检测文件行尾风格（对齐 pi detectLineEnding）。
+// Pi: 找第一个 \r\n 和第一个 \n，若 \r\n 出现在 \n 之前则为 CRLF。
 func detectLineEndings(content string) string {
-	cr := strings.Count(content, "\r\n")
-	nl := strings.Count(content, "\n")
-	if cr > 0 && nl > cr {
+	crlfIdx := strings.Index(content, "\r\n")
+	lfIdx := strings.Index(content, "\n")
+	if lfIdx < 0 {
+		return "\n"
+	}
+	if crlfIdx >= 0 && crlfIdx < lfIdx {
 		return "\r\n"
 	}
 	return "\n"

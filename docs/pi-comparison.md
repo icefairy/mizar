@@ -2,8 +2,8 @@
 
 > 分析对象：Pi Agent v0.84.1（`@earendil-works/pi-coding-agent`）+ pi-cache-guardian v1.0.4
 > 对比基准：开阳 Mizar（Go 单二进制，7649 行，15 包）
-> 日期：2026-08-13
-> 方法：全量读 Pi dist/ 源码（201 文件）+ 官方 docs + CHANGELOG 0.78-0.84，逐项比对 Mizar 本地代码
+> 日期：2026-08-13（初版） / 2026-08-27（逐文件精读 + 移植更新）
+> 方法：全量读 Pi dist/ 源码（201 文件）+ 官方 docs + CHANGELOG 0.78-0.84 + Pi monorepo 主分支源码，逐项比对 Mizar 本地代码
 
 ---
 
@@ -87,15 +87,15 @@
 
 ### 🟢 值得引入（低代码高价值）
 
-| # | 功能 | Pi 实现要点 | 引入方案 | 工作量 |
-|---|---|---|---|---|
-| 1 | **Prompt templates** | 参数 `$1 ${1:-default} ${@:N}`，`/templatename` 展开 | `~/.mizar/templates/*.md` + 参数展开引擎，复用 CommandRegistry | ~30 行 |
-| 2 | **缓存命中率统计** | footer CH/R/W + cache-stats.js | `systemPromptCache` 加 hit/miss 计数，启动打印 + config 开关 | ~30 行 |
-| 3 | **thinking level** | off/minimal/low/medium/high/xhigh/max | config `thinking` 扩展为枚举，透传 OpenAI 参数 | ~40 行 |
-| 4 | **扩展事件系统升级** | 32+ 事件，tool_call 可 deny/rewrite/intercept/allow | Hooks 加 `OnToolCallDecision` 回调，Decision 枚举 | ~30 行 |
-| 5 | **read 双限截断 + 续读提示** | 2000 行/50KB + `[Showing X-Y of N. Use offset=Z]` | read 工具加 maxLines/maxBytes + 续读指令 | ~15 行 |
-| 6 | **bash 输出截断 + 落盘** | 50KB + 落盘 temp + 回传路径 | strings.Builder 改限长，超限写 temp | ~20 行 |
-| 7 | **edit 模糊匹配** | NFKC + 智能引号/破折号/全角空格归一化 | 归一化后先精确后模糊匹配 | ~25 行 |
+| # | 功能 | Pi 实现要点 | 引入方案 | 工作量 | 状态 |
+|---|---|---|---|---|---|
+| 1 | **Prompt templates** | 参数 `$1 ${1:-default} ${@:N}`，`/templatename` 展开 | `~/.mizar/prompts/*.md` + 参数展开引擎，复用 CommandRegistry | ~80 行 | ✅ 已移植（2026-08-27） |
+| 2 | **缓存命中率统计** | footer CH/R/W + cache-stats.js | `systemPromptCache` 加 hit/miss 计数，启动打印 | ~20 行 | ✅ 已移植（2026-08-27） |
+| 3 | **thinking level** | off/minimal/low/medium/high/xhigh/max | config `thinking` 扩展为枚举，透传 OpenAI 参数 | ~40 行 | ⚠️ 部分实现（auto/off/low/medium/high） |
+| 4 | **扩展事件系统升级** | 32+ 事件，tool_call 可 deny/rewrite/intercept/allow | Hooks 加 `OnToolCallDecision` 回调，Decision 枚举 | ~30 行 | ❌ 未移植 |
+| 5 | **read 双限截断 + 续读提示** | 2000 行/50KB + `[Showing X-Y of N. Use offset=Z]` | read 工具加 maxLines/maxBytes + 续读指令 | ~15 行 | ✅ 已移植 |
+| 6 | **bash 输出截断 + 详细警告** | 50KB/2000行双限 + truncateHead 保留头部 + 详细原因 | 头部截断 + `truncated (lines/bytes): showing X/Y lines` | ~45 行 | ✅ 已移植（2026-08-27） |
+| 7 | **edit 模糊匹配** | NFKC + 智能引号/破折号/全角空格归一化 | 归一化后先精确后模糊匹配，成功时提示 | ~80 行 | ✅ 已移植（2026-08-27） |
 
 ### 🟡 中等程度（值得考虑，需结合定位）
 
@@ -131,16 +131,17 @@
 
 | 维度 | Pi | Mizar 现状 | 结论 |
 |---|---|---|---|
-| 超时 | 可选，无默认（模型自行 `timeout` 命令） | 已对齐 ✅（5e5fdb8） | 完成 |
-| 进程击杀 | killProcessTree 杀整组 | `cmd.Process.Kill()` 只杀父 | 🟡 需修：Setpgid + kill -pid |
-| 输出截断 | 50KB/2000 行 + 落盘回传 | 全量 strings.Builder | 🟢 需加 |
+| 超时 | 可选，无默认（模型自行 `timeout` 命令） | ✅ 默认 60s + 可配置 | 完成 |
+| 进程击杀 | killProcessTree 杀整组 | ✅ Setpgid + kill -pid | 完成 |
+| 输出截断 | 50KB/2000行双限 + truncateHead 保留头部 | ✅ 双限截断头部 + 详细原因(lines/bytes/both) + 落盘 temp | 完成（2026-08-27） |
 | 流式输出 | 100ms 节流推送 | 一次性 collect | 编程模式非必须 |
 
 ### read 工具
 
 | 维度 | Pi | Mizar 现状 | 结论 |
 |---|---|---|---|
-| 截断 | 2000 行/50KB 双限 + 续读提示 | 无截断全量进内存 | 🟢 需加 |
+| 截断 | 2000 行/50KB 双限 + 续读提示 | ✅ 双限截断 + 续读提示 | 完成 |
+| 文件预检 | >10MB 拒绝 | ✅ 已实现 | 完成 |
 | 图片 | MIME 检测转 image 附件 | 无 | 编程模式非必须 |
 | macOS 容错 | NFD 规范化/弯引号 | 无 | 低优先 |
 
@@ -148,9 +149,10 @@
 
 | 维度 | Pi | Mizar 现状 | 结论 |
 |---|---|---|---|
-| 模糊匹配 | NFKC + 智能引号归一化 | 精确 strings.Count | 🟢 需加 |
-| 多编辑顺序 | 从后往前倒序应用 | 顺序 Replace（offset 偏移 bug） | 🟡 需修 |
-| 行尾/BOM | BOM 剥离 + LF/CRLF 还原 | 直接 ReadFile/WriteFile | 🟡 需加 |
+| 模糊匹配 | NFKC + 智能引号/破折号/全角空格归一化 | ✅ 先精确后模糊，成功后提示 | 完成（2026-08-27） |
+| 多编辑顺序 | 从后往前倒序应用 | ✅ 倒序应用防 offset 偏移 | 完成 |
+| 行尾/BOM | BOM 剥离 + LF/CRLF 检测还原 | ✅ BOM 剥除 + CRLF 保真写回 | 完成 |
+| unchanged 行保留 | applyReplacementsPreservingUnchangedLines | 未移植（复杂度高于收益） | 🟡 低优先 |
 | TUI 预览 | 执行前异步 diff 预览 | 无 | TUI 附属，跳过 |
 
 ### 其他
@@ -195,6 +197,10 @@
 - **Server admin 端点**（/admin/switch）：Pi 无
 - **bash 默认超时策略**（对齐 Pi 后取消）✅ 2026-08-13 完成
 - **技能统计+周报+自动沉淀**：Pi 无 skill_manage 生命周期管理
+- **CacheStats 缓存命中率统计**：Pi 无内置统计（需 pi-cache-guardian 插件）✅ 2026-08-27
+- **Prompt Templates 系统**：Pi 用独立 prompts/ 目录，Mizar 复用 CommandRegistry + /templates 命令 ✅ 2026-08-27
+- **Edit 模糊匹配（NFKC + 智能引号/破折号/全角空格）**：Pi 有，Mizar 新增 ✅ 2026-08-27
+- **Bash 输出详细截断警告**：Pi 有，Mizar 新增 `truncated (lines/bytes/both): showing X/Y` ✅ 2026-08-27
 
 ---
 
