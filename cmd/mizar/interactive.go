@@ -30,6 +30,8 @@ func banner() string {
   ◆ 内置 TUI：Tab 补全 / Ctrl+T 思考 / 实时 token 统计
   ◆ 会话压缩：自动超窗压缩，摘要保留上下文
   ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
+  ◆ TUI 模式：Enter 发送 / Alt+Enter 换行 / Esc 取消 / Ctrl+T 思考等级
+  ◆ 命令行模式：Enter 发送（多行输入请用 TUI 模式: mizar -tui）
   ◆ 鼠标：Shift+拖拽 选择复制 ｜ 滚轮滚动 ｜ PgUp/PgDn 翻页
 `, version)
 	if startupHint != "" {
@@ -39,10 +41,22 @@ func banner() string {
 }
 
 // interactive 运行交互式对话（readline 支持：退格删除 / 历史上下键 / Tab 补全）。
+// 多行输入：Alt+Enter 换行，Ctrl+J 提交（防粘贴时每行直接发送）。
 func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	rl := liner.NewLiner()
 	defer rl.Close()
 	rl.SetCtrlCAborts(true)
+	// 多行模式：Enter 插入换行而非提交（需 Ctrl+J 提交）
+	rl.SetMultiLineMode(true)
+
+	// 渲染已加载的历史消息
+	for _, msg := range a.Initial {
+		if msg.Role == agent.RoleUser {
+			fmt.Printf("\033[37m▶ %s\033[0m\n\n", msg.Content)
+		} else {
+			fmt.Printf("\033[32m▲ \033[0m%s\n\n", msg.Content)
+		}
+	}
 
 	// 预取命令和工具列表（补全用）
 	cmds := a.Commands.List()
@@ -83,14 +97,14 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 
 	fmt.Print(banner())
 	for {
-		line, err := rl.Prompt("> ")
+		line, err := rl.Prompt(">")
 		if err != nil {
 			fmt.Println()
 			return // EOF / Ctrl-C
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
-			return
+			continue
 		}
 		rl.AppendHistory(line)
 

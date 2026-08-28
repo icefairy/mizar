@@ -75,6 +75,7 @@ type tuiModel struct {
 	aiColor        string // AI 回复颜色（默认 green）
 	loading        bool
 	queue          []string // 排队的待发送消息（LIFO）
+	queueVisible   bool     // queueView 当前是否在 flex 中可见
 	app            *tview.Application
 	textView       *tview.TextView
 	queueView      *tview.TextView // 排队消息列表（显示在输入框上方）
@@ -325,15 +326,30 @@ func (m *tuiModel) spinnerLoop() {
 func (m *tuiModel) renderQueue() {
 	if len(m.queue) == 0 {
 		m.queueView.SetText("").SetDynamicColors(true)
+		// 队列空时隐藏 queueView
+		if m.queueVisible {
+			m.queueVisible = false
+			m.flex.RemoveItem(m.queueView)
+		}
 		return
 	}
 	var sb strings.Builder
 	sb.WriteString(sgrColor("yellow", fmt.Sprintf("排队 (%d条)  Alt+↑ 取回：", len(m.queue))))
 	for i, q := range m.queue {
+		// 截断长消息，每行最多 60 字符
+		content := q
+		if len(content) > 60 {
+			content = content[:57] + "..."
+		}
 		sb.WriteString("\n")
-		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%d: %s", i+1, q)))
+		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%d: %s", i+1, content)))
 	}
 	m.queueView.SetText(sb.String()).SetDynamicColors(true)
+	// 队列非空时显示 queueView
+	if !m.queueVisible {
+		m.queueVisible = true
+		m.flex.AddItem(m.queueView, 0, 0, false)
+	}
 }
 
 // setLoadingAsync 从 goroutine 安全设置加载状态（loading 赋值挪入事件循环回调，避免数据竞争）
@@ -500,6 +516,16 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		}
 		if cfg.AiColor != "" {
 			m.aiColor = cfg.AiColor
+		}
+	}
+	// 若有加载的历史消息，渲染到聊天区
+	if len(a.Initial) > 0 {
+		for _, msg := range a.Initial {
+			role := "bot"
+			if msg.Role == agent.RoleUser {
+				role = "user"
+			}
+			m.lines = append(m.lines, chatLine{role: role, content: msg.Content, ts: time.Now()})
 		}
 	}
 
