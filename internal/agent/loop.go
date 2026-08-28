@@ -347,7 +347,10 @@ func (a *Agent) Run(task string) (string, error) {
 		var llmErr error
 		if a.OnLLMStream != nil {
 			// 流式路径：回调每个分片（含思考/内容），UI 侧增量渲染
-			emit := func(d StreamDelta) { a.OnLLMStream(qc.Step, d) }
+			// 注意：将 OnLLMStream 捕获到局部变量，避免 TOCTOU 竞态条件
+			// （另一个 goroutine 可能在检查后、调用前将 OnLLMStream 设为 nil）
+			onStream := a.OnLLMStream
+			emit := func(d StreamDelta) { onStream(qc.Step, d) }
 			if toolLLM, ok := a.LLM.(StreamToolCallLLM); ok {
 				reply, llmErr = toolLLM.ChatWithToolsStream(msgs, a.Plugins.Tools(), emit)
 			} else if sllm, ok := a.LLM.(StreamLLM); ok {

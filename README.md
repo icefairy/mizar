@@ -128,19 +128,19 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 ## 快速开始
 
 ```bash
-# 首次运行：交互式初始化向导（配置供应商/模型/思考模式/上下文窗口）
-./mizar --init
-#   /provider       添加供应商（OpenAI 兼容端点，自动列出模型）
-#   /model          选择模型（自动探测 / 手动输入序号）
-#   /think          思考模式开关（空=自动探测是否支持）
-#   /context auto   上下文窗口（auto=自动探测，或手动输入数字）
-#   /save           保存到 ~/.mizar/config.json
-# 之后启动自动加载 ~/.mizar/config.json（命令行 flag 优先）
-
 # 内网服务器，无外网、无 Node、无 Python
 curl -O http://192.168.1.10:8080/mizar-linux-amd64   # 或 scp 一个文件
 chmod +x mizar
-./mizar --model http://127.0.0.1:3002/v1   # 对接本地 LLM 网关（如璇玑）
+
+# 直接启动，进入交互式 TUI 后配置供应商与模型
+./mizar
+  # /provider <baseURL> <apiKey>   一次设置 base URL 与 API Key（自动保存到 ~/.mizar/config.json）
+  # /model <name>                   切换模型（自动列出供应商可用模型）
+  # /think <level>                  设置思考等级（auto/off/low/medium/high）
+  # /config 查看当前配置
+
+# 也可通过命令行 flag 一次性指定（跳过交互配置）
+./mizar -base-url http://127.0.0.1:3002/v1 -api-key sk-xxxx -model deepseek-v4-flash
 ```
 
 ```bash

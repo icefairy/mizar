@@ -564,6 +564,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	// 应用
 	m.app = tview.NewApplication()
 	m.app.EnableMouse(true)
+	m.app.EnablePaste(true)  // 启用 bracketed paste：粘贴多行文本时作为整体处理
 
 	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
 	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
