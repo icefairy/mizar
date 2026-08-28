@@ -568,6 +568,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	m.app = tview.NewApplication()
 	m.app.EnableMouse(true)
 	m.app.EnablePaste(true)  // 启用 bracketed paste：粘贴多行文本时作为整体处理
+	fmt.Print("\x1b[?1h")   // 启用 keypad numeric mode：小键盘数字键发送普通数字而非 \x1bOx 序列
 
 	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
 	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
@@ -783,6 +784,8 @@ func (m *tuiModel) Run() error {
 
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)
+	// 退出时恢复 keypad 模式
+	defer fmt.Print("\x1b[?1l\x1b[?1l")
 	return m.app.Run()
 }
 
