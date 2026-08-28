@@ -78,7 +78,7 @@ type tuiModel struct {
 	app            *tview.Application
 	textView       *tview.TextView
 	queueView      *tview.TextView // 排队消息列表（显示在输入框上方）
-	inputField     *tview.InputField
+	inputField     *tview.TextArea
 	statusBar      *tview.TextView
 	flex           *tview.Flex
 	userScrolledUp bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
@@ -160,11 +160,14 @@ func (m *tuiModel) statusBarDirect() {
 	var sb strings.Builder
 
 	// 等待进度指示：spinner 动画 + 轮换宣传语 + 已等待秒数
-	// （固定在状态栏，不影响聊天区；流式回复开始后由「▲ 回复中」接管，spinner 自动消失）
+	// （固定在状态栏，不影响聊天区；流式回复真正输出文本后由「▲ 回复中」接管，spinner 才消失。
+	//  注意：不能在 streamActive 置真时就隐藏——首个流式 delta 与首个可见文本之间可能有数秒间隔
+	//  （如思考阶段），此时若立即隐藏动画会出现「动画没了但内容迟迟不来」的空白期。）
 	m.streamMu.Lock()
 	streaming := m.streamActive
+	streamText := m.extr.Text()
 	m.streamMu.Unlock()
-	if m.loading && !streaming {
+	if m.loading && (!streaming || streamText == "") {
 		frame := spinnerFrames[int(m.spinnerIdx.Load())%len(spinnerFrames)]
 		line := spinnerLines[int(m.spinnerLine.Load())%len(spinnerLines)]
 		secs := int((time.Now().UnixNano() - m.spinnerSet.Load()) / int64(time.Second))
@@ -509,11 +512,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		SetTitle(" 开阳 Mizar ").
 		SetTitleAlign(tview.AlignLeft)
 
-	// 输入框
-	m.inputField = tview.NewInputField().
+	// 输入框（多行 textarea，仿"派"的编辑器形态：支持多行输入，Enter 发送，Alt+Enter 换行）
+	m.inputField = tview.NewTextArea().
 		SetLabel("> ").
-		SetFieldWidth(0).
-		SetPlaceholder("输入任务，/help 查看命令，/quit 退出")
+		SetPlaceholder("输入任务（Enter 发送，Alt+Enter 换行），/help 查看命令，/quit 退出")
 
 	// 状态栏（无边框，flex 只用 fixedSize=1 不够放边框+内容）
 	m.statusBar = tview.NewTextView().
@@ -549,8 +551,14 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		return event, action
 	})
 
-	// 全局按键捕获（Ctrl+T 切换思考等级）
+	// 全局按键捕获：Enter 发送、Alt+Enter 换行
 	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModAlt == 0 {
+			send := m.inputField.GetText()
+			m.inputField.SetText("", true)
+			m.submitInput(send)
+			return nil
+		}
 		if event.Key() == tcell.KeyCtrlT {
 			if toggle, ok := m.agent.LLM.(interface{ ToggleThinking() string }); ok {
 				newLevel := toggle.ToggleThinking()
@@ -566,14 +574,14 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		}
 		// Ctrl+C 不退出：清空输入框
 		if event.Key() == tcell.KeyCtrlC {
-			m.inputField.SetText("")
+			m.inputField.SetText("", true)
 			return nil
 		}
 		// Alt+↑ 取回最后一条排队消息
 		if event.Key() == tcell.KeyUp && event.Modifiers()&tcell.ModAlt != 0 && len(m.queue) > 0 {
 			last := m.queue[len(m.queue)-1]
 			m.queue = m.queue[:len(m.queue)-1]
-			m.inputField.SetText(last)
+			m.inputField.SetText(last, true)
 			m.renderAllDirect()
 			m.renderQueue()
 			return nil
@@ -603,90 +611,14 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 		return event
 	})
 
-	// 自动补全候选列表（支持上下方向键选择，Enter/Tab 确认）
-	const maxAutoItems = 20
-	m.inputField.SetAutocompleteFunc(func(currentText string) []string {
-		var cands []string
-		if strings.HasPrefix(currentText, "/") {
-			for _, c := range m.agent.Commands.List() {
-				full := "/" + c.Name
-				if strings.HasPrefix(full, currentText) {
-					cands = append(cands, full)
-				}
-			}
-		} else if idx := strings.LastIndex(currentText, "@"); idx >= 0 {
-			after := strings.TrimSpace(currentText[idx+1:])
-			cmds := make([]string, 0)
-			for _, c := range m.agent.Commands.List() {
-				cmds = append(cmds, "/"+c.Name)
-			}
-			tools := make([]string, 0)
-			for _, t := range m.agent.Plugins.Tools() {
-				tools = append(tools, t.Name)
-			}
-			cands = completeAtRaw(after, cmds, tools)
-		}
-		if len(cands) > maxAutoItems {
-			cands = cands[:maxAutoItems]
-		}
-		return cands
-	})
-	// 选择候选后应用到输入框：保留 @ 前缀，替换 @ 之后的部分
-	m.inputField.SetAutocompletedFunc(func(text string, index int, source int) bool {
-		val := m.inputField.GetText()
-		if idx := strings.LastIndex(val, "@"); idx >= 0 {
-			m.inputField.SetText(val[:idx+1] + text + " ")
-		} else if strings.HasPrefix(val, "/") {
-			m.inputField.SetText(text + " ")
-		}
-		return true // 关闭列表
-	})
-	// Enter 发送消息（仅在 autocomplete 列表关闭时触发）
-	m.inputField.SetDoneFunc(func(key tcell.Key) {
-		if key != tcell.KeyEnter {
+	// TextArea 的 finished 仅由 Tab/Esc 触发（发送用 Enter，见下方全局键盘捕获）
+	m.inputField.SetFinishedFunc(func(key tcell.Key) {
+		if key != tcell.KeyTab {
 			return
 		}
-		s := strings.TrimSpace(m.inputField.GetText())
-		if s == "" {
-			return
-		}
-		m.inputField.SetText("")
-
-		if strings.HasPrefix(s, "/") {
-			if handled, out, err := m.agent.Commands.Dispatch(s); handled {
-				if err != nil {
-					m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
-				}
-				if out != "" {
-					m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
-				}
-				m.stats.ModelName = m.agent.Model()
-				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
-					m.stats.ThinkingLevel = ut.ThinkingEnabled()
-				}
-				// /color 命令立即重绘聊天区使新颜色生效
-				if strings.HasPrefix(s, "/color") {
-					m.app.QueueUpdateDraw(m.renderAllDirect)
-				} else {
-					m.statusBarDirect()
-				}
-				return
-			}
-		}
-
-		if s == "/quit" || s == "/exit" {
-			m.app.Stop()
-			return
-		}
-
-		if m.loading {
-			m.queue = append(m.queue, s)
-			m.renderAllDirect()
-			m.renderQueue()
-			return
-		}
-
-		m.startTask(s)
+		send := m.inputField.GetText()
+		m.inputField.SetText("", true)
+		m.submitInput(send)
 	})
 
 	// 钩子只注册一次：从 m.evtCh 发送工具调用
@@ -712,6 +644,50 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 	}
 
 	return m
+}
+
+// submitInput 处理发送：命令派发 / 退出 / 排队 / 启动任务
+func (m *tuiModel) submitInput(s string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return
+	}
+
+	if strings.HasPrefix(s, "/") {
+		if handled, out, err := m.agent.Commands.Dispatch(s); handled {
+			if err != nil {
+				m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+			}
+			if out != "" {
+				m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
+			}
+			m.stats.ModelName = m.agent.Model()
+			if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+				m.stats.ThinkingLevel = ut.ThinkingEnabled()
+			}
+			// /color 命令立即重绘聊天区使新颜色生效
+			if strings.HasPrefix(s, "/color") {
+				m.app.QueueUpdateDraw(m.renderAllDirect)
+			} else {
+				m.statusBarDirect()
+			}
+			return
+		}
+	}
+
+	if s == "/quit" || s == "/exit" {
+		m.app.Stop()
+		return
+	}
+
+	if m.loading {
+		m.queue = append(m.queue, s)
+		m.renderAllDirect()
+		m.renderQueue()
+		return
+	}
+
+	m.startTask(s)
 }
 
 func (m *tuiModel) Run() error {

@@ -88,13 +88,17 @@ func toolBash() plugins.Tool {
 				}
 			}
 			full := out.String()
-			// 输出截断（对齐 pi）：50KB 超限截尾 + 落盘 temp + 回传路径
-			if len(full) > bashMaxBytes {
+			// 输出截断（对齐 pi truncateHead）：50KB / 2000 行双限，保留头部（bash 输出按时间顺序看头部最有意义）
+			truncated, show, truncBy, totalLines, totalBytes := truncateOutput(full)
+			if truncated {
 				path, werr := dumpToTemp(full)
 				if werr != nil {
-					return fmt.Sprintf("%d bytes, truncated at %d (temp dump failed: %v)", len(full), bashMaxBytes, werr), nil
+					return fmt.Sprintf("truncated (%s): showing %d of %d lines / %d of %d bytes (temp dump failed: %v)",
+						truncBy, show, totalLines, bashMaxBytes, totalBytes, werr), nil
 				}
-				return fmt.Sprintf("%d bytes, truncated at %d. Full output: %s", len(full), bashMaxBytes, path), nil
+				warn := fmt.Sprintf("truncated (%s): showing %d of %d lines / %d of %d bytes. Full output: %s",
+					truncBy, show, totalLines, bashMaxBytes, totalBytes, path)
+				return warn, nil
 			}
 			return strings.TrimSpace(full), nil
 		},

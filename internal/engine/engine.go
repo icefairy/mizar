@@ -113,6 +113,8 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	// 纯函数标准库（无 I/O、零副作用），引擎创建时无条件注册
 	registerStdlib(reg)
+	// 中文+英文分词宿主函数（seg_cut / seg_pos）
+	registerSeg(reg)
 	if h.HTTPGet != nil {
 		reg("http_get", h.HTTPGet)
 	}

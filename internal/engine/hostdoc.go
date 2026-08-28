@@ -196,6 +196,18 @@ FTP 客户端登录（仅客户端，不提供服务器）。超时 10s。`},
 注册接收回调，cb(data) 每收到一条消息回调一次。`},
 	{Name: "ws_close", Brief: "WS 关闭连接", Full: `ws_close(connID) -> void
 关闭 WS 连接。`},
+
+	// ---- 中文分词 ----
+	{Name: "seg_cut", Brief: "中文+英文分词，返回词列表", Full: `seg_cut(text) -> string[]
+对中英文混排文本做精确+HMM分词，过滤标点/空白/空串，返回词列表。
+英文按单词切分（小写），中文按词典切词。
+示例: seg_cut("我爱Go语言") // ["我","爱","go","语言"]`},
+	{Name: "seg_pos", Brief: "分词并标注词性（名词/动词/形容词等）", Full: `seg_pos(text) -> string
+分词并返回带词性标注的 JSON 字符串: [{"text":"北京","pos":"ns","freq":34488},...]
+pos 标注: n名词 / v动词 / a形容词 / ns地名 / t时间 / d副词 等（英文词可能为空）。
+用途: 检索记忆时可按名词/动词/形容词等词性过滤关键词。
+示例: const toks = JSON.parse(seg_pos("我爱北京"));
+// toks -> [{"text":"我","pos":"r"},{"text":"爱","pos":"v"},{"text":"北京","pos":"ns"}]`},
 }
 
 // hostDocIndex name -> HostDoc 查询索引（构建一次）。

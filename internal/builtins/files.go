@@ -25,6 +25,108 @@ const (
 // bomUTF8 UTF-8 BOM 字节序列（编辑器常见，编辑时剥去，写回时还原）
 var bomUTF8 = []byte{0xEF, 0xBB, 0xBF}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NFKC 模糊匹配（对齐 pi edit-diff.js normalizeForFuzzyMatch）
+// 处理：半角/全角字符统一、智能引号→ASCII、各种破折号→短横线、特殊空格→普通空格
+// ─────────────────────────────────────────────────────────────────────────────
+
+// normalizeForFuzzyMatch 将文本归一化用于模糊匹配（纯 Go，无外部依赖）。
+func normalizeForFuzzyMatch(s string) string {
+	// 1. NFKC 正规化（全角→半角、兼容字符→标准形式）
+	s = nfkcNormalize(s)
+	// 2. 每行去掉尾部空白
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	s = strings.Join(lines, "\n")
+	// 3. 智能引号 → ASCII
+	s = strings.NewReplacer(
+		"‘", "'", "’", "'", "‚", "'", "‛", "'",
+		"“", `"`, "”", `"`, "„", `"`, "‟", `"`,
+	).Replace(s)
+	// 4. 各种破折号/连字符 → -
+	s = strings.NewReplacer(
+		"‐", "-", "‑", "-", "–", "-", "—", "-", "―", "-", "−", "-",
+	).Replace(s)
+	// 5. 特殊空格 → 普通空格
+	s = strings.NewReplacer(
+		" ", " ", // NBSP U+00A0
+		" ", " ", " ", " ", " ", " ", " ", " ", // 各种 em/en quad
+		" ", " ", // narrow NBSP
+		"　", " ", // 全角空格 U+3000
+	).Replace(s)
+	return s
+}
+
+// nfkcNormalize 纯 Go NFKC 正规化（覆盖常见场景，不依赖 unicode 包）。
+// 主要处理：全角字母数字→半角、全角标点→半角、兼容形式字符→标准形式。
+func nfkcNormalize(s string) string {
+	var out strings.Builder
+	out.Grow(len(s))
+	for _, r := range s {
+		switch {
+		// 全角 ASCII 字母数字 (FF01-FF5E)
+		case r >= 0xFF01 && r <= 0xFF5E:
+			out.WriteRune(r - 0xFF01 + 0x21)
+		// 全角空格
+		case r == 0x3000:
+			out.WriteRune(' ')
+		// 兼容形式：小写字母兼容形式
+		case r == 0xFB00: // ﬁ → fi
+			out.WriteString("fi")
+		case r == 0xFB01: // ﬂ → fl
+			out.WriteString("fl")
+		case r == 0xFB02: // ﬂ → fi
+			out.WriteString("fi")
+		case r == 0xFB03: // ﬂ → fl
+			out.WriteString("fl")
+		case r == 0xFB04: // ﬄ → fl
+			out.WriteString("fl")
+		case r == 0xFB05: // ﬅ → st
+			out.WriteString("st")
+		case r == 0xFB06: // ﬆ → st
+			out.WriteString("st")
+		// 其他 NFKC 常用映射（繁体→简体、特殊符号等）
+		case r == 0xFE50: // ﹐ → ,
+			out.WriteByte(',')
+		case r == 0xFE51: // ﹑ → 、
+			out.WriteByte('、')
+		case r == 0xFE52: // ﹒ → .
+			out.WriteByte('.')
+		case r == 0xFE54: // ﹔ → ;
+			out.WriteByte(';')
+		case r == 0xFE55: // ﹕ → :
+			out.WriteByte(':')
+		case r == 0xFE56: // ﹖ → ?
+			out.WriteByte('?')
+		case r == 0xFE57: // ﹗ → !
+			out.WriteByte('!')
+		case r == 0xFE58: // ﹘ → —
+			out.WriteByte('—')
+		case r == 0xFE59: // ﹙ → (
+			out.WriteByte('(')
+		case r == 0xFE5A: // ﹚ → )
+			out.WriteByte(')')
+		case r == 0xFE5B: // ﹛ → {
+			out.WriteByte('{')
+		case r == 0xFE5C: // ﹜ → }
+			out.WriteByte('}')
+		case r == 0xFE5D: // ﹝ → [
+			out.WriteByte('[')
+		case r == 0xFE5E: // ﹞ → ]
+			out.WriteByte(']')
+		case r == 0xFE63: // ﹣ → -
+			out.WriteByte('-')
+		case r == 0xFE68: // ﹨ → \
+			out.WriteByte('\\')
+		default:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
 // detectLineEndings 检测文件行尾风格：\r\n=CRLF, \n=LF, 其他=LF（兜底）。
 // 返回原始行尾标记（"\r\n" 或 "\n"），供写回时保真。
 func detectLineEndings(content string) string {
@@ -233,19 +335,32 @@ func toolEdit() plugins.Tool {
 				newText string
 			}
 			var reps []replacement
+			fuzzyUsed := false
 			for _, e := range edits {
 				if e.OldText == "" {
 					continue
 				}
+				// 先精确匹配
 				idx := strings.Index(content, e.OldText)
-				if idx < 0 {
-					return "", fmt.Errorf("edit: oldText %q not found", truncate(e.OldText, 50))
-				}
 				count := strings.Count(content, e.OldText)
-				if count != 1 {
-					return "", fmt.Errorf("edit: oldText %q appears %d times (must be unique)", truncate(e.OldText, 50), count)
+				if idx >= 0 && count == 1 {
+					reps = append(reps, replacement{start: idx, end: idx + len(e.OldText), newText: e.NewText})
+					continue
 				}
-				reps = append(reps, replacement{start: idx, end: idx + len(e.OldText), newText: e.NewText})
+				// 精确匹配失败 → 模糊匹配（NFKC + 智能引号/破折号归一化）
+				fuzzyContent := normalizeForFuzzyMatch(content)
+				fuzzyOld := normalizeForFuzzyMatch(e.OldText)
+				fuzzyIdx := strings.Index(fuzzyContent, fuzzyOld)
+				if fuzzyIdx < 0 {
+					return "", fmt.Errorf("edit: oldText %q not found (exact + fuzzy)", truncate(e.OldText, 50))
+				}
+				fuzzyCount := strings.Count(fuzzyContent, fuzzyOld)
+				if fuzzyCount != 1 {
+					return "", fmt.Errorf("edit: oldText %q appears %d times in fuzzy match (must be unique)", truncate(e.OldText, 50), fuzzyCount)
+				}
+				// 模糊匹配成功：用归一化后的 oldText 长度计算替换范围
+				fuzzyUsed = true
+				reps = append(reps, replacement{start: fuzzyIdx, end: fuzzyIdx + len(fuzzyOld), newText: e.NewText})
 			}
 			if len(reps) == 0 {
 				return "", fmt.Errorf("edit: no edits applied")
@@ -254,6 +369,10 @@ func toolEdit() plugins.Tool {
 			sort.Slice(reps, func(i, j int) bool { return reps[i].start > reps[j].start })
 			for _, r := range reps {
 				content = content[:r.start] + r.newText + content[r.end:]
+			}
+			warn := ""
+			if fuzzyUsed {
+				warn = " (fuzzy match used: Unicode normalization applied)"
 			}
 			if err := os.WriteFile(p.Path, []byte(content), 0o644); err != nil {
 				return "", err
@@ -272,7 +391,7 @@ func toolEdit() plugins.Tool {
 					return "", err
 				}
 			}
-			return fmt.Sprintf("applied %d edit(s) to %s", len(reps), p.Path), nil
+			return fmt.Sprintf("applied %d edit(s) to %s%s", len(reps), p.Path, warn), nil
 		},
 	}
 }
