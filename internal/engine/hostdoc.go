@@ -67,6 +67,24 @@ JSON 字符串解析为 JS 对象。非法 JSON 抛错。
 	{Name: "llm_chat", Brief: "调用大模型对话", Full: `llm_chat(messagesJSON) -> string
 调用配置的大模型，messages 为 OpenAI 格式 JSON 数组，返回 assistant 文本。
 示例: llm_chat(json_encode([{role: "user", content: "你好"}]))`},
+	{Name: "ai_chat", Brief: "直连大模型对话（非流式，全参数）", Full: `ai_chat(reqJSON) -> string
+复用主程序 LLM 通道的直连对话，不走 agent 循环（无工具、无控制 JSON 包装）。
+reqJSON 字段（均可选，除 messages 外）:
+  model        覆盖默认模型（空 = 用当前模型）
+  system       系统提示词
+  messages     [{"role":"user","content":"..."}] 数组
+  temperature  温度 0-2
+  max_tokens   最大输出 token
+  thinking     思考等级: auto/off/low/medium/high
+  images       [{"url":"..."}] 或 [{"base64":"...","mime":"image/png"}]（多模态图片）
+  video        视频 URL（多模态视频）
+返回 assistant 纯文本。长调用注意插件 30s 执行超时。
+示例: ai_chat(json_encode({messages:[{role:"user",content:"总结这个文件"}], temperature:0.3, max_tokens:500}))`},
+	{Name: "ai_chat_stream", Brief: "直连大模型对话（流式）", Full: `ai_chat_stream(reqJSON, onDelta) -> string
+与 ai_chat 相同的参数，但流式返回。onDelta 为 JS 回调函数，
+逐分片收到 {"thinking":"...","content":"..."} JSON 字符串。
+阻塞直到流结束，返回完整回复文本。
+示例: ai_chat_stream(json_encode({messages:[{role:"user",content:"写首诗"}]}), (d) => { log(d) })`},
 
 	// ---- 数据库 ----
 	{Name: "db_query", Brief: "数据库查询（sqlite3/mysql/postgres）", Full: `db_query(driver, dsn, sql) -> string

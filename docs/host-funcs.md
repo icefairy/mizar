@@ -15,6 +15,8 @@
 - log — 写日志
 - sleep — 休眠毫秒
 - llm_chat — 调用大模型对话
+- ai_chat — 直连大模型对话（非流式，全参数）
+- ai_chat_stream — 直连大模型对话（流式）
 - db_query — 数据库查询（sqlite3/mysql/postgres）
 - db_exec_batch — 事务批量执行 SQL 数组
 - db_close — 关闭连接丢弃会话残留
@@ -53,5 +55,7 @@
 - ws_send — WS 发送消息
 - ws_onmessage — WS 注册消息回调
 - ws_close — WS 关闭连接
+- seg_cut — 中文+英文分词，返回词列表
+- seg_pos — 分词并标注词性（名词/动词/形容词等）
 
 完整文档用宿主函数 doc_get(name) 按需查询。

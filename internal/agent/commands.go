@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ============================================================================
@@ -109,6 +110,7 @@ func (r *CommandRegistry) Help() string {
 }
 
 // Dispatch 解析并执行 "/name args" 行。非命令行返回 (false, "", nil)。
+// 注意：Run 回调必须快速返回，不可阻塞主事件循环（网络请求请放 goroutine）。
 func (r *CommandRegistry) Dispatch(line string) (handled bool, out string, err error) {
 	trimmed := strings.TrimSpace(line)
 	if !strings.HasPrefix(trimmed, "/") {
@@ -134,4 +136,82 @@ func (r *CommandRegistry) Dispatch(line string) (handled bool, out string, err e
 	}
 	out, err = c.Run(args)
 	return true, out, err
+}
+
+// cmdAsyncResult 异步命令执行的结果。
+type cmdAsyncResult struct {
+	Handled bool
+	Out     string
+	Err     error
+}
+
+// DispatchAsync 异步执行命令：立即返回，结果通过 done channel 传出。
+// 用于网络 IO 型命令（如 /model、/reload），避免阻塞 TUI 主线程。
+// timeout=0 表示无超时限制。
+func (r *CommandRegistry) DispatchAsync(line string, timeout time.Duration) <-chan cmdAsyncResult {
+	ch := make(chan cmdAsyncResult, 1)
+	go func() {
+		result := cmdAsyncResult{}
+		defer func() {
+			ch <- result
+		}()
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "/") {
+			result.Handled = false
+			return
+		}
+		fields := strings.Fields(trimmed)
+		name := strings.TrimPrefix(fields[0], "/")
+		args := ""
+		if len(fields) > 1 {
+			args = strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0]))
+		}
+		if name == "help" {
+			if c, ok := r.Get("help"); ok && c.Run != nil {
+				out, err := c.Run(args)
+				result.Handled = true
+				result.Out, result.Err = out, err
+				return
+			}
+			result.Handled = true
+			result.Out = r.Help()
+			return
+		}
+		c, ok := r.Get(name)
+		if !ok {
+			result.Handled = true
+			result.Err = fmt.Errorf("未知命令 /%s（输入 /help 查看可用命令）", name)
+			return
+		}
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out, err := c.Run(args)
+			result.Handled = true
+			result.Out, result.Err = out, err
+		}()
+		if timeout > 0 {
+			select {
+			case <-time.After(timeout):
+				result.Handled = true
+				result.Err = fmt.Errorf("命令 /%s 执行超时（%s）", name, timeout)
+			case <-resultChTimeout(nil, &wg):
+				// 等待完成
+			}
+		} else {
+			wg.Wait()
+		}
+	}()
+	return ch
+}
+
+// resultChTimeout 辅助：等待 wg 完成或超时。
+func resultChTimeout(done chan struct{}, wg *sync.WaitGroup) <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+	return ch
 }

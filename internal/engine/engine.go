@@ -50,6 +50,16 @@ type HostFuncs struct {
 	// name: 提供者名称；fn: (uri string, line, col int) => jsonString（补全数组）
 	LSPRegisterCompletion func(name string, fn func(uri string, line, col int) string) error
 	LLMChat               func(messagesJSON string) (string, error)
+	// AIChat 插件直连 LLM 对话（非流式）：ai_chat(reqJSON) -> string。
+	// reqJSON 为 llm.AIChatRequest JSON（model/system/messages/temperature/
+	// max_tokens/thinking/images/video），返回 assistant 纯文本。
+	// nil 时不注册该函数。
+	AIChat func(reqJSON string) (string, error)
+	// AIChatStream 插件直连 LLM 对话（流式）：ai_chat_stream(reqJSON, onDelta)。
+	// onDelta 同步回调（阻塞式，同一 goroutine）收到分片 JSON：
+	// {"thinking":"...","content":"..."}。阻塞直到流结束，返回完整文本。
+	// nil 时不注册该函数。
+	AIChatStream func(reqJSON string, onDelta func(deltaJSON string)) (string, error)
 	Log                   func(msg string)
 	Sleep                 func(ms int)
 	// WSEmit 向所有 WS 客户端广播自定义事件（event + JSON 数据）。
@@ -153,6 +163,23 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.LLMChat != nil {
 		reg("llm_chat", h.LLMChat)
+	}
+	if h.AIChat != nil {
+		reg("ai_chat", h.AIChat)
+	}
+	if h.AIChatStream != nil {
+		reg("ai_chat_stream", func(reqJSON string, cb goja.Value) (string, error) {
+			if cb == nil || goja.IsUndefined(cb) || goja.IsNull(cb) {
+				return "", fmt.Errorf("ai_chat_stream: 第二个参数必须是函数")
+			}
+			fn, ok := goja.AssertFunction(cb)
+			if !ok {
+				return "", fmt.Errorf("ai_chat_stream: 第二个参数必须是函数")
+			}
+			return h.AIChatStream(reqJSON, func(deltaJSON string) {
+				_, _ = fn(goja.Undefined(), e.vm.ToValue(deltaJSON))
+			})
+		})
 	}
 	if h.Log != nil {
 		reg("log", h.Log)

@@ -32,7 +32,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.2.0"
+var version = "v0.3.0"
 
 // startupHint 首次运行未配置供应商时，banner 末尾追加的引导提示。
 var startupHint string
@@ -226,6 +226,24 @@ func main() {
 			return "", err
 		}
 		return client.Chat(msgs)
+	}
+	// ai_chat / ai_chat_stream：插件直连 LLM（复用主程序 LLM 通道）
+	host.AIChat = func(reqJSON string) (string, error) {
+		var req llm.AIChatRequest
+		if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+			return "", fmt.Errorf("ai_chat: %w", err)
+		}
+		return client.AIChat(req)
+	}
+	host.AIChatStream = func(reqJSON string, onDelta func(deltaJSON string)) (string, error) {
+		var req llm.AIChatRequest
+		if err := json.Unmarshal([]byte(reqJSON), &req); err != nil {
+			return "", fmt.Errorf("ai_chat_stream: %w", err)
+		}
+		return client.AIChatStream(req, func(d agent.StreamDelta) {
+			b, _ := json.Marshal(llm.AIChatStreamDelta{Thinking: d.Thinking, Content: d.Content})
+			onDelta(string(b))
+		})
 	}
 	// LSP 插件桥接：JS 插件用 lsp_register_diagnostic(name, fn) 注册诊断提供者。
 	// fn(uri string) => jsonString（诊断数组 [{startLine,startChar,endLine,endChar,severity,message,source}]）

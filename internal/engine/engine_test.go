@@ -22,6 +22,14 @@ func mockHost() *HostFuncs {
 		LLMChat: func(messagesJSON string) (string, error) {
 			return "mock-llm-reply", nil
 		},
+		AIChat: func(reqJSON string) (string, error) {
+			return "mock-ai-chat-reply", nil
+		},
+		AIChatStream: func(reqJSON string, onDelta func(deltaJSON string)) (string, error) {
+			onDelta(`{"thinking":"思考"}`)
+			onDelta(`{"content":"你好"}`)
+			return "你好", nil
+		},
 		Log: func(msg string) {},
 		DBQuery: DBQueryFn,
 	}
@@ -115,5 +123,45 @@ func TestHTTPRequestHost(t *testing.T) {
 	want := `REQ:PUT:http://x/api:{"a":1}:{"X-Test":"v"}`
 	if res != want {
 		t.Fatalf("want %q got %q", want, res)
+	}
+}
+
+// TestAIChatHost 验证 ai_chat / ai_chat_stream 宿主函数在 JS 插件中可用。
+func TestAIChatHost(t *testing.T) {
+	e, err := New(mockHost())
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer e.Close()
+	js, _ := CompileTS("h.ts", `
+		export function tool_chat(): string {
+			return ai_chat(JSON.stringify({messages:[{role:"user",content:"hi"}]}));
+		}
+		export function tool_chat_stream(): string {
+			let acc = "";
+			const full = ai_chat_stream(JSON.stringify({messages:[{role:"user",content:"hi"}]}), (d) => { acc += d; });
+			return acc + "|" + full;
+		}
+	`)
+	if err := e.RunScript("h.ts", js); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// 非流式
+	res, err := e.Call("tool_chat")
+	if err != nil {
+		t.Fatalf("call ai_chat: %v", err)
+	}
+	if res != "mock-ai-chat-reply" {
+		t.Fatalf("ai_chat want %q got %q", "mock-ai-chat-reply", res)
+	}
+
+	// 流式：分片回调拼接 + 返回完整文本
+	res, err = e.Call("tool_chat_stream")
+	if err != nil {
+		t.Fatalf("call ai_chat_stream: %v", err)
+	}
+	if res != `{"thinking":"思考"}{"content":"你好"}|你好` {
+		t.Fatalf("ai_chat_stream want %q got %q", `{"thinking":"思考"}{"content":"你好"}|你好`, res)
 	}
 }

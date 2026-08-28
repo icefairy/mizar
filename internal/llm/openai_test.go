@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -179,5 +181,204 @@ func TestChatStream_Usage(t *testing.T) {
 	}
 	if client.lastUsage.PromptTokens != 10 || client.lastUsage.CompletionTokens != 5 {
 		t.Fatalf("usage wrong: %+v", client.lastUsage)
+	}
+}
+
+// TestAIChat 验证非流式直连对话：model 覆盖、temperature、max_tokens、system 提示词、思考等级。
+func TestAIChat(t *testing.T) {
+	var gotReqJSON string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotReqJSON = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"回复内容"}}]}`)
+	}))
+	defer srv.Close()
+
+	client := NewOpenAI(srv.URL+"/v1", "test-key", "default-model")
+	temp := 0.3
+	req := AIChatRequest{
+		Model:       "gpt-4o",
+		System:      "你是一个助手",
+		Messages:    []AIChatMsg{{Role: "user", Content: "你好"}},
+		Temperature: &temp,
+		MaxTokens:   500,
+		Thinking:    "off",
+	}
+	reply, err := client.AIChat(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "回复内容" {
+		t.Fatalf("expected '回复内容', got %q", reply)
+	}
+	// 验证请求 JSON 包含各字段
+	var reqBody struct {
+		Model       string  `json:"model"`
+		Temperature float64 `json:"temperature"`
+		MaxTokens   int     `json:"max_tokens"`
+		Thinking    *struct {
+			Type string `json:"type"`
+		} `json:"thinking"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(gotReqJSON), &reqBody); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if reqBody.Model != "gpt-4o" {
+		t.Fatalf("expected model gpt-4o, got %s", reqBody.Model)
+	}
+	if reqBody.Temperature != 0.3 {
+		t.Fatalf("expected temp 0.3, got %f", reqBody.Temperature)
+	}
+	if reqBody.MaxTokens != 500 {
+		t.Fatalf("expected max_tokens 500, got %d", reqBody.MaxTokens)
+	}
+	if reqBody.Thinking == nil || reqBody.Thinking.Type != "disabled" {
+		t.Fatalf("expected thinking disabled, got %+v", reqBody.Thinking)
+	}
+	if len(reqBody.Messages) != 2 || reqBody.Messages[0].Role != "system" {
+		t.Fatalf("expected 2 messages with system first, got %+v", reqBody.Messages)
+	}
+}
+
+// TestAIChatStream 验证流式直连对话：分片回调 + 不包装控制 JSON。
+func TestAIChatStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		chunks := []string{
+			`data: {"choices":[{"index":0,"delta":{"reasoning_content":"思考中"}}]}`,
+			`data: {"choices":[{"index":0,"delta":{"content":"您好"}}]}`,
+			`data: {"choices":[{"index":0,"delta":{"content":"！"}}]}`,
+			`data: {"choices":[{"index":0,"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}
+		for _, c := range chunks {
+			fmt.Fprintf(w, "%s\n\n", c)
+			fl.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	client := NewOpenAI(srv.URL+"/v1", "", "test-model")
+	var gotDelta, gotThink []string
+	onToken := func(d agent.StreamDelta) {
+		if d.Thinking != "" {
+			gotThink = append(gotThink, d.Thinking)
+		}
+		if d.Content != "" {
+			gotDelta = append(gotDelta, d.Content)
+		}
+	}
+	reply, err := client.AIChatStream(AIChatRequest{
+		Messages: []AIChatMsg{{Role: "user", Content: "hi"}},
+		Thinking: "high",
+	}, onToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 返回的应该是原始文本，不包装为 reply JSON
+	if reply != "您好！" {
+		t.Fatalf("expected raw '您好！', got %q", reply)
+	}
+	if len(gotDelta) != 2 || strings.Join(gotDelta, "") != "您好！" {
+		t.Fatalf("delta wrong: %v", gotDelta)
+	}
+	if len(gotThink) != 1 || gotThink[0] != "思考中" {
+		t.Fatalf("thinking wrong: %v", gotThink)
+	}
+}
+
+// TestAIChatMultimodal 验证多模态消息构建：base64 转 data: URI、视频 URL 附加、
+// 文本合并到最后一条 user 消息。
+func TestAIChatMultimodal(t *testing.T) {
+	msgs := buildAIChatMessages(AIChatRequest{
+		System:   "助手",
+		Messages: []AIChatMsg{{Role: "user", Content: "看图"}},
+		Images: []AIChatImage{
+			{Base64: "abc123", MIME: "image/png"},
+			{URL: "https://example.com/img.jpg"},
+		},
+		Video: "https://example.com/vid.mp4",
+	})
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages (system + user), got %d", len(msgs))
+	}
+	if msgs[0].Role != "system" || msgs[0].Content.(string) != "助手" {
+		t.Fatalf("system message wrong: %+v", msgs[0])
+	}
+	parts, ok := msgs[1].Content.([]chatContentPart)
+	if !ok {
+		t.Fatalf("user content should be []chatContentPart, got %T", msgs[1].Content)
+	}
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 parts (text + 2 images + video), got %d", len(parts))
+	}
+	if parts[0].Type != "text" || parts[0].Text != "看图" {
+		t.Fatalf("text part wrong: %+v", parts[0])
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil {
+		t.Fatalf("expected image_url part, got type=%s", parts[1].Type)
+	}
+	wantDataURI := "data:image/png;base64,abc123"
+	if parts[1].ImageURL.URL != wantDataURI {
+		t.Fatalf("expected base64 data URI %q, got %q", wantDataURI, parts[1].ImageURL.URL)
+	}
+	if parts[2].Type != "image_url" || parts[2].ImageURL.URL != "https://example.com/img.jpg" {
+		t.Fatalf("image url part wrong: %+v", parts[2])
+	}
+	if parts[3].Type != "video_url" || parts[3].VideoURL == nil || parts[3].VideoURL.URL != "https://example.com/vid.mp4" {
+		t.Fatalf("video part wrong: %+v", parts[3])
+	}
+}
+
+// TestAIChatNoMedia 验证无媒体时 buildAIChatMessages 保持纯文本消息结构。
+func TestAIChatNoMedia(t *testing.T) {
+	msgs := buildAIChatMessages(AIChatRequest{
+		Messages: []AIChatMsg{{Role: "user", Content: "你好"}},
+	})
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if _, ok := msgs[0].Content.(string); !ok {
+		t.Fatalf("content should be string, got %T", msgs[0].Content)
+	}
+}
+
+// TestAIChatThinkingLevel 验证思考等级序列化。
+func TestAIChatThinkingLevel(t *testing.T) {
+	tests := []struct {
+		level string
+		want  bool
+		typ   string
+		eff   string
+	}{
+		{"auto", false, "", ""},
+		{"off", true, "disabled", ""},
+		{"low", true, "enabled", "low"},
+		{"medium", true, "enabled", "medium"},
+		{"high", true, "enabled", "high"},
+		{"", false, "", ""},
+	}
+	for _, tt := range tests {
+		req := &chatReq{}
+		c := &OpenAI{}
+		c.setThinkingLevel(req, tt.level)
+		send := req.Thinking != nil
+		if send != tt.want {
+			t.Errorf("setThinkingLevel(%q): send=%v, want %v", tt.level, send, tt.want)
+		}
+		if send {
+			if req.Thinking.Type != tt.typ {
+				t.Errorf("setThinkingLevel(%q): type=%q, want %q", tt.level, req.Thinking.Type, tt.typ)
+			}
+			if req.ReasoningEffort != tt.eff {
+				t.Errorf("setThinkingLevel(%q): effort=%q, want %q", tt.level, req.ReasoningEffort, tt.eff)
+			}
+		}
 	}
 }

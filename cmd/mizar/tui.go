@@ -744,9 +744,15 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
 			return nil
 		})
 		a.Hooks.OnToolResult(func(ctx *agent.HookContext) error {
-			// 工具结果：仅显示错误，正常结果不显示（避免刷屏）
 			if ctx.Err != nil {
 				m.addChatLineAsync(chatLine{role: "err", content: ctx.Tool + " 失败: " + ctx.Err.Error(), ts: time.Now()})
+			} else if ctx.Result != "" {
+				// 工具结果：显示内容，长文本截断（避免刷屏）
+				result := strings.TrimSpace(ctx.Result)
+				if len(result) > 300 {
+					result = result[:297] + "..."
+				}
+				m.addChatLineAsync(chatLine{role: "tool", content: ctx.Tool + "() → " + result, ts: time.Now()})
 			}
 			return nil
 		})
@@ -763,26 +769,31 @@ func (m *tuiModel) submitInput(s string) {
 	}
 
 	if strings.HasPrefix(s, "/") {
-		if handled, out, err := m.agent.Commands.Dispatch(s); handled {
-			if err != nil {
-				m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
-			}
-			if out != "" {
-				m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
-			}
-			m.stats.ModelName = m.agent.Model()
-			if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
-				m.stats.ThinkingLevel = ut.ThinkingEnabled()
-			}
-			// /color 命令立即重绘聊天区使新颜色生效
-			if strings.HasPrefix(s, "/color") {
-				m.app.QueueUpdateDraw(m.renderAllDirect)
-			} else {
-				m.statusBarDirect()
-			}
-			return
-		}
+		// 异步执行命令，避免网络IO（如 /model）阻塞主线程
+		ch := m.agent.Commands.DispatchAsync(s, 5*time.Second)
+		go func() {
+			result := <-ch
+			m.app.QueueUpdateDraw(func() {
+				if result.Err != nil {
+					m.addChatLine(chatLine{role: "err", content: result.Err.Error(), ts: time.Now()})
+				}
+				if result.Out != "" {
+					m.addChatLine(chatLine{role: "bot", content: result.Out, ts: time.Now()})
+				}
+				m.stats.ModelName = m.agent.Model()
+				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
+					m.stats.ThinkingLevel = ut.ThinkingEnabled()
+				}
+				if strings.HasPrefix(s, "/color") {
+					m.renderAllDirect()
+				} else {
+					m.statusBarDirect()
+				}
+			})
+		}()
+		return
 	}
+
 
 	if s == "/quit" || s == "/exit" {
 		m.app.Stop()

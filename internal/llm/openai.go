@@ -70,17 +70,35 @@ type toolCall struct {
 	} `json:"function"`
 }
 
+// chatMsg 对话消息。Content 为 string（纯文本）或 []chatContentPart（多模态）。
 type chatMsg struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
+}
+
+// chatContentPart 多模态内容分片（OpenAI 兼容 content 数组）。
+type chatContentPart struct {
+	Type     string            `json:"type"` // text | image_url | video_url
+	Text     string            `json:"text,omitempty"`
+	ImageURL *chatPartImageURL `json:"image_url,omitempty"`
+	VideoURL *chatPartVideoURL `json:"video_url,omitempty"`
+}
+
+type chatPartImageURL struct {
+	URL string `json:"url"`
+}
+
+type chatPartVideoURL struct {
+	URL string `json:"url"`
 }
 
 type chatReq struct {
-	Model     string    `json:"model"`
-	Messages  []chatMsg `json:"messages"`
-	Tools     []toolDef `json:"tools,omitempty"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
-	Stream    bool      `json:"stream,omitempty"`
+	Model           string    `json:"model"`
+	Messages        []chatMsg `json:"messages"`
+	Tools           []toolDef `json:"tools,omitempty"`
+	MaxTokens       int       `json:"max_tokens,omitempty"`
+	Temperature     float64   `json:"temperature,omitempty"`
+	Stream          bool      `json:"stream,omitempty"`
 	Thinking  *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
@@ -142,14 +160,46 @@ func toolCallsToText(tcs []toolCall) string {
 
 // setThinking 根据 ThinkingLevel 设置思考参数
 func (c *OpenAI) setThinking(req *chatReq) {
-	if send, typ := c.HasThinkingHeader(); send {
+	c.setThinkingLevel(req, c.ThinkingLevel)
+}
+
+// setThinkingLevel 用指定等级设置思考参数（插件 ai_chat 用）。
+// level 取值: auto/off/low/medium/high。auto 和空串不传 thinking 参数。
+func (c *OpenAI) setThinkingLevel(req *chatReq, level string) {
+	if send, typ := c.hasThinking(level); send {
 		req.Thinking = &struct {
 			Type string `json:"type"`
 		}{Type: typ}
-		if effort := c.ReasoningEffort(); effort != "" {
+		if effort := c.reasoningEffort(level); effort != "" {
 			req.ReasoningEffort = effort
 		}
 	}
+}
+
+// hasThinking 判断某等级是否发送 thinking 参数并返回 type。
+func (c *OpenAI) hasThinking(level string) (bool, string) {
+	switch level {
+	case "", thinkingAuto:
+		return false, ""
+	case thinkingOff:
+		return true, "disabled"
+	case thinkingLow, thinkingMedium, thinkingHigh:
+		return true, "enabled"
+	}
+	return false, ""
+}
+
+// reasoningEffort 返回某等级对应的 reasoning_effort。
+func (c *OpenAI) reasoningEffort(level string) string {
+	switch level {
+	case thinkingLow:
+		return "low"
+	case thinkingMedium:
+		return "medium"
+	case thinkingHigh:
+		return "high"
+	}
+	return ""
 }
 
 // ============================================================================
@@ -285,9 +335,6 @@ func (o *OpenAI) ChatWithToolsStream(messages []agent.Message, tools []plugins.T
 	return o.chatStream(messages, tools, onToken)
 }
 
-// chatStream 流式核心：SSE 逐行解析，逐分片回调 onToken。
-// 返回完整回复文本：若模型原生返回 tool_calls（流式分片按 index 合并），
-// 转成 agent 循环可解析的 JSON 控制文本；否则返回完整 content。
 func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onToken func(agent.StreamDelta)) (string, error) {
 	req := chatReq{Model: o.Model, Stream: true}
 	for _, m := range messages {
@@ -297,7 +344,36 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 		req.Tools = append(req.Tools, pluginsToolToDef(t))
 	}
 	o.setThinking(&req)
+	return o.streamCore(&req, true, onToken)
+}
 
+// AIChatStream 插件直连对话（流式）：ai_chat_stream 宿主函数的底层实现。
+// 参数与 AIChat 相同；onToken 逐分片收到 Thinking/Content。
+// 阻塞直到流结束，返回完整回复文本（不包装 agent 控制 JSON）。
+func (o *OpenAI) AIChatStream(req AIChatRequest, onToken func(agent.StreamDelta)) (string, error) {
+	r := chatReq{Model: o.Model, Stream: true}
+	if req.Model != "" {
+		r.Model = req.Model
+	}
+	r.Messages = buildAIChatMessages(req)
+	if req.MaxTokens > 0 {
+		r.MaxTokens = req.MaxTokens
+	}
+	if req.Temperature != nil {
+		r.Temperature = *req.Temperature
+	}
+	if req.Thinking != "" {
+		o.setThinkingLevel(&r, req.Thinking)
+	} else {
+		o.setThinking(&r)
+	}
+	return o.streamCore(&r, false, onToken)
+}
+
+// streamCore 流式核心：SSE 逐行解析，逐分片回调 onToken。
+// wrapReply=true 时按 agent 循环协议包装（reply JSON / 工具调用 JSON）；
+// wrapReply=false 时直接返回原始 content（插件直连用）。
+func (o *OpenAI) streamCore(req *chatReq, wrapReply bool, onToken func(agent.StreamDelta)) (string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", err
@@ -402,9 +478,8 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 		}
 		return toolCallsToText(tcs), nil
 	}
-	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
-	// 若模型已自行输出合法 JSON，直接透传避免双重包装。
-	if lastFinishReason == "stop" {
+	// 按协议包装回复（仅 agent 循环路径 wrapReply=true）
+	if wrapReply && lastFinishReason == "stop" {
 		s := strings.TrimSpace(content.String())
 		if strings.HasPrefix(s, "{") {
 			return s, nil
@@ -412,6 +487,96 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
 	}
 	return content.String(), nil
+}
+
+// ============================================================================
+// 插件直连对话（ai_chat / ai_chat_stream）
+// ============================================================================
+
+// AIChatRequest 插件 ai_chat / ai_chat_stream 请求参数。
+// 复用主程序已配置的 LLM 通道（BaseURL/APIKey/默认模型），可覆盖模型与参数。
+type AIChatRequest struct {
+	Model    string       `json:"model,omitempty"`    // 覆盖默认模型（空 = 用当前模型）
+	System   string       `json:"system,omitempty"`   // 系统提示词（追加到 messages 最前）
+	Messages []AIChatMsg  `json:"messages,omitempty"` // 对话消息（role: system/user/assistant）
+	Temperature *float64  `json:"temperature,omitempty"` // 温度（0-2，nil = 不传）
+	MaxTokens  int        `json:"max_tokens,omitempty"`  // 最大输出 token（0 = 不传）
+	Thinking   string     `json:"thinking,omitempty"`    // 思考等级: auto/off/low/medium/high
+	Images     []AIChatImage `json:"images,omitempty"`   // 图片（url 或 base64），附加到最后一条 user 消息
+	Video      string     `json:"video,omitempty"`       // 视频 url，附加到最后一条 user 消息
+}
+
+// AIChatMsg 对话消息。
+type AIChatMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// AIChatImage 图片输入：URL 与 Base64 二选一。
+type AIChatImage struct {
+	URL    string `json:"url,omitempty"`        // 图片 URL（http/https 或 data: URI）
+	Base64 string `json:"base64,omitempty"`     // base64 编码的图片字节
+	MIME   string `json:"mime,omitempty"`       // 图片 MIME（默认 image/jpeg；data: URI 场景可省）
+}
+
+// AIChatStreamDelta 流式分片（回调给插件 JS）。
+type AIChatStreamDelta struct {
+	Thinking string `json:"thinking,omitempty"` // 思考过程分片
+	Content  string `json:"content,omitempty"`  // 回复内容分片
+}
+
+// buildAIChatMessages 组装 ai_chat 消息列表：system 提示词 + 多模态 content parts。
+// 图片/视频以 OpenAI 兼容的 content 数组形式附加到最后一条 user 消息；
+// 若没有 user 消息则自动补一条空 user 消息承载媒体。
+func buildAIChatMessages(req AIChatRequest) []chatMsg {
+	hasMedia := len(req.Images) > 0 || req.Video != ""
+	msgs := make([]chatMsg, 0, len(req.Messages)+1)
+	if req.System != "" {
+		msgs = append(msgs, chatMsg{Role: "system", Content: req.System})
+	}
+	lastUser := -1
+	for i, m := range req.Messages {
+		msgs = append(msgs, chatMsg{Role: m.Role, Content: m.Content})
+		if m.Role == "user" {
+			lastUser = i
+		}
+	}
+	if !hasMedia {
+		return msgs
+	}
+	// 先完整构建 media parts（text + images + video），再一次性挂到消息上，
+	// 避免切片在 append 扩容后与已存储 content 失去共享。
+	parts := make([]chatContentPart, 0, 1+len(req.Images)+1)
+	if lastUser >= 0 {
+		parts = append(parts, chatContentPart{Type: "text", Text: req.Messages[lastUser].Content})
+	}
+	for _, img := range req.Images {
+		url := img.URL
+		if url == "" && img.Base64 != "" {
+			mime := img.MIME
+			if mime == "" {
+				mime = "image/jpeg"
+			}
+			url = "data:" + mime + ";base64," + img.Base64
+		}
+		if url != "" {
+			parts = append(parts, chatContentPart{Type: "image_url", ImageURL: &chatPartImageURL{URL: url}})
+		}
+	}
+	if req.Video != "" {
+		parts = append(parts, chatContentPart{Type: "video_url", VideoURL: &chatPartVideoURL{URL: req.Video}})
+	}
+	if lastUser >= 0 {
+		// 原 user 消息被替换为多模态 content
+		idx := lastUser
+		if req.System != "" {
+			idx++
+		}
+		msgs[idx] = chatMsg{Role: "user", Content: parts}
+	} else {
+		msgs = append(msgs, chatMsg{Role: "user", Content: parts})
+	}
+	return msgs
 }
 
 // Chat 实现 agent.LLM 接口。不发送 tools 参数，模型需从 system prompt 解析工具。
@@ -454,6 +619,62 @@ func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 		return "", fmt.Errorf("llm: no choices")
 	}
 	c.lastUsage = out.Usage
+	return out.Choices[0].Message.Content, nil
+}
+
+// AIChat 插件直连对话（非流式）：ai_chat 宿主函数的底层实现。
+// 复用主程序已配置的 LLM 通道，支持覆盖模型 / 温度 / max_tokens / 系统提示词 /
+// 思考等级 / 图片（url、base64）/ 视频（url）。返回 assistant 纯文本（不包装控制 JSON）。
+func (o *OpenAI) AIChat(req AIChatRequest) (string, error) {
+	r := chatReq{Model: o.Model}
+	if req.Model != "" {
+		r.Model = req.Model
+	}
+	r.Messages = buildAIChatMessages(req)
+	if req.MaxTokens > 0 {
+		r.MaxTokens = req.MaxTokens
+	}
+	if req.Temperature != nil {
+		r.Temperature = *req.Temperature
+	}
+	if req.Thinking != "" {
+		o.setThinkingLevel(&r, req.Thinking)
+	} else {
+		o.setThinking(&r)
+	}
+
+	body, err := json.Marshal(r)
+	if err != nil {
+		return "", err
+	}
+	httpReq, err := http.NewRequest("POST", o.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if o.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
+	}
+	resp, err := o.Client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+	var out chatResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("llm error: %s", out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("llm: no choices")
+	}
+	o.lastUsage = out.Usage
 	return out.Choices[0].Message.Content, nil
 }
 
