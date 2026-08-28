@@ -104,3 +104,45 @@ func toolBash() plugins.Tool {
 		},
 	}
 }
+
+// truncateOutput 截断 bash 输出，保留头部（对齐 pi truncateHead）。
+// 返回 (truncated, shownLines, reason, totalLines, totalBytes)。
+// reason = "lines" | "bytes" | "both"。
+func truncateOutput(content string) (bool, int, string, int, int) {
+	lines := strings.Split(content, "\n")
+	if strings.HasSuffix(content, "\n") && len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	totalLines := len(lines)
+	totalBytes := len(content)
+	if totalLines <= readMaxLines && totalBytes <= bashMaxBytes {
+		return false, totalLines, "", totalLines, totalBytes
+	}
+	var sb strings.Builder
+	byteUsed := 0
+	shown := 0
+	for i, line := range lines {
+		lineBytes := len(line) + 1 // +1 for \n
+		if byteUsed+lineBytes > bashMaxBytes && i > 0 {
+			break
+		}
+		sb.WriteString(line)
+		if i < len(lines)-1 {
+			sb.WriteByte('\n')
+		}
+		byteUsed += lineBytes
+		shown++
+		if shown >= readMaxLines {
+			break
+		}
+	}
+	var truncBy string
+	if shown >= readMaxLines && byteUsed > bashMaxBytes {
+		truncBy = "both"
+	} else if shown >= readMaxLines {
+		truncBy = "lines"
+	} else {
+		truncBy = "bytes"
+	}
+	return true, shown, truncBy, totalLines, totalBytes
+}

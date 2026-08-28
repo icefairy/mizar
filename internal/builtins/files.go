@@ -73,13 +73,13 @@ func nfkcNormalize(s string) string {
 		case r == 0x3000:
 			out.WriteRune(' ')
 		// 兼容形式：小写字母兼容形式
-		case r == 0xFB00: // ﬁ → fi
+		case r == 0xFB00: // ﬀ → ff
+			out.WriteString("ff")
+		case r == 0xFB01: // ﬁ → fi
 			out.WriteString("fi")
-		case r == 0xFB01: // ﬂ → fl
+		case r == 0xFB02: // ﬂ → fl
 			out.WriteString("fl")
-		case r == 0xFB02: // ﬂ → fi
-			out.WriteString("fi")
-		case r == 0xFB03: // ﬂ → fl
+		case r == 0xFB03: // ﬃ → ffi
 			out.WriteString("fl")
 		case r == 0xFB04: // ﬄ → fl
 			out.WriteString("fl")
@@ -91,7 +91,7 @@ func nfkcNormalize(s string) string {
 		case r == 0xFE50: // ﹐ → ,
 			out.WriteByte(',')
 		case r == 0xFE51: // ﹑ → 、
-			out.WriteByte('、')
+			out.WriteString("、")
 		case r == 0xFE52: // ﹒ → .
 			out.WriteByte('.')
 		case r == 0xFE54: // ﹔ → ;
@@ -103,7 +103,7 @@ func nfkcNormalize(s string) string {
 		case r == 0xFE57: // ﹗ → !
 			out.WriteByte('!')
 		case r == 0xFE58: // ﹘ → —
-			out.WriteByte('—')
+			out.WriteString("—")
 		case r == 0xFE59: // ﹙ → (
 			out.WriteByte('(')
 		case r == 0xFE5A: // ﹚ → )
