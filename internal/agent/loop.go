@@ -105,6 +105,13 @@ type Agent struct {
 	Jobs       *jobs.Registry  // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
 	PlanMode   *PlanMode       // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
 	GoalService *GoalService   // 会话目标服务（nil = 不启用；复刻 dsh goal）
+	GoalLoop   *GoalLoop       // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
+	SubAgents  *SubagentManager // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
+	BgReview   *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
+	StatsData  *StatsDataRef // 会话统计（nil = 不启用）
+
+	// AuxLLM 辅助模型（judge / background review 用；nil = 使用主 LLM）
+	AuxLLM AuxiliaryLLM
 
 	// AskUser 可选：模型通过 ask_user_question 工具向人类提问时的回调。
 	// 参数为 questions JSON，返回 answers JSON；TUI 模式弹出输入等待用户，无界面环境返回降级提示。
@@ -493,6 +500,27 @@ func (a *Agent) Run(task string) (string, error) {
 		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
 		msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult})
 		a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
+
+		// GoalLoop judge：每轮后判断目标是否完成，自动续跑（🟡 ImpactModerate）
+		if a.GoalLoop != nil {
+			shouldContinue, continuationPrompt, judgeErr := a.GoalLoop.EvaluateAfterTurn(reply)
+			if judgeErr != nil {
+				a.log("%s", q.FormatLog("goal_judge_error", "err=", judgeErr.Error()))
+			} else if shouldContinue && continuationPrompt != "" {
+				// 追加 continuation prompt，继续下一轮
+				msgs = append(msgs, Message{Role: RoleUser, Content: continuationPrompt})
+				a.log("%s", q.FormatLog("goal_continue", "step=", fmt.Sprintf("%d", qc.Step)))
+				step++
+				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+				continue
+			}
+		}
+
+		// BackgroundReview：每轮后异步触发 skill/memory 沉淀（🟢 ImpactSafe）
+		if a.BgReview != nil {
+			a.BgReview.Advance(reply, msgs)
+		}
+
 		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		step++
 	}

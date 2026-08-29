@@ -390,6 +390,28 @@ func main() {
 	// 会话目标服务
 	goalSvc := agent.NewGoalService()
 	a.GoalService = goalSvc
+	// GoalLoop：每轮后自动 judge，续跑直到目标完成（复刻 hermes Ralph loop）
+	a.GoalLoop = agent.NewGoalLoop(goalSvc, agent.DefaultGoalLoopConfig())
+	// 辅助 judge 函数：用主 LLM
+	auxLLM := a.LLM
+	a.AuxLLM = auxLLM
+	goalSvc.SetJudgeFn(agent.BuildDefaultJudgeFn(auxLLM))
+	// Subagent 管理器
+	var subLLM agent.ToolCallLLM
+	if tllm, ok := a.LLM.(agent.ToolCallLLM); ok {
+		subLLM = tllm
+	}
+	a.SubAgents = agent.NewSubagentManager(subLLM, a.System)
+	// BackgroundReview：后台自学习
+	homeDir, _ := os.UserHomeDir()
+	skillsDir := filepath.Join(homeDir, ".mizar", "skills")
+	a.BgReview = agent.NewBackgroundReview(agent.BackgroundReviewConfig{
+		MinTurnsBetweenReviews: 3,
+		AuxLLM:                 auxLLM,
+		SkillsDir:              skillsDir,
+	})
+	// StatsData
+	a.StatsData = &agent.StatsDataRef{}
 	// 注册后台任务工具（与 a.Jobs 同一 registry 实例，保证跨工具一致性）
 	for _, t := range builtins.JobTools(a.Jobs) {
 		pm.RegisterBuiltin(t)
@@ -406,6 +428,18 @@ func main() {
 	for _, t := range builtins.GoalTools(goalSvc) {
 		pm.RegisterBuiltin(t)
 	}
+	// 新增 goal 工具：add_gate / add_subgoal / clear_subgoals
+	for _, t := range builtins.GoalExtendedTools(goalSvc) {
+		pm.RegisterBuiltin(t)
+	}
+	// 子代理委派工具
+	pm.RegisterBuiltin(agent.DelegateTool(a.SubAgents))
+	pm.RegisterBuiltin(agent.GetSubagentTool(a.SubAgents))
+	pm.RegisterBuiltin(agent.ListSubagentsTool(a.SubAgents))
+	// Skill Manager 工具（agent 可自创 skill）
+	pm.RegisterBuiltin(builtins.SkillManagerTool(skillsDir))
+	// Session Insights 工具
+	pm.RegisterBuiltin(builtins.InsightsTool(a.StatsData.ToInsightsData()))
 	for _, t := range builtins.ScheduleTools(schedReg) {
 		pm.RegisterBuiltin(t)
 	}
@@ -787,6 +821,51 @@ func main() {
 					return fmt.Sprintf("✗ 标记阻塞失败：%v", err), nil
 				}
 				return fmt.Sprintf("✓ 目标已标记为阻塞。原因：%s", reason), nil
+			case "gate", "门禁":
+				// /goal gate add <command> 或 /goal gate remove
+				if len(fields) < 2 {
+					return "用法: /goal gate add <命令>  或  /goal gate remove", nil
+				}
+				sub := fields[1]
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 没有活跃目标。", nil
+				}
+				if sub == "add" {
+					cmd := strings.Join(fields[2:], " ")
+					if err := a.GoalService.AddGate(cmd, 0, 0); err != nil {
+						return fmt.Sprintf("✗ 添加门禁失败：%v", err), nil
+					}
+					return fmt.Sprintf("✓ 已添门禁: %s", cmd), nil
+				} else if sub == "remove" {
+					if err := a.GoalService.RemoveGate(); err != nil {
+						return fmt.Sprintf("✗ 移除门禁失败：%v", err), nil
+					}
+					return "✓ 已移除最后一条门禁。", nil
+				}
+				return "用法: /goal gate add <命令>  或  /goal gate remove", nil
+			case "subgoal", "子目标":
+				if len(fields) < 2 {
+					return "用法: /goal subgoal add <描述>  或  /goal subgoal clear", nil
+				}
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 没有活跃目标。", nil
+				}
+				sub := fields[1]
+				if sub == "add" {
+					text := strings.Join(fields[2:], " ")
+					if err := a.GoalService.AddSubgoal(text); err != nil {
+						return fmt.Sprintf("✗ 添加子目标失败：%v", err), nil
+					}
+					return fmt.Sprintf("✓ 已添加子目标: %s", text), nil
+				} else if sub == "clear" {
+					if err := a.GoalService.ClearSubgoals(); err != nil {
+						return fmt.Sprintf("✗ 清除子目标失败：%v", err), nil
+					}
+					return "✓ 已清除所有子目标。", nil
+				}
+				return "用法: /goal subgoal add <描述>  或  /goal subgoal clear", nil
 			default:
 				// 当作新目标 objective 处理
 				objective := arg
