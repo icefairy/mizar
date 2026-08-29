@@ -1069,6 +1069,76 @@ func main() {
 			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps ＜数字1-1000＞")
 		},
 	})
+	// 内置 /compact 命令：手动触发上下文压缩
+	a.Commands.Register(agent.Command{
+		Name:        "compact",
+		Description: "手动触发上下文压缩（/compact 或 /compact <摘要指引>）",
+		Run: func(args string) (string, error) {
+			if a.Compactor == nil {
+				return "✗ 会话压缩未启用（启动时使用了 --no-compact）",
+nil
+			}
+			msgs := a.Initial
+			if len(msgs) <= 1 {
+				return "✗ 消息不足，无需压缩",
+nil
+			}
+			est := agent.EstimateMessages(msgs)
+			limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "当前估算: %d/%d tokens（%d 条消息）\n", est, limit, len(msgs))
+			if est <= limit {
+				sb.WriteString("  未达到压缩阈值，仍可强制压缩：/compact force\n")
+			}
+			cut := a.Compactor.FindCutPoint(msgs)
+			if cut <= 0 {
+				sb.WriteString("  无可切点（保留消息量在预算内）\n")
+				return sb.String(), nil
+			}
+			action := strings.TrimSpace(args)
+			force := strings.HasPrefix(strings.ToLower(action), "force")
+			customPrompt := ""
+			if !force && action != "" {
+				customPrompt = action
+			}
+			// 用自定义指令替换 Summarize 以生成结构化摘要
+			origSummarize := a.Compactor.Summarize
+			customUsed := false
+			if customPrompt != "" {
+				a.Compactor.Summarize = func(ms []agent.Message) (string, error) {
+					base, err := origSummarize(ms)
+					if err != nil {
+						return "", err
+					}
+					return fmt.Sprintf("%s\n\n额外要求：%s", base, customPrompt), nil
+				}
+				customUsed = true
+			}
+			newMsgs, err := a.Compactor.Compact(msgs)
+			if customUsed {
+				a.Compactor.Summarize = origSummarize // 恢复
+			}
+			if err != nil {
+				return "", fmt.Errorf("压缩失败: %v", err)
+			}
+			// 检查是否实际切分（新列表包含 KindSummary 消息则已切分）
+			cutOccurred := false
+			for _, m := range newMsgs {
+				if m.Kind == agent.KindSummary {
+					cutOccurred = true
+					break
+				}
+			}
+			if !cutOccurred {
+				return sb.String() + "  无需压缩（消息结构不允许切分）", nil
+			}
+			a.Initial = newMsgs
+			newEst := agent.EstimateMessages(newMsgs)
+			reduced := est - newEst
+			fmt.Fprintf(&sb, "✓ 已压缩: %d → %d tokens（节省 %d tokens, %.1f%%）\n", est, newEst, reduced, float64(reduced)/float64(est)*100)
+			return sb.String(), nil
+		},
+	})
 	// 内置 /save 命令：将当前配置持久化到 ~/.mizar/config.json
 	a.Commands.Register(agent.Command{
 		Name:        "save",

@@ -84,6 +84,8 @@ type tuiModel struct {
 	textView       *tview.TextView
 	queueView      *tview.TextView // 排队消息列表（显示在输入框上方）
 	inputField     *tview.TextArea
+	autoComplete   *tview.TextView // 自动提示条（输入 / 或 @ 时显示匹配命令/文件）
+	autoCompleteList []string       // 当前补全候选列表（用于 Tab 填入）
 	statusBar      *tview.TextView
 	flex           *tview.Flex
 	userScrolledUp bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
@@ -595,12 +597,19 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		SetDynamicColors(true).
 		SetRegions(false)
 
-	// 布局：垂直排列（聊天区占满剩余空间 → 排队列表 → 输入框 → 状态栏）
+	// 自动提示条（显示在输入框上方，仅在输入 / 时出现）
+	m.autoComplete = tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(false).
+		SetText("")
+
+	// 布局：垂直排列（聊天区占满剩余空间 → 排队列表 → 自动提示 → 输入框 → 状态栏）
 	// 输入框固定 5 行高度（内容多时内部滚动），聊天区独占剩余空间
 	m.flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
 		AddItem(m.textView, 0, 1, true).
 		AddItem(m.queueView, 0, 0, false).
+		AddItem(m.autoComplete, 1, 0, false).
 		AddItem(m.inputField, 5, 0, false).
 		AddItem(m.statusBar, 1, 0, false)
 
@@ -758,14 +767,164 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		return event
 	})
 
-	// TextArea 的 finished 仅由 Tab/Esc 触发（发送用 Enter，见下方全局键盘捕获）
+	// TextArea 的 finished 由 Tab/Esc 触发（Enter 发送走全局键盘捕获）
 	m.inputField.SetFinishedFunc(func(key tcell.Key) {
+		if key == tcell.KeyEsc {
+			// ESC：收起提示条，保留已输入内容
+			m.autoComplete.SetText("")
+			m.autoCompleteList = nil
+			return
+		}
 		if key != tcell.KeyTab {
 			return
 		}
-		send := m.inputField.GetText()
-		m.inputField.SetText("", true)
-		m.submitInput(send)
+		// Tab 键：自动补全命令或路径
+		current := m.inputField.GetText()
+		trimmed := strings.TrimSpace(current)
+		// 命令补全
+		if strings.HasPrefix(trimmed, "/") {
+			fields := strings.Fields(trimmed)
+			cmdName := strings.TrimPrefix(fields[0], "/")
+			var matches []string
+			for _, c := range m.agent.Commands.List() {
+				if c.Name == cmdName {
+					matches = append(matches, "/"+c.Name)
+				} else if strings.HasPrefix(c.Name, cmdName) {
+					matches = append(matches, "/"+c.Name)
+				}
+			}
+			if len(matches) == 1 {
+				// 唯一匹配：替换为完整命令
+				prefix := ""
+				if len(fields) > 1 {
+					prefix = " " + fields[1]
+				}
+				m.inputField.SetText(matches[0]+prefix, true)
+				m.renderAllDirect()
+			} else if len(matches) > 1 {
+				var sb strings.Builder
+				sb.WriteString(sgrColor("yellow", "  匹配命令: "))
+				for i, cm := range matches {
+					if i > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(cm)
+				}
+				m.autoComplete.SetText(sb.String())
+				m.autoCompleteList = matches
+			} else {
+				m.autoComplete.SetText("")
+				m.autoCompleteList = nil
+			}
+			return
+		}
+		// @ 路径/工具/命令补全
+		if atIdx := strings.LastIndex(current, "@"); atIdx >= 0 {
+			after := strings.TrimSpace(current[atIdx+1:])
+			// 收集工具名列表
+			var toolNames []string
+			for _, t := range m.agent.Plugins.Tools() {
+				toolNames = append(toolNames, t.Name)
+			}
+			var cmdNames []string
+			for _, c := range m.agent.Commands.List() {
+				cmdNames = append(cmdNames, "/"+c.Name)
+			}
+			candidates := completeAtRaw(after, cmdNames, toolNames)
+			if len(candidates) == 0 {
+				m.autoComplete.SetText("")
+				m.autoCompleteList = nil
+				return
+			}
+			if len(candidates) == 1 {
+				// 唯一匹配：填入候选
+				// 如果候选是纯路径（不含 @cmd:/@tool:/@file: 等分类前缀），保留 @ 后内容不变
+				// 如果是分类前缀形式，则替换 @ 后的部分
+				candidate := candidates[0]
+				base := current[:atIdx+1]
+				// 检查是否有分类前缀（如 @cmd:, @tool:, @file:, @read:, @dir:）
+				if strings.Contains(candidate, ":") && !strings.HasPrefix(candidate, "/") {
+					m.inputField.SetText(base+candidate, true)
+				} else {
+					// 纯路径：直接用路径替换 @ 后面的内容
+					m.inputField.SetText(base+candidate, true)
+				}
+				m.renderAllDirect()
+				return
+			}
+			// 多候选：显示提示条
+			var sb strings.Builder
+			sb.WriteString(sgrColor("yellow", "  匹配: "))
+			for i, c := range candidates {
+				if i > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(c)
+			}
+			m.autoComplete.SetText(sb.String())
+			m.autoCompleteList = candidates
+			return
+		}
+		m.autoComplete.SetText("")
+		m.autoCompleteList = nil
+	})
+
+	// 实时输入监听：输入 / 或 @ 时显示命令/路径提示条
+	m.inputField.SetChangedFunc(func() {
+		current := m.inputField.GetText()
+		trimmed := strings.TrimSpace(current)
+		if strings.HasPrefix(trimmed, "/") {
+			fields := strings.Fields(trimmed)
+			cmdName := strings.TrimPrefix(fields[0], "/")
+			var matches []string
+			for _, c := range m.agent.Commands.List() {
+				if c.Name == cmdName {
+					matches = append(matches, "/"+c.Name)
+				} else if strings.HasPrefix(c.Name, cmdName) {
+					matches = append(matches, "/"+c.Name)
+				}
+			}
+			if len(matches) > 0 {
+				var sb strings.Builder
+				sb.WriteString(sgrColor("yellow", "  匹配命令: "))
+				for i, cm := range matches {
+					if i > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(cm)
+				}
+				m.autoComplete.SetText(sb.String())
+			} else {
+				m.autoComplete.SetText("")
+			}
+		} else if idx := strings.LastIndex(current, "@"); idx >= 0 {
+			// @ 补全：检测 @ 后面的内容
+			after := strings.TrimSpace(current[idx+1:])
+			var toolNames []string
+			for _, t := range m.agent.Plugins.Tools() {
+				toolNames = append(toolNames, t.Name)
+			}
+			var cmdNames []string
+			for _, c := range m.agent.Commands.List() {
+				cmdNames = append(cmdNames, "/"+c.Name)
+			}
+			candidates := completeAtRaw(after, cmdNames, toolNames)
+			if len(candidates) > 0 {
+				var sb strings.Builder
+				sb.WriteString(sgrColor("yellow", "  匹配: "))
+				for i, c := range candidates {
+					if i > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(c)
+				}
+				m.autoComplete.SetText(sb.String())
+			} else {
+				m.autoComplete.SetText("")
+			}
+		} else {
+			m.autoComplete.SetText("")
+		}
 	})
 
 	// 钩子只注册一次：从 m.evtCh 发送工具调用
