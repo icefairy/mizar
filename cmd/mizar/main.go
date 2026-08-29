@@ -701,6 +701,118 @@ func main() {
 			return msg, nil
 		},
 	})
+	// 内置 /goal 命令：会话目标管理（复刻 pi-goal）
+	a.Commands.Register(agent.Command{
+		Name:        "goal",
+		Description: "会话目标管理（/goal <目标> 创建 ｜ /goal status 查看 ｜ /goal pause/resume/complete/clear 操作）",
+		Run: func(args string) (string, error) {
+			if a.GoalService == nil {
+				return "⚠ GoalService 未初始化", nil
+			}
+			arg := strings.TrimSpace(args)
+			// 无参数或 status：显示当前目标
+			if arg == "" || arg == "status" || arg == "查看" || arg == "状态" {
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 当前没有活跃目标。使用 /goal <目标描述> 创建新目标。", nil
+				}
+				phaseLabel := map[agent.GoalPhase]string{
+					agent.GoalPending:    "待处理",
+					agent.GoalInProgress: "进行中",
+					agent.GoalPaused:     "已暂停",
+					agent.GoalCompleted:  "已完成",
+					agent.GoalBlocked:    "已阻塞",
+				}
+				label := phaseLabel[g.Phase]
+				if g.BlockedReason != "" {
+					label += fmt.Sprintf("（%s）", g.BlockedReason)
+				}
+				msg := fmt.Sprintf("🎯 当前目标\n  目标：%s\n  状态：%s\n  轮次：%d",
+					g.Objective, label, g.RoundsStarted)
+				if g.MaxGoalRounds > 0 {
+					msg += fmt.Sprintf("（上限 %d 轮）", g.MaxGoalRounds)
+				}
+				return msg, nil
+			}
+			fields := strings.Fields(arg)
+			action := fields[0]
+			switch action {
+			case "pause", "暂停":
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 没有活跃目标。先用 /goal <目标> 创建。", nil
+				}
+				if err := a.GoalService.Update(g.ID, fmt.Sprintf("%d", g.Revision), "pause", "", 0, ""); err != nil {
+					return fmt.Sprintf("✗ 暂停失败：%v", err), nil
+				}
+				return "✓ 目标已暂停。使用 /goal resume 恢复。", nil
+			case "resume", "恢复":
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 没有活跃目标。", nil
+				}
+				if err := a.GoalService.Update(g.ID, fmt.Sprintf("%d", g.Revision), "resume", "", 0, ""); err != nil {
+					return fmt.Sprintf("✗ 恢复失败：%v", err), nil
+				}
+				return "✓ 目标已恢复执行。", nil
+			case "complete", "完成":
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 没有活跃目标。", nil
+				}
+				if err := a.GoalService.Update(g.ID, fmt.Sprintf("%d", g.Revision), "complete", "", 0, ""); err != nil {
+					return fmt.Sprintf("✗ 标记完成失败：%v", err), nil
+				}
+				return "✓ 目标已标记为完成。", nil
+			case "clear", "清除", "删除":
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 没有活跃目标。", nil
+				}
+				// 将目标设为 completed 来清除
+				if err := a.GoalService.Update(g.ID, fmt.Sprintf("%d", g.Revision), "complete", "", 0, ""); err != nil {
+					return fmt.Sprintf("✗ 清除失败：%v", err), nil
+				}
+				return "✓ 目标已清除。", nil
+			case "blocked", "阻塞":
+				reason := ""
+				if len(fields) > 1 {
+					reason = strings.Join(fields[1:], " ")
+				}
+				g := a.GoalService.Get()
+				if g == nil {
+					return "✗ 没有活跃目标。", nil
+				}
+				if err := a.GoalService.Update(g.ID, fmt.Sprintf("%d", g.Revision), "blocked", "", 0, reason); err != nil {
+					return fmt.Sprintf("✗ 标记阻塞失败：%v", err), nil
+				}
+				return fmt.Sprintf("✓ 目标已标记为阻塞。原因：%s", reason), nil
+			default:
+				// 当作新目标 objective 处理
+				objective := arg
+				// 解析可选的 max_goal_rounds：/goal <目标> --rounds 10
+				maxRounds := 0
+				for i, f := range fields {
+					if f == "--rounds" && i+1 < len(fields) {
+						var n int
+						fmt.Sscanf(fields[i+1], "%d", &n)
+						if n > 0 {
+							maxRounds = n
+						}
+					}
+				}
+				if err := a.GoalService.Create(objective, maxRounds); err != nil {
+					return fmt.Sprintf("✗ 创建目标失败：%v\n提示：创建目标需要当前回合有直接的人类消息（不要通过工具调用触发）。", err), nil
+				}
+				g := a.GoalService.Get()
+				msg := fmt.Sprintf("✓ 目标已创建\n  ID：%s\n  目标：%s\n  状态：待处理", g.ID, g.Objective)
+				if maxRounds > 0 {
+					msg += fmt.Sprintf("\n  轮次上限：%d", maxRounds)
+				}
+				return msg, nil
+			}
+		},
+	})
 	// 内置 /quit 命令：退出交互模式
 	a.Commands.Register(agent.Command{
 		Name:        "quit",

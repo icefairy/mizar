@@ -127,7 +127,11 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 复刻 deepseek-harness 的 plan-mode：`/plan` 进入计划模式，模型先探索设计方案并通过 `exit_plan_mode` 提交计划，用户审批后继续执行；`/plan off` 直接退出。系统提示词中注入规划引导语（可自定义），TUI 模式下弹出审批界面。
 
 ### 13. 会话目标（Goal）
-复刻 deepseek-harness 的 goal 工具：`get_goal`/`create_goal`/`update_goal`（edit/pause/resume/complete/blocked）。create/edit/pause/resume 需人类直接消息权限；complete/blocked 可由模型自动报告（blocked 需满足连续阈值）。适用于长期多步骤任务的目标管理。
+复刻 deepseek-harness 的 goal 工具 + pi-goal 的 `/goal` 斜杠命令：
+- 工具：`get_goal`/`create_goal`/`update_goal`（edit/pause/resume/complete/blocked）
+- 命令：`/goal <目标>` 创建、`/goal status` 查看、`/goal pause`/`resume`/`complete`/`blocked <原因>`/`clear`
+- create/edit/pause/resume 需人类直接消息权限；complete/blocked 可由模型自动报告（blocked 需满足连续阈值）
+- 适用于长期多步骤任务的目标管理
 
 ### 14. 定时提醒（Schedule）
 复刻 deepseek-harness 的 schedule：`schedule_create`/`schedule_list`/`schedule_delete`。支持三种模式：`after <n>秒`（延迟提醒）、`at <RFC3339>`（绝对时间）、`every <n>秒`（固定间隔，最小 5 分钟）。到期后以终端输出 + 日志方式通知。

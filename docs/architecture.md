@@ -709,6 +709,7 @@ export function rpc_notify(params) {
 
 - 位置：`internal/agent/goal.go` + `internal/builtins/goal_tools.go`
 - 工具：`get_goal` / `create_goal` / `update_goal`
+- 命令：`/goal <目标>` 创建 ｜ `/goal status` 查看 ｜ `/goal pause`/`resume`/`complete`/`blocked <原因>`/`clear`（复刻 pi-goal）
 - 生命周期：pending → in_progress → completed / blocked / paused
 - 权限约束：create/edit/pause/resume 需人类直接消息（`MarkHumanTurn` 标记）；complete/blocked 可由模型自动报告
 - 自阻塞阈值：默认 3 轮连续同条件才允许 self-block（防止误报）
