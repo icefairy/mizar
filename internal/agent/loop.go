@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mizar/internal/engine"
+	"mizar/internal/jobs"
 	"mizar/internal/lifecycle"
 	"mizar/internal/plugins"
 )
@@ -100,6 +101,14 @@ type Agent struct {
 	Compactor  *Compactor      // 会话压缩器（nil = 不压缩）
 	Hooks      *Hooks          // 挂载点（nil = 无钩子）
 	Tuner      *WeakModelTuner // 弱模型宽容策略（nil = 不启用）
+	Guard      *RepeatGuard    // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
+	Jobs       *jobs.Registry  // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
+	PlanMode   *PlanMode       // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
+	GoalService *GoalService   // 会话目标服务（nil = 不启用；复刻 dsh goal）
+
+	// AskUser 可选：模型通过 ask_user_question 工具向人类提问时的回调。
+	// 参数为 questions JSON，返回 answers JSON；TUI 模式弹出输入等待用户，无界面环境返回降级提示。
+	AskUser func(questionsJSON string) (string, error)
 
 	// 工具调用解析策略
 	callParser func(text string) (*callRequest, error)
@@ -145,6 +154,8 @@ func New(llm LLM, pm *plugins.Manager) *Agent {
 		callParser: parseCallJSON,
 		Commands:   NewCommandRegistry(),
 		cacheStats: &CacheStats{},
+		Guard:      NewRepeatGuard(nil),
+		PlanMode:   NewPlanMode(),
 	}
 	// 插件导出的 command_* 函数注册为斜杠命令
 	for _, c := range pm.Commands() {
@@ -202,6 +213,10 @@ func (a *Agent) SystemPrompt() string {
 	}
 	sb.WriteString(sys)
 	sb.WriteString("\n")
+	// 计划模式引导（活跃时注入，退出时为空字符串，不影响缓存键稳定）
+	if section := a.PlanMode.SystemSection(); section != "" {
+		sb.WriteString(section)
+	}
 	if len(tools) == 0 {
 		sb.WriteString("（无）\n")
 	} else {
@@ -277,6 +292,9 @@ func (a *Agent) Run(task string) (string, error) {
 	if a.Tuner != nil {
 		a.Tuner.Reset()
 	}
+	if a.Guard != nil {
+		a.Guard.Reset()
+	}
 	q := lifecycle.NewQuery("cli")
 	runCtx := &HookContext{
 		RunID:     string(q.QueryID()),
@@ -289,6 +307,10 @@ func (a *Agent) Run(task string) (string, error) {
 	}
 	msgs = append(msgs, a.Initial...)
 	msgs = append(msgs, Message{Role: RoleUser, Content: task})
+	// 标记人类直接消息（用于 goal create/edit/pause/resume 权限校验）
+	if a.GoalService != nil {
+		a.GoalService.MarkHumanTurn()
+	}
 
 	step := 0
 	stepWarned := false // 步数预算预警只提醒一次
@@ -313,6 +335,13 @@ func (a *Agent) Run(task string) (string, error) {
 		if sm := a.drainSteer(); sm != nil {
 			a.log("%s", q.FormatLog("steer", "step=", fmt.Sprintf("%d", qc.Step), " content=", truncate(sm.content, 80)))
 			msgs = append(msgs, Message{Role: RoleUser, Content: "【用户快速纠正】" + sm.content})
+		}
+		// 后台任务完成通知：上一步后台任务已结束但模型尚未感知时，注入通知（对齐 dsh job 完成通知注入）
+		if a.Jobs != nil {
+			for _, note := range a.Jobs.DrainDone() {
+				a.log("%s", q.FormatLog("job_done_notice", "id=", note))
+				msgs = append(msgs, Message{Role: RoleUser, Content: "【后台任务完成】" + note})
+			}
 		}
 		if a.Aborted() {
 			q.Complete(errors.New("aborted by user"))
@@ -432,14 +461,7 @@ func (a *Agent) Run(task string) (string, error) {
 			step++
 			continue
 		}
-		if a.Tuner != nil && a.Tuner.RecordToolCall(req.Tool, req.Args) {
-			q.EndOperation("tool:" + req.Tool)
-			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-			msgs = append(msgs, Message{Role: RoleUser, Content: "⚠️ 检测到死循环（连续多次相同工具调用），任务已终止。"})
-			q.Complete(errors.New("dead loop detected"))
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
-			return "", errors.New("dead loop: " + req.Tool)
-		}
+		// 先执行工具（dsh 的 repeat-tool-reminder 也是 post-execute 观察语义）
 		out, err := a.Plugins.Call(req.Tool, req.Args)
 		q.EndOperation("tool:" + req.Tool)
 		tr := ToolResult{ToolName: req.Tool, Args: req.Args, Output: out}
@@ -448,6 +470,26 @@ func (a *Agent) Run(task string) (string, error) {
 			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Err: err}, a.logf)
 		}
 		b, _ := json.Marshal(tr)
+
+		// Guard 观察：记录此次调用后触发渐进提醒或终止（dsh semantics：observe-and-enrich, never veto, kill on max threshold exceed）
+		if a.Guard != nil {
+			if reminder, terminate := a.Guard.Observe(req.Tool, req.Args); terminate {
+				msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+				msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
+				msgs = append(msgs, Message{Role: RoleUser, Content: reminder + "\n⚠️ 任务因重复工具调用已终止。"})
+				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+				return "", fmt.Errorf("%w: tool=%s 连续重复 %d 次，任务终止", errors.New("loop guard terminated"), req.Tool, a.Guard.MaxObserved())
+			} else if reminder != "" {
+				// 渐进提醒，注入为追加用户消息（紧接工具结果之后，模型可据此改参数或停手）
+				msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+				msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
+				msgs = append(msgs, Message{Role: RoleUser, Content: reminder})
+				a.log("%s", q.FormatLog("guard_reminder", "step=", fmt.Sprintf("%d", qc.Step), "tool=", req.Tool, "cnt=", fmt.Sprintf("%d", a.Guard.Count())))
+				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+				step++
+				continue
+			}
+		}
 		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
 		msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult})
 		a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)

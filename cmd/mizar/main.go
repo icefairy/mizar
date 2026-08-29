@@ -23,10 +23,12 @@ import (
 	"mizar/internal/config"
 	"mizar/internal/context"
 	"mizar/internal/engine"
+	"mizar/internal/jobs"
 	"mizar/internal/llm"
 	"mizar/internal/lsp"
 	"mizar/internal/plugins"
 	"mizar/internal/prompts"
+	"mizar/internal/schedule"
 	"mizar/internal/server"
 	"mizar/internal/session"
 	"mizar/internal/skills"
@@ -288,7 +290,7 @@ func main() {
 	pm := plugins.NewManager(extAbs, host)
 	// 禁用工具（来自技能统计周报，用户确认后记录）——只影响工具注册表，不动 System prompt
 	pm.SetDisabledTools(stats.DisabledNames())
-	// 注册 pi 式内置工具（bash/grep/find/read/write/edit/ls/skill_manage）
+	// 注册 pi 式内置工具（bash/grep/find/read/write/edit/ls/skill_manage + dsh 复刻）
 	for _, t := range builtins.All(skAbs) {
 		pm.RegisterBuiltin(t)
 	}
@@ -383,6 +385,32 @@ func main() {
 	a.PluginDir = extAbs
 	// 默认启用弱模型宽容策略：死循环检测 + 解析失败降级 + LLM 故障重试
 	a.Tuner = agent.DefaultTuner()
+	// 后台任务注册表（bash run_in_background + job_* 工具共用）
+	a.Jobs = jobs.NewRegistry()
+	// 会话目标服务
+	goalSvc := agent.NewGoalService()
+	a.GoalService = goalSvc
+	// 注册后台任务工具（与 a.Jobs 同一 registry 实例，保证跨工具一致性）
+	for _, t := range builtins.JobTools(a.Jobs) {
+		pm.RegisterBuiltin(t)
+	}
+	// ask_user_question：TUI 模式下由 tui.go 设置回调；非 TUI 保持 nil（降级提示）
+	// 全局可访问的计划模式实例（供 builtins 工具引用）
+	agent.CurrentPlanMode = a.PlanMode
+	// 定时提醒注册表（投递回调：到期时打印到终端）
+	schedReg := schedule.NewRegistry(func(id, prompt string) {
+		log.Printf("[schedule] 提醒到期: %s — %s", id, prompt)
+		fmt.Printf("\n⏰ 【定时提醒】%s\n", prompt)
+	})
+	// 注册 goal + schedule 工具
+	for _, t := range builtins.GoalTools(goalSvc) {
+		pm.RegisterBuiltin(t)
+	}
+	for _, t := range builtins.ScheduleTools(schedReg) {
+		pm.RegisterBuiltin(t)
+	}
+	// 会话标题缓存
+	titleCache, _ := session.NewTitleCache(*sessDir)
 	// 从配置读取最大步数（0=默认 60）
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.MaxSteps > 0 {
 		a.MaxSteps = cfg.MaxSteps
@@ -653,6 +681,24 @@ func main() {
 		Run: func(args string) (string, error) {
 			a.Reset()
 			return "✓ 会话已重置（历史已清空）", nil
+		},
+	})
+	// 内置 /plan 命令：进入/退出计划模式（复刻 dsh plan-mode）
+	a.Commands.Register(agent.Command{
+		Name:        "plan",
+		Description: "进入/退出计划模式（/plan 进入 ｜ /plan <指令> 进入并附带规划指引 ｜ /plan off 直接退出）",
+		Run: func(args string) (string, error) {
+			arg := strings.TrimSpace(args)
+			if arg == "off" || arg == "关闭" || arg == "退出" {
+				a.PlanMode.Exit()
+				return "✓ 已退出计划模式。模型可直接执行任务。", nil
+			}
+			a.PlanMode.Enter(arg)
+			msg := "✓ 已进入计划模式。模型将先探索设计方案并通过 exit_plan_mode 提交计划供审批。"
+			if arg != "" && arg != "进入" && arg != "on" {
+				msg += fmt.Sprintf("\n规划指引：%s", arg)
+			}
+			return msg, nil
 		},
 	})
 	// 内置 /quit 命令：退出交互模式
@@ -1045,6 +1091,12 @@ func main() {
 		if *sessionID != "" {
 			st.Append(*sessionID, agent.Message{Role: agent.RoleUser, Content: *task})
 			st.Append(*sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+			// 首次会话：用首条 user 消息推导标题
+			if titleCache.Get(*sessionID) == "" {
+				if t := session.DeriveTitle([]agent.Message{{Role: agent.RoleUser, Content: *task}}); t != "" {
+					_ = titleCache.Set(*sessionID, t)
+				}
+			}
 			log.Printf("会话 %s 已保存", *sessionID)
 		}
 		return
@@ -1090,15 +1142,16 @@ func main() {
 	if *tui {
 		a.VerboseLog = nil
 	}
-	// 内置 /sessions 命令：列出当前路径下的所有会话
+	// 内置 /sessions 命令：列出当前路径下的所有会话（含标题）
 	a.Commands.Register(agent.Command{
 		Name:        "sessions",
-		Description: "列出当前路径下的所有会话 ID（短 ID 前 8 位）",
+		Description: "列出当前路径下的所有会话 ID（短 ID 前 8 位，含自动/用户标题）",
 		Run: func(args string) (string, error) {
 			ids := st.List()
 			if len(ids) == 0 {
 				return "（无会话）", nil
 			}
+			titles := titleCache.ListAll()
 			var sb strings.Builder
 			for _, id := range ids {
 				suffix := ""
@@ -1109,7 +1162,11 @@ func main() {
 				if len(id) > 8 {
 					short = id[:8]
 				}
-				fmt.Fprintf(&sb, "  %-12s%s\n", short, suffix)
+				title := titles[id]
+				if title == "" {
+					title = "(无标题)"
+				}
+				fmt.Fprintf(&sb, "  %-12s  %-40s%s\n", short, title, suffix)
 			}
 			fmt.Fprintf(&sb, "\n当前会话: %s\n", *sessionID)
 			fmt.Fprintf(&sb, "续接会话: /session <id> 或 mizar -session <id>\n")
@@ -1190,7 +1247,7 @@ func main() {
 		}
 	}
 	if *tui {
-		runTUI(a, st, *sessionID)
+		runTUI(a, st, *sessionID, titleCache)
 	} else {
 		interactive(a, st, *sessionID)
 	}

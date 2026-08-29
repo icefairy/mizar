@@ -105,6 +105,15 @@ type tuiModel struct {
 	spinnerIdx  atomic.Int32 // 当前动画帧下标
 	spinnerLine atomic.Int32 // 当前宣传语下标
 	spinnerSet  atomic.Int64 // 开始时间戳（UnixNano，用于显示已等待秒数）
+
+	// ask_user_question 支持：pending ask 队列（工具侧阻塞等待用户回答）
+	askMu     sync.Mutex
+	askPending *askPending // nil = 无待处理问题
+}
+
+type askPending struct {
+	questions string      // 原始 questions JSON
+	answerCh  chan string // 单发 channel，TUI 填入答案后关闭
 }
 
 // sgrColor 生成 tview 动态颜色标记：[color]text[::-]
@@ -420,6 +429,35 @@ func (m *tuiModel) startTask(input string) {
 	m.stats.RequestStartTime = time.Now()
 	m.addChatLine(chatLine{role: "user", content: input, ts: time.Now()})
 
+	// 设置 ask_user_question 回调：阻塞等待用户在聊天区回答（通过 askPending channel 传递）
+	m.askMu.Lock()
+	m.askPending = nil
+	m.askMu.Unlock()
+	m.agent.AskUser = func(questionsJSON string) (string, error) {
+		ch := make(chan string, 1)
+		m.askMu.Lock()
+		m.askPending = &askPending{questions: questionsJSON, answerCh: ch}
+		m.askMu.Unlock()
+		// 通知事件循环渲染问题提示（QueueUpdateDraw 安全）
+		m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
+		select {
+		case ans := <-ch:
+			m.askMu.Lock()
+			if m.askPending != nil && m.askPending.answerCh == ch {
+				m.askPending = nil
+			}
+			m.askMu.Unlock()
+			return ans, nil
+		case <-time.After(5 * time.Minute):
+			m.askMu.Lock()
+			if m.askPending != nil && m.askPending.answerCh == ch {
+				m.askPending = nil
+			}
+			m.askMu.Unlock()
+			return "", fmt.Errorf("ask_user timed out after 5 minutes")
+		}
+	}
+
 	go func() {
 		reply, err := m.agent.Run(input)
 
@@ -501,7 +539,7 @@ func (m *tuiModel) flushStream() {
 // 构造
 // =============================================================================
 
-func newTuiModel(a *agent.Agent, st *session.Store, sid string) *tuiModel {
+func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *session.TitleCache) *tuiModel {
 	m := &tuiModel{
 		agent:     a,
 		store:     st,
@@ -767,6 +805,17 @@ func (m *tuiModel) submitInput(s string) {
 	if s == "" {
 		return
 	}
+	// 若当前有 ask_user_question 等待回答，将输入作为答案（优先于正常任务流）
+	m.askMu.Lock()
+	pending := m.askPending
+	m.askMu.Unlock()
+	if pending != nil {
+		m.app.QueueUpdateDraw(func() {
+			m.addChatLine(chatLine{role: "user", content: "【回答问题】" + s, ts: time.Now()})
+		})
+		pending.answerCh <- s
+		return
+	}
 
 	if strings.HasPrefix(s, "/") {
 		// 异步执行命令，避免网络IO（如 /model）阻塞主线程
@@ -829,8 +878,8 @@ func truncateArgs(s string) string {
 	return s[:77] + "..."
 }
 
-func runTUI(a *agent.Agent, st *session.Store, sessionID string) {
-	m := newTuiModel(a, st, sessionID)
+func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *session.TitleCache) {
+	m := newTuiModel(a, st, sessionID, titleCache)
 	if err := m.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI 退出: %v，回退经典模式\n", err)
 		fmt.Println(banner())

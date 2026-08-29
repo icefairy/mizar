@@ -52,13 +52,13 @@
 - 执行中消息排队，Alt+↑ 取回，PgUp/PgDn 滚动历史
 - 流式输出 + 等待进度指示（LLM SSE → Agent 流式回调 → TUI/Server 增量渲染）
 
-### 2. 内置工具（8 个）
-`bash` / `grep` / `find` / `read` / `write` / `edit` / `ls` / `skill_manage`，支持：
-- 文件模糊搜索（`files_fuzzy`）
-- 大文件有界分段读取（`fs_read_range`，单次 4MB）
-- 文档格式解析：PDF、DOCX、XLSX
-- Bash 详细截断警告
-- 原生 OpenAI function calling 工具调用
+### 2. 内置工具（11+ 个）
+基础工具 `bash` / `grep` / `find` / `read` / `write` / `edit` / `ls` / `skill_manage`，+ dsh 复刻新增：
+- **`todo_write`**：结构化任务清单（pending / in_progress / completed），每次调用替换整个清单，单次 in_progress 约束防弱模型混乱
+- **`ask_user_question`**：向用户提问并等待回答（TUI 模式弹出输入框；Server/CLI 模式降级为提示自主决策）
+- **`skill`**：按名加载技能全文（渐进式披露，避免系统提示过长）
+- **`job_list` / `job_output` / `job_kill`**：后台任务管理（bash 支持 `run_in_background`，任务完成后自动注入通知）
+其他能力：文件模糊搜索（`files_fuzzy`）、大文件有界分段读取（`fs_read_range`，单次 4MB）、文档格式解析（PDF/DOCX/XLSX）、Bash 详细截断警告、原生 OpenAI function calling 工具调用。
 
 ### 3. 宿主函数（Host Functions）
 通过 Go 暴露给插件使用的内置能力：
@@ -117,10 +117,22 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 - WebSocket 客户端
 - Panic 隔离 + 执行超时，提升稳定性
 
-### 10. 弱模型宽容循环（WeakModelTuner）
-针对较弱模型优化 Agent 循环，提升任务完成率。
+### 10. 循环卫生守卫（Loop Guard）
+复刻 deepseek-harness 的 **repeat-tool-reminder**：同一工具 + 规范化参数（JSON deep key-sort）连续重复时，在阈值 [3, 5, 8] 处渐进注入提醒（gentle → detailed，点名工具/次数/参数预览），最后才终止任务。相比原 WeakModelTuner 直接 kill 的死循环检测，更能给弱模型纠偏机会，提高任务完成率。
 
-### 11. 100 场景验证框架
+### 11. 会话标题（Session Titles）
+会话列表 `/sessions` 展示自动推导标题（首条用户消息截断 60 字符）。标题持久化到 `~/.mizar/sessions/<scope>/titles.json`，支持用户重命名钉住。
+
+### 12. 计划模式（Plan Mode）
+复刻 deepseek-harness 的 plan-mode：`/plan` 进入计划模式，模型先探索设计方案并通过 `exit_plan_mode` 提交计划，用户审批后继续执行；`/plan off` 直接退出。系统提示词中注入规划引导语（可自定义），TUI 模式下弹出审批界面。
+
+### 13. 会话目标（Goal）
+复刻 deepseek-harness 的 goal 工具：`get_goal`/`create_goal`/`update_goal`（edit/pause/resume/complete/blocked）。create/edit/pause/resume 需人类直接消息权限；complete/blocked 可由模型自动报告（blocked 需满足连续阈值）。适用于长期多步骤任务的目标管理。
+
+### 14. 定时提醒（Schedule）
+复刻 deepseek-harness 的 schedule：`schedule_create`/`schedule_list`/`schedule_delete`。支持三种模式：`after <n>秒`（延迟提醒）、`at <RFC3339>`（绝对时间）、`every <n>秒`（固定间隔，最小 5 分钟）。到期后以终端输出 + 日志方式通知。
+
+### 15. 100 场景验证框架
 开发 70 场景 + 运维 30 场景，支持 task / interactive / rpc 三种模式，全量日志 + Pi 对比测试。
 
 ---
@@ -234,7 +246,14 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 | 离线部署 | ❌ | ✅ |
 | 会话记忆 | 全局 JSONL | Path-Scoped JSONL |
 | LSP | 内置 | 客户端 + 服务器双模式 |
-| 弱模型优化 | — | WeakModelTuner |
+| 循环卫生 | — | RepeatGuard（渐进提醒，复刻 dsh） |
+| 会话标题 | 自动推导 | 首条用户消息 fallback |
+| ask_user | — | TUI 模式支持暂停等回答 |
+| 后台任务 | — | job_list/job_output/job_kill |
+| todo_write | — | 结构化任务清单 |
+| 计划模式 | /plan + exit_plan_mode | /plan + exit_plan_mode（TUI 审批） |
+| 会话目标 | create/get/update_goal | get_goal/create_goal/update_goal（权限约束） |
+| 定时提醒 | schedule_create/list/delete | schedule_create/list/delete（after/at/every） |
 | 验证框架 | — | 100 场景验证 |
 
 完整对比分析见 [docs/pi-comparison.md](docs/pi-comparison.md)。

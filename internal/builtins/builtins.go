@@ -25,7 +25,7 @@ import (
 	"mizar/internal/plugins"
 )
 
-// All 返回全部内置工具。skillsDir 为技能目录（skill_manage 用）。
+// All 返回全部内置工具。skillsDir 为技能目录（skill_manage / skill 用）。
 func All(skillsDir string) []plugins.Tool {
 	return []plugins.Tool{
 		toolBash(),
@@ -37,6 +37,10 @@ func All(skillsDir string) []plugins.Tool {
 		toolLS(),
 		toolRepoMap(),
 		skillManage(skillsDir),
+		toolTodoWrite(),
+		toolAskUser(),
+		toolSkill(skillsDir),
+		toolExitPlanMode(),
 	}
 }
 

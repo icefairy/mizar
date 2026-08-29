@@ -618,7 +618,111 @@ export function rpc_notify(params) {
 
 **结论**：Go 是 Rust 的 ~10 倍体积（静态链接完整运行时），但 5~20M 在现代机器无体感；Go 是 Bun 的 **1/5**（后者要扛完整 JS 引擎）。Mizar 的 19M 主要来自 goja（JS 引擎）+ esbuild（TS 编译器）——换取插件系统零依赖，对"个人用、单二进制分发"定位正确。
 
-## 15. 参考
+## 15. 深度复刻 deepseek-harness（dsh）的优点
+
+2026-08-28 系统性对比 [@/data/codes/deepseek-harness/] 与 mizar，评估可复刻的产品级能力。dsh 是 DeepSeek AI 的 TypeScript monorepo agent harness（53+ 包，Cordis 插件架构），mizar 是 Go 单二进制 agent 框架——两者定位不同但核心 agent loop 能力可借鉴。
+
+### 15.1 对比结论
+
+| dsh 能力 | mizar 现状 | 是否复刻 | 理由 |
+|---|---|---|---|
+| Cordis 一切皆插件 / profile / bundle | 三层扩展（技能/插件/MCP） | ❌ | 架构哲学不同；mizar 定位极简单二进制 |
+| Web UI / SDK / ACP | 无 | ❌ | 超出范围 |
+| **repeat-tool-reminder（循环卫生守卫）** | WeakModelTuner 直接 kill | ✅ | dsh 渐进提醒 [3,5,8] + JSON 参数规范化；比直接 kill 更宽容 |
+| **todo_write 工具** | 无 | ✅ | 结构化任务清单；session-owned；UI checklist 渲染 |
+| **job_* 后台任务 + bash run_in_background** | bash 全同步 | ✅ | jobs registry + 完成通知自动注入 |
+| **ask_user_question 工具** | 无 | ✅ | TUI 模式弹出等回答；Server 降级为提示 |
+| **skill 按需加载工具** | 索引注入 + read 读文件 | ✅ | 专用 skill 工具一次返回全文，更直接 |
+| **会话标题** | UUID 无标题 | ✅ | 首条用户消息 fallback；持久化 titles.json |
+| plan mode / goal / schedule | ✅ 已全部复刻 |
+| - plan mode | exit_plan_mode 工具 + /plan 命令 + TUI 审批界面 |
+| - goal | get_goal / create_goal / update_goal（人类权限约束 + 自阻塞阈值） |
+| - schedule | schedule_create / list / delete（after / at / every 三种模式） |
+| subagent / workflow engine | 无 | ⏳ | 后续迭代（需引入并发调度抽象） |
+| session fork / telemetry | 无 | ⏳ | 后续迭代 |
+| 100% 覆盖率门禁 / 快照测试 | scenarios 框架部分覆盖 | 📝 | 工程流程借鉴；不改变产品 |
+
+### 15.2 已复刻实现的细节
+
+#### 15.2.1 Loop Guard（循环卫生守卫）
+
+- 位置：`internal/agent/guard.go`
+- 机制：JSON deep key-sort 规范化参数后比较（对齐 dsh `canonicalize`/`sortJsonValue`）
+- 阈值默认 [3, 5, 8]：首个发温和提醒，后续发详细提醒（点名工具/次数/参数预览截断 500 字符）
+- 超过最高阈值仍重复 → 终止任务
+- 集成到 `loop.go`：在工具执行后观察（dsh post-execute semantics），而非执行前拦截
+- 向后兼容：保留 `WeakModelTuner.RecordToolCall` API（直接测试仍在通过）
+
+#### 15.2.2 Todo Write 工具
+
+- 位置：`internal/builtins/todo.go`
+- 参数：`{todos: [{content, status}]}`；校验非空、去重、单 in_progress 约束
+- 行为：whole-list replace（last-write-wins）
+- 状态：进程内全局 registry（mizar 当前单 session 场景足够）
+- 渲染：`RenderTodos()` 返回格式化 checklist（▶ in_progress / ✓ completed / ○ pending）
+
+#### 15.2.3 后台任务（Jobs）
+
+- 位置：`internal/jobs/` + `internal/builtins/job_tools.go`
+- Registry：进程内 map，id 形如 `<kind>-N`（predictable）
+- 工具：`job_list` / `job_output`（支持 wait + timeout_ms 阻塞轮询） / `job_kill`
+- 完成通知：`Agent.Jobs.DrainDone()` 每步开始时由 loop 消费并注入 user 消息
+- bash 的 `run_in_background`：通过 `Agent.RunInBackground` 字段注入（CLI/Server 模式可设置，TUI 模式默认启用）
+
+#### 15.2.4 Ask User Question
+
+- 位置：`internal/builtins/ask.go` + `cmd/mizar/tui.go`
+- TUI 模式：`Agent.AskUser` 回调阻塞等待用户在输入框提交答案（5 分钟超时）
+- Server/CLI 模式：`AskUser == nil` → 工具返回降级提示“无交互界面，请基于已有信息自主决策”
+- 答案格式：`{answers: [{id, value}]}` 或 `{answers: [{id, values}]}`（multi_select）
+
+#### 15.2.5 Skill 按需加载工具
+
+- 位置：`internal/builtins/skill_tool.go`
+- 行为：`skill <name>` 从技能目录查找并一次性返回完整正文（[技能:x] 格式）
+- 与索引注入互补：system prompt 仍只注入 name+description（缓存友好），模型需要时按需调用 skill 工具
+
+#### 15.2.6 会话标题
+
+- 位置：`internal/session/title.go`
+- 推导：取首条 RoleUser 消息，去换行，截断 60 字符 + `…`
+- 持久化：`titles.json`（每个 session store 根目录一份）
+- `/sessions` 命令展示标题列
+
+### 15.3 架构决策
+
+- **无 import cycle**：jobs 包独立于 agent/builtins，builtins 不 import agent（通过参数传递 jobs registry）
+- **最小侵入**：所有新功能以插件式工具形式注册，不修改现有工具行为
+- **向后兼容**：WeakModelTuner 保留；Guard 默认开启（NewRepeatGuard 在 New() 中初始化）
+- **降级策略**：非 TUI 模式下 ask_user_question 优雅降级，不停止 agent
+
+#### 15.2.7 Plan Mode（计划模式）
+
+- 位置：`internal/agent/plan.go` + `internal/builtins/plan_tool.go`
+- 命令：`/plan [guidance]` 进入（可附带规划指引）；`/plan off` 退出
+- 工具：`exit_plan_mode` —— 模型调用时弹出用户审批界面（TUI 模式）
+- 系统提示词：计划模式激活时在 SystemPrompt 末尾注入 guidance 文本块
+- 审批交互：通过 `agentAskPlanUser` 回调阻塞等待用户选择（Approve / Keep planning）
+- 降级：无 TUI 时直接批准（plan mode 在 CLI 模式等价于静默通过）
+
+#### 15.2.8 Goal（会话目标）
+
+- 位置：`internal/agent/goal.go` + `internal/builtins/goal_tools.go`
+- 工具：`get_goal` / `create_goal` / `update_goal`
+- 生命周期：pending → in_progress → completed / blocked / paused
+- 权限约束：create/edit/pause/resume 需人类直接消息（`MarkHumanTurn` 标记）；complete/blocked 可由模型自动报告
+- 自阻塞阈值：默认 3 轮连续同条件才允许 self-block（防止误报）
+- 单会话单目标简化版（dsh 支持多目标，mizar 定位极简故只保留一个）
+
+#### 15.2.9 Schedule（定时提醒）
+
+- 位置：`internal/schedule/schedule.go` + `internal/builtins/schedule_tools.go`
+- 工具：`schedule_create` / `schedule_list` / `schedule_delete`
+- 三种模式：`after <n>秒`（延迟）/ `at <RFC3339>`（绝对时间）/ `every <n>秒`（固定间隔，最小 300 秒）
+- 投递：后台 ticker 每 10 秒检查到期项，投递回调由 main.go 设置（打印到终端 + 日志）
+- 持久化：提醒记录在内存中，重启后丢失（dsh 通过 session log 持久化；mizar 简化为进程内）
+
+## 17. 参考
 
 - [Pi Agent](https://github.com/mariozechner/pi) —— 极简 + 自举的灵感，compaction/loop/RPC(steer) 设计参考
 - [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust) —— Rust 移植，extensions_js.rs 的插件系统参考
