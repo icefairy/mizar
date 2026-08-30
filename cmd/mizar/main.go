@@ -446,7 +446,7 @@ func main() {
 	// 会话标题缓存
 	titleCache, _ := session.NewTitleCache(*sessDir)
 	// 从配置读取最大步数（0=默认 60）
-	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.MaxSteps > 0 {
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.MaxSteps != 0 {
 		a.MaxSteps = cfg.MaxSteps
 	}
 	a.System = `你是开阳(Mizar) Agent，一个极简自举的智能体。你可以调用工具完成任务，工具出错时尝试修复或换一种方式。请用简洁的中文回答。
@@ -1042,11 +1042,9 @@ func main() {
 			if args == "" {
 				// 查看当前生效配置（内存中的 a.MaxSteps 优先，因为可能被 Run 兜底改写）
 				ms := a.MaxSteps
-				if ms <= 0 {
-					ms = 30
-				}
-				return fmt.Sprintf(`当前运行配置:
-  最大步数 max_steps: %d
+				if ms < 0 {
+					return fmt.Sprintf(`当前运行配置:
+  最大步数 max_steps: -1 (无限)
   上下文窗口 context_window: %d (token, 配置:%d)
   思考等级 thinking_level: %s
   模型 model: %s
@@ -1056,8 +1054,8 @@ func main() {
 			fields := strings.Fields(args)
 			if len(fields) == 2 && fields[0] == "max_steps" {
 				n, err := strconv.Atoi(fields[1])
-				if err != nil || n < 1 || n > 1000 {
-					return "", fmt.Errorf("max_steps 必须是 1-1000 的整数")
+				if err != nil || (n < 1 && n != -1) || n > 1000 {
+					return "", fmt.Errorf("max_steps 必须是 -1(无限) 或 1-1000 的整数")
 				}
 				a.MaxSteps = n
 				cfg.MaxSteps = n
@@ -1066,7 +1064,7 @@ func main() {
 				}
 				return fmt.Sprintf("✓ 最大步数已设置为 %d，已持久化到 %s", n, config.DefaultPath()), nil
 			}
-			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps ＜数字1-1000＞")
+			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps 30 或 /config max_steps -1(无限)")
 		},
 	})
 	// 内置 /compact 命令：手动触发上下文压缩

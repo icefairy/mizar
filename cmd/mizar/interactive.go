@@ -42,11 +42,21 @@ func banner() string {
 }
 
 // interactive 运行交互式对话（readline 支持：退格删除 / 历史上下键 / Tab 补全）。
+// 退出时会打印会话 ID，告知用户如何续接。
 // 多行粘贴：快速连续输入（<300ms）自动合并为多行文本；输入 /send 手动提交当前 buffer。
 func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	rl := liner.NewLiner()
 	defer rl.Close()
 	rl.SetCtrlCAborts(true)
+
+	// 退出提示
+	if sessionID != "" {
+		short := sessionID
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+	}
 
 	// 渲染已加载的历史消息
 	for _, msg := range a.Initial {
