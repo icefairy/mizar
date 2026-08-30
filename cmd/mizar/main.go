@@ -1276,7 +1276,8 @@ nil
 				if found.Timeout > 0 {
 					timeout = time.Duration(found.Timeout) * time.Second
 				}
-				ctxpkg.WithTimeout(ctxpkg.Background(), timeout)
+				_, cancel := ctxpkg.WithTimeout(ctxpkg.Background(), timeout)
+				defer cancel()
 				reg := engine.NewMCPRegistry([]engine.MCPServerConf{*found})
 				defer reg.Close()
 				fn := reg.CallFn()

@@ -128,7 +128,7 @@ func ExtractDOCX(path string) (string, error) {
 						Value   string   `xml:",chardata"`
 					} `xml:"w:t"`
 				} `xml:"w:r"`
-			} `xml:"w:body > w:p"`
+			} `xml:"w:p"`
 		} `xml:"w:body"`
 	}
 	if err := xml.NewDecoder(documentXML).Decode(&doc); err != nil {
