@@ -599,27 +599,86 @@ func parseCallJSON(text string) (*callRequest, error) {
 	return &req, nil
 }
 
-// tryFixJSON 尝试修复常见的 JSON 格式错误（如缺失闭合括号）。
-// 返回修复后的文本，若无法修复则返回原样。
+// tryFixJSON 尝试修复常见的 JSON 格式错误。
+// 策略：
+//  1. 补全缺失的闭合括号
+//  2. 修复内部未转义的引号（如 args 值中的 \" 应为 \\\"）
+//  3. 移除多余的尾部字符
+// 返回修复后的文本，若所有尝试均失败则返回原样。
 func tryFixJSON(s string) string {
-	s = strings.TrimSpace(s)
-	// 情况1：末尾缺 } —— 检查是否以 \"} 结尾（未转义的引号后缺括号）
+	original := s
+	// 策略 1：补全缺失的闭合括号
 	if !strings.HasSuffix(s, "}") && strings.HasSuffix(s, "\"") {
-		return s + "}"
-	}
-	// 情况2：内层 JSON 字符串未正确闭合（如 args 值以 \"} 结尾但外层也缺 }）
-	if strings.Count(s, "{") > strings.Count(s, "}") {
-		// 尝试在末尾追加足够多的 } 使平衡
-		for strings.Count(s, "{") > strings.Count(s, "}") {
-			s += "}"
+		if fixed := s + "}"; isValidJSON(fixed) {
+			return fixed
 		}
-		// 验证是否有效
-		var dummy map[string]any
-		if json.Unmarshal([]byte(s), &dummy) == nil {
+	}
+	// 策略 2：花括号不平衡
+	for strings.Count(s, "{") > strings.Count(s, "}") {
+		s += "}"
+		if isValidJSON(s) {
 			return s
 		}
 	}
-	return s
+	// 策略 3：修复内部未转义引号
+	// 找到 args 值的模式："args":"{...}" 内部的未转义引号
+	// 简单启发式：在 {"command": 后面的引号前加转义
+	if idx := strings.Index(s, "\"args\":\""); idx >= 0 {
+		// 找到 args 值的起始位置
+		argsStart := idx + len("\"args\":\"")
+		argsEnd := strings.LastIndex(s[argsStart:], "\"")
+		if argsEnd > 0 {
+			argsContent := s[argsStart : argsStart+argsEnd]
+			// 尝试在 argsContent 内部的引号前加转义
+			fixedArgs := fixInternalQuotes(argsContent)
+			if fixedArgs != argsContent {
+				fixed := s[:argsStart] + fixedArgs + s[argsStart+argsEnd:]
+				if isValidJSON(fixed) {
+					return fixed
+				}
+			}
+		}
+	}
+	// 策略 4：移除尾部多余内容（如 XML 标签、代码围栏）
+	if lastBrace := strings.LastIndex(s, "}"); lastBrace > 0 {
+		fixed := s[:lastBrace+1]
+		if isValidJSON(fixed) {
+			return fixed
+		}
+	}
+	return original
+}
+
+// fixInternalQuotes 尝试修复 JSON 字符串值内部的未转义引号。
+// 简单启发式：将非转义的 \" 替换为 \\\"（但保留已经是 \\\" 的）
+func fixInternalQuotes(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) {
+			// 已经有转义，原样输出
+			result.WriteByte(s[i])
+			i++
+			if i < len(s) {
+				result.WriteByte(s[i])
+				i++
+			}
+		} else if s[i] == '"' {
+			// 未转义的引号，添加转义
+			result.WriteString("\\\"")
+			i++
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return result.String()
+}
+
+func isValidJSON(s string) bool {
+	var dummy map[string]any
+	err := json.Unmarshal([]byte(s), &dummy)
+	return err == nil
 }
 
 // ExtractActionJSON 从任意文本中提取第一个包含 action 字段的 JSON 对象（agent 控制协议）。
