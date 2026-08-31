@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -239,16 +240,21 @@ func (a *Agent) SystemPrompt() string {
 	}
 	sb.WriteString(`
 ## 回复格式
-你的每轮回复必须是以下两种 JSON 之一，不要输出其他文字：
-- 调用工具：{"action":"tool","tool":"工具名","args":"参数JSON字符串"}
-- 回答用户或任务完成：{"action":"reply","text":"回答内容"}
+你的每轮回复必须是以下两种 XML 标签之一：
+- 调用工具：<tool name="工具名">参数 JSON</tool>
+- 回答用户或任务完成：<reply>回答内容</reply>
 
 示例：
 用户: 你好
-你: {"action":"reply","text":"你好！有什么可以帮你的？"}
+你: <reply>你好！有什么可以帮你的？</reply>
 
 用户: 列出当前目录
-你: {"action":"tool","tool":"ls","args":"{}"}
+你: <tool name="ls">{"path": "."}</tool>
+
+注意：
+1. 只输出上述标签，不要输出其他文字
+2. tool 标签内的参数是标准 JSON 字符串
+3. reply 标签内是纯文本回答
 `)
 
 	// 插件目录信息（引导模型自己创建/扩展插件）
@@ -574,29 +580,65 @@ func (a *Agent) log(format string, args ...any) {
 	}
 }
 
-// parseCallJSON 从模型回复中提取 action 控制 JSON。容忍 ```json 围栏、前后缀文本、
-// 以及文本中夹带的花括号内容（如 API 路径 {namespace}）。
-// 当 JSON 格式不规范时（如缺闭合括号、转义错误），尝试自动修复并提供详细错误。
+// parseCallJSON 从模型回复中提取 action 控制指令。
+// 支持三种格式：
+// 1. 纯 JSON: {"action":"tool","tool":"bash","args":"{}"}
+// 2. XML 包裹: <tool name="bash">{"command": "ls"}</tool>
+// 3. 混合文本: 先解释...\n<tool name="ls">{"path": "."}</tool>
+// 当格式不规范时，尝试自动修复并提供详细错误。
 func parseCallJSON(text string) (*callRequest, error) {
+	// 优先尝试 XML 格式解析
+	req, ok := extractActionXML(text)
+	if ok {
+		return req, nil
+	}
+	// 回退到 JSON 格式解析
 	extracted, ok := ExtractActionJSON(text)
 	if !ok {
-		return nil, fmt.Errorf("无法识别的控制指令：未找到含 action 字段的合法 JSON 对象\n请输出格式如：{\"action\":\"tool\",\"tool\":\"工具名\",\"args\":\"参数JSON\"} 或 {\"action\":\"reply\",\"text\":\"回复内容\"}")
+		return nil, fmt.Errorf("无法识别的控制指令：未找到含 action 字段的合法 JSON 对象\n请输出格式如：<tool name=\"工具名\">参数 JSON</tool> 或 <reply>回答内容</reply>")
 	}
-	var req callRequest
-	if err := json.Unmarshal([]byte(extracted), &req); err != nil {
-		// 尝试常见修复：补全缺失的闭合括号
+	var reqJSON callRequest
+	if err := json.Unmarshal([]byte(extracted), &reqJSON); err != nil {
 		fixed := tryFixJSON(extracted)
 		if fixed != extracted {
-			if err2 := json.Unmarshal([]byte(fixed), &req); err2 == nil {
-				return &req, nil
+			if err2 := json.Unmarshal([]byte(fixed), &reqJSON); err2 == nil {
+				return &reqJSON, nil
 			}
 		}
-		return nil, fmt.Errorf("JSON 格式错误：%v\n原始输出片段：%s\n请确保 JSON 完整闭合，内部引号需双重转义（如 \\\"）", err, truncate(extracted, 80))
+		return nil, fmt.Errorf("JSON 格式错误：%v\n原始输出片段：%s\n请使用 XML 格式或确保 JSON 完整闭合", err, truncate(extracted, 80))
 	}
-	if req.Action == "" {
-		return nil, fmt.Errorf("缺少 action 字段：提取到的 JSON 没有 action 字段\n请输出：{\"action\":\"tool\"...} 或 {\"action\":\"reply\"...}")
+	if reqJSON.Action == "" {
+		return nil, fmt.Errorf("缺少 action 字段：提取到的 JSON 没有 action 字段\n请使用 XML 格式：<tool name=\"工具名\">参数 JSON</tool> 或 <reply>回答内容</reply>")
 	}
-	return &req, nil
+	return &reqJSON, nil
+}
+
+// extractActionXML 从 XML 标签格式中提取控制指令
+func extractActionXML(text string) (*callRequest, bool) {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return nil, false
+	}
+	// 模式1: <tool name="xxx">JSON</tool>
+	reTool := regexp.MustCompile(`<tool\s+name="([^"]+)">([^<]+)</tool>`)
+	if matches := reTool.FindStringSubmatch(s); matches != nil {
+		req := &callRequest{
+			Action: "tool",
+			Tool:   matches[1],
+			Args:   strings.TrimSpace(matches[2]),
+		}
+		return req, true
+	}
+	// 模式2: <reply>文本</reply>
+	reReply := regexp.MustCompile(`<reply>([^<]+)</reply>`)
+	if matches := reReply.FindStringSubmatch(s); matches != nil {
+		req := &callRequest{
+			Action: "reply",
+			Text:   strings.TrimSpace(matches[1]),
+		}
+		return req, true
+	}
+	return nil, false
 }
 
 // tryFixJSON 尝试修复常见的 JSON 格式错误。

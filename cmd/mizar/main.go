@@ -1373,6 +1373,11 @@ func main() {
 				}
 			}
 			log.Printf("会话 %s 已保存", *sessionID)
+			short := *sessionID
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, *sessionID)
 		}
 		return
 	}
