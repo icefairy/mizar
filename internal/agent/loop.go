@@ -636,7 +636,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 	}
 	
 	// 模式2: 混合格式 <tool name="xxx">\n<arg_key>key</arg_key>\n<arg_value>value</arg_value>\n</tool>
-	reMixed := regexp.MustCompile(`<tool\s+name="([^"]+)"[^>]*>(.*?)</tool>`)
+	reMixed := regexp.MustCompile(`<tool\s+name="([^"]+)"[^>]*>([\s\S]*)</tool>`)
 	if matches := reMixed.FindStringSubmatch(s); matches != nil {
 		toolName := matches[1]
 		body := matches[2]
@@ -656,7 +656,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 	}
 	
 	// 模式2b: 带引号的 "tool 格式 (模型有时输出 "tool 而不是 <tool)
-	reMixed2 := regexp.MustCompile(`"?tool\s+name="([^"]+)"[^>]*>(.*?)</tool>`)
+	reMixed2 := regexp.MustCompile(`"tool\s+name="([^"]+)"[^>]*>([\s\S]*)</tool>`)
 	if matches := reMixed2.FindStringSubmatch(s); matches != nil {
 		toolName := matches[1]
 		body := matches[2]
@@ -679,7 +679,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 	}
 	
 	// 模式3: 标准 reply
-	reReply := regexp.MustCompile(`<reply>([^<]+)</reply>`)
+	reReply := regexp.MustCompile(`<reply>([\s\S]+)</reply>`)
 	if matches := reReply.FindStringSubmatch(s); matches != nil {
 		req := &callRequest{
 			Action: "reply",
