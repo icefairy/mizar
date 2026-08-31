@@ -123,6 +123,14 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		line, err := rl.Prompt(">")
 		if err != nil {
 			fmt.Println()
+			// 退出时显示续接提示
+			if sessionID != "" {
+				short := sessionID
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				fmt.Printf("会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+			}
 			return // EOF / Ctrl-C
 		}
 		now := time.Now()
@@ -220,13 +228,5 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 			}
 			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
-	}
-	// 退出时显示续接提示
-	if sessionID != "" {
-		short := sessionID
-		if len(short) > 8 {
-			short = short[:8]
-		}
-		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
 	}
 }
