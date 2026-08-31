@@ -619,7 +619,12 @@ func extractActionXML(text string) (*callRequest, bool) {
 	if s == "" {
 		return nil, false
 	}
-	// 模式1: <tool name="xxx">JSON</tool>
+	// 移除开头的 { (模型有时会输出 )
+	if strings.HasPrefix(s, "{") {
+		s = s[1:]
+	}
+	
+	// 模式1: 标准 XML <tool name="xxx">JSON</tool>
 	reTool := regexp.MustCompile(`<tool\s+name="([^"]+)">([^<]+)</tool>`)
 	if matches := reTool.FindStringSubmatch(s); matches != nil {
 		req := &callRequest{
@@ -629,7 +634,51 @@ func extractActionXML(text string) (*callRequest, bool) {
 		}
 		return req, true
 	}
-	// 模式2: <reply>文本</reply>
+	
+	// 模式2: 混合格式 <tool name="xxx">\n<arg_key>key</arg_key>\n<arg_value>value</arg_value>\n</tool>
+	reMixed := regexp.MustCompile(`<tool\s+name="([^"]+)"[^>]*>(.*?)</tool>`)
+	if matches := reMixed.FindStringSubmatch(s); matches != nil {
+		toolName := matches[1]
+		body := matches[2]
+		
+		// 解析 arg_key/arg_value 对
+		argsMap := make(map[string]string)
+		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([^<]*)</arg_value>`)
+		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
+			argsMap[m[1]] = m[2]
+		}
+		
+		// 构建 args JSON
+		if len(argsMap) > 0 {
+			argsJSON, _ := json.Marshal(argsMap)
+			return &callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)}, true
+		}
+	}
+	
+	// 模式2b: 带引号的 "tool 格式 (模型有时输出 "tool 而不是 <tool)
+	reMixed2 := regexp.MustCompile(`"?tool\s+name="([^"]+)"[^>]*>(.*?)</tool>`)
+	if matches := reMixed2.FindStringSubmatch(s); matches != nil {
+		toolName := matches[1]
+		body := matches[2]
+		
+		// 解析 arg_key/arg_value 对
+		argsMap := make(map[string]string)
+		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([^<]*)</arg_value>`)
+		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
+			argsMap[m[1]] = m[2]
+		}
+		
+		// 如果没有 arg_key/arg_value，直接使用 body 作为 args
+		if len(argsMap) == 0 {
+			return &callRequest{Action: "tool", Tool: toolName, Args: strings.TrimSpace(body)}, true
+		}
+		
+		// 构建 args JSON
+		argsJSON, _ := json.Marshal(argsMap)
+		return &callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)}, true
+	}
+	
+	// 模式3: 标准 reply
 	reReply := regexp.MustCompile(`<reply>([^<]+)</reply>`)
 	if matches := reReply.FindStringSubmatch(s); matches != nil {
 		req := &callRequest{
@@ -638,6 +687,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 		}
 		return req, true
 	}
+	
 	return nil, false
 }
 
