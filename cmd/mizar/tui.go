@@ -12,6 +12,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"github.com/charmbracelet/glamour"
 
 	"mizar/internal/agent"
 	"mizar/internal/config"
@@ -75,6 +76,7 @@ type tuiModel struct {
 	stats          tuiStats
 	userColor      string // 用户消息颜色（默认 white）
 	aiColor        string // AI 回复颜色（默认 green）
+	renderer     *glamour.TermRenderer // Markdown 渲染器
 	loading        bool
 	queue          []string // 排队的待发送消息（LIFO）
 	queueVisible   bool     // queueView 当前是否在 flex 中可见
@@ -151,7 +153,17 @@ func (m *tuiModel) renderAllDirect() {
 			sb.WriteString(sgrColor(m.userColor, fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
 		case "bot":
 			sb.WriteString(sgrColor(m.aiColor, fmt.Sprintf("▲ [%s]", t)) + "\n")
-			sb.WriteString(sgrColor(m.aiColor, l.content) + "\n\n")
+			// 使用 glamour 渲染 Markdown（处理 \n 换行、列表、代码块等）
+			if m.renderer != nil {
+				rendered, err := m.renderer.Render(l.content)
+				if err == nil && rendered != "" {
+					sb.WriteString(sgrColor(m.aiColor, rendered) + "\n\n")
+				} else {
+					sb.WriteString(sgrColor(m.aiColor, l.content) + "\n\n")
+				}
+			} else {
+				sb.WriteString(sgrColor(m.aiColor, l.content) + "\n\n")
+			}
 		case "err":
 			sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, l.content)) + "\n")
 		case "tool":
@@ -598,6 +610,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			{role: "system", content: banner(), ts: time.Now()},
 		},
 		stats: tuiStats{ModelName: a.Model()},
+		renderer: func() *glamour.TermRenderer {
+			r, _ := glamour.NewTermRenderer(
+				glamour.WithAutoStyle(),
+				glamour.WithWordWrap(80),
+			)
+			return r
+		}(),
 	}
 	// 从配置加载颜色设置
 	if cfg, err := config.Load(config.DefaultPath()); err == nil {
