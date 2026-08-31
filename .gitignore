@@ -5,7 +5,7 @@ scenarios/logs/
 scenarios/__pycache__/
 *.pyc
 # Mizar 自建二进制
-mizar
+/mizar
 # 场景生成的文件(非源码)
 sqrt.go
 sqrt_test.go

@@ -60,6 +60,18 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 
 	// 渲染已加载的历史消息
 	for _, msg := range a.Initial {
+		switch msg.Kind {
+		case agent.KindToolCall:
+			fmt.Printf("\033[36m🔧 %s(%s)\033[0m\n\n", msg.ToolName, truncateArgs(msg.ToolArgs))
+			continue
+		case agent.KindToolResult:
+			result := strings.TrimSpace(strings.TrimPrefix(msg.Content, "工具结果: "))
+			if len(result) > 300 {
+				result = result[:297] + "..."
+			}
+			fmt.Printf("\033[36m🔧 → %s\033[0m\n\n", result)
+			continue
+		}
 		if msg.Role == agent.RoleUser {
 			fmt.Printf("\033[37m▶ %s\033[0m\n\n", msg.Content)
 		} else {
@@ -153,6 +165,12 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		// 处理 @file: / @cmd: / @tool: 引用
 		input := resolveAtRef(trimmed, cmdNames, toolNames)
 
+		// 工具交换收集：任务结束时持久化到会话文件（经典模式无需 Initial，历史逐轮重放）
+		var exchanges []agent.Message
+		a.OnToolExchange = func(tool, args, out string, err error) {
+			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, out, err)...)
+		}
+
 		// LLM 调用（流式）
 		var extr agent.StreamTextExtractor
 		var streamed atomic.Bool
@@ -173,6 +191,7 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		}
 		reply, err := a.Run(input)
 		a.OnLLMStream = nil
+		a.OnToolExchange = nil
 		close(spinnerStop)
 		if err != nil {
 			fmt.Printf("\r\x1b[K错误: %v\n", err)
@@ -194,7 +213,11 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		}
 
 		if sessionID != "" {
+			// 落盘顺序与循环内消息顺序一致：user → (tool_call, tool_result)* → assistant reply
 			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: trimmed})
+			for _, msg := range exchanges {
+				st.Append(sessionID, msg)
+			}
 			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 	}

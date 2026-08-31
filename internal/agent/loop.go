@@ -117,6 +117,12 @@ type Agent struct {
 	// 参数为 questions JSON，返回 answers JSON；TUI 模式弹出输入等待用户，无界面环境返回降级提示。
 	AskUser func(questionsJSON string) (string, error)
 
+	// OnToolExchange 可选：每次工具真实执行后回调（供调用方持久化工具交换历史）。
+	// tool/args 为调用参数；out/err 为执行结果（err 非空表示工具执行失败，out 可能为部分输出）。
+	// 在工具执行线程同步调用，必须快速返回（勿阻塞/勿做重 IO；落盘请在回调内自行异步或任务结束时批量做）。
+	// 典型用途：TUI/CLI 把工具调用+结果持久化到会话文件，会话恢复后模型能看到之前试过什么。
+	OnToolExchange func(tool, args, out string, err error)
+
 	// 工具调用解析策略
 	callParser func(text string) (*callRequest, error)
 
@@ -256,16 +262,21 @@ func (a *Agent) SystemPrompt() string {
 				sb.WriteString(fmt.Sprintf("- %s\n", p))
 			}
 		}
-		sb.WriteString("\n如需扩展能力，在插件目录新建 .ts 文件，导出 tool_* 函数（工具）或 command_* 函数（斜杠命令），" +
-			"然后调用 /reload 加载；也可直接写文件后用 host 函数验证。支持 host_listen 宿主函数启动 HTTP 服务器。\n")
+		sb.WriteString("\n如需扩展能力，在插件目录新建 .ts 文件，导出 tool_* 函数（工具）或 command_* 函数（斜杠命令）。" +
+			"用 write/edit 写入插件目录内的 .ts/.js 文件时会自动热重载并立即生效；若未自动生效可调用 reload_plugins 工具手动重载。" +
+			"注意：/reload 是用户侧斜杠命令，不要用 bash 执行它（会报 command not found）。" +
+			"支持 host_listen 宿主函数启动 HTTP 服务器。\n")
 		// 宿主函数清单：插件 TS/JS 内可直接调用这些 API（信息来自 internal/engine 权威文档）
 		sb.WriteString("\n插件中可用的宿主函数（插件代码内可直接调用，无需 import）：\n")
 		sb.WriteString(engine.HostDocBriefs())
 		// 最小可运行示例：让模型照着写而不用去逆向源码/二进制
-		sb.WriteString("\n最小插件示例（存入插件目录后 /reload 生效）：\n")
+		sb.WriteString("\n最小插件示例（存入插件目录后调用 reload_plugins 或自动重载后生效）：\n")
 		sb.WriteString(
 			"```ts\n" +
 				"// hello.ts — 导出 tool_* 即注册为工具，参数是 JSON 字符串\n" +
+				"// 重要：tool_ 函数上方写 JSDoc 注释（做什么/何时用/参数含义），\n" +
+				"// 注释会成为系统提示里的工具描述——不写注释，后续模型不知道何时/如何用这个工具\n" +
+				"/** 用 hello 工具向某人问好。何时用：需要生成问候语时。参数: {name: string} 人名 */\n" +
 				"export function tool_hello(args: string): string {\n" +
 				"  const p = JSON.parse(args);\n" +
 				"  return \"你好, \" + (p.name || \"朋友\");\n" +
@@ -447,6 +458,14 @@ func (a *Agent) Run(task string) (string, error) {
 			a.Tuner.ParseSucceeded()
 		}
 
+		// 中止检查点：ESC 中止发生在 LLM 请求进行中时，请求返回后立即退出，
+		// 不再执行随后的工具调用（否则用户看到的「已取消」之后还会多出一串工具步骤）。
+		if a.Aborted() {
+			q.Complete(errors.New("aborted by user"))
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
+			return "", ErrAborted
+		}
+
 		if req.Action == "reply" {
 			q.Complete(nil)
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
@@ -471,6 +490,10 @@ func (a *Agent) Run(task string) (string, error) {
 		// 先执行工具（dsh 的 repeat-tool-reminder 也是 post-execute 观察语义）
 		out, err := a.Plugins.Call(req.Tool, req.Args)
 		q.EndOperation("tool:" + req.Tool)
+		// 工具交换回调：供调用方持久化（会话记录工具调用过程/结果）
+		if a.OnToolExchange != nil {
+			a.OnToolExchange(req.Tool, req.Args, out, err)
+		}
 		tr := ToolResult{ToolName: req.Tool, Args: req.Args, Output: out}
 		if err != nil {
 			tr.Error = err.Error()
@@ -551,28 +574,92 @@ func (a *Agent) log(format string, args ...any) {
 	}
 }
 
-// parseCallJSON 从模型回复中提取 JSON 调用。容忍 ```json 围栏与前后缀文本。
+// parseCallJSON 从模型回复中提取 action 控制 JSON。容忍 ```json 围栏、前后缀文本、
+// 以及文本中夹带的花括号内容（如 API 路径 {namespace}）。
 func parseCallJSON(text string) (*callRequest, error) {
-	s := strings.TrimSpace(text)
-	if strings.HasPrefix(s, "```") {
-		lines := strings.SplitN(s, "\n", 2)
-		if len(lines) == 2 {
-			s = strings.TrimSuffix(lines[1], "```")
-		}
-	}
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start < 0 || end <= start {
-		return nil, fmt.Errorf("no JSON object found in reply")
+	extracted, ok := ExtractActionJSON(text)
+	if !ok {
+		return nil, fmt.Errorf("no action JSON object found in reply")
 	}
 	var req callRequest
-	if err := json.Unmarshal([]byte(s[start:end+1]), &req); err != nil {
+	if err := json.Unmarshal([]byte(extracted), &req); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %v", err)
 	}
 	if req.Action == "" {
 		return nil, fmt.Errorf("missing action field")
 	}
 	return &req, nil
+}
+
+// ExtractActionJSON 从任意文本中提取第一个包含 action 字段的 JSON 对象（agent 控制协议）。
+// 处理三类模型输出：
+//  1. 纯 JSON：{"action":"tool",...} → 直接提取
+//  2. 围栏包裹：```json ... ``` → 剥壳后提取
+//  3. 混合文本："先解释一段话…\n\n{"action":"tool",...}" → 扫描提取控制 JSON
+//     （此前这种输出会被包装成 reply 文本，tool JSON 原样显示、工具不执行）
+//
+// 优先级：先找 action=tool（模型意图是调工具时优先执行），再找 action=reply。
+// 返回提取到的原始 JSON 文本。文本内嵌的转义 tool JSON（reply.text 里的 \"action\"）
+// 不会被误提取——非转义的 { 开头才会进入解码尝试，转义形态解码必然失败。
+func ExtractActionJSON(text string) (string, bool) {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return "", false
+	}
+	// 剥 ```json 围栏
+	if strings.HasPrefix(s, "```") {
+		lines := strings.SplitN(s, "\n", 2)
+		if len(lines) == 2 {
+			s = strings.TrimSpace(strings.TrimSuffix(lines[1], "```"))
+		}
+	}
+	// 两轮扫描：第一轮只要 action=tool，第二轮接受 action=reply
+	for _, want := range []string{"tool", "reply"} {
+		for i := 0; i < len(s); i++ {
+			if s[i] != '{' {
+				continue
+			}
+			dec := json.NewDecoder(strings.NewReader(s[i:]))
+			var obj map[string]any
+			if err := dec.Decode(&obj); err != nil {
+				continue // 非 JSON 起始（如 {namespace} 占位符）：跳过
+			}
+			act, _ := obj["action"].(string)
+			if act == "" {
+				continue // 合法 JSON 但非控制协议：跳过
+			}
+			if want == "tool" && act != "tool" {
+				continue
+			}
+			end := i + int(dec.InputOffset())
+			// 解码器可能吃掉对象后的空白，截取到 '}' 为止更精确，但多余空白不影响 Unmarshal
+			return strings.TrimSpace(s[i:min(end, len(s))]), true
+		}
+	}
+	return "", false
+}
+
+// ToolExchangeMessages 将一次工具调用+结果转为与循环内部格式一致的 Message 对，
+// 供调用方持久化到会话（恢复会话后 LLM 可无缝理解之前试过什么）。
+// toolCall 消息（role=assistant, Kind=tool_call）+ toolResult 消息（role=user, Kind=tool_result）。
+func ToolExchangeMessages(tool, args, out string, err error) []Message {
+	// 还原与模型输出同构的工具调用 JSON（callParser 只读 action/tool/args 字段）
+	callJSON, _ := json.Marshal(map[string]any{"action": "tool", "tool": tool, "args": args})
+	tr, _ := json.Marshal(ToolResult{ToolName: tool, Args: args, Output: out})
+	if err != nil {
+		tr, _ = json.Marshal(ToolResult{ToolName: tool, Args: args, Output: out, Error: err.Error()})
+	}
+	return []Message{
+		{Role: RoleAssistant, Kind: KindToolCall, ToolName: tool, ToolArgs: args, Content: string(callJSON)},
+		{Role: RoleUser, Kind: KindToolResult, Content: "工具结果: " + string(tr)},
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func truncate(s string, n int) string {

@@ -31,7 +31,7 @@ func TestEditReverseOrder(t *testing.T) {
 	}
 	// 两次 edit：bar→X（变短），baz→Y（变短），倒序应用后都不应错位
 	args := `{"path": "` + f + `", "edits": [{"oldText": "bar", "newText": "X"}, {"oldText": "baz", "newText": "Y"}]}`
-	out, err := toolEdit().Run(args)
+	out, err := toolEdit(nil).Run(args)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestEditReverseOrderGrow(t *testing.T) {
 	}
 	// a→AAAAA 变长、ccc→C 变短：倒序应用应正确
 	args := `{"path": "` + f + `", "edits": [{"oldText": "a", "newText": "AAAAA"}, {"oldText": "ccc", "newText": "C"}]}`
-	if _, err := toolEdit().Run(args); err != nil {
+	if _, err := toolEdit(nil).Run(args); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	got, _ := os.ReadFile(f)
@@ -73,7 +73,7 @@ func TestEditNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := `{"path": "` + f + `", "oldText": "nope", "newText": "x"}`
-	_, err := toolEdit().Run(args)
+	_, err := toolEdit(nil).Run(args)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("want not-found error, got: %v", err)
 	}

@@ -571,7 +571,7 @@ func (m *Manager) SetOnToolCall(fn func(name string)) {
 func (m *Manager) Call(name, args string) (string, error) {
 	t, ok := m.Get(name)
 	if !ok {
-		return "", fmt.Errorf("tool %q not found", name)
+		return "", fmt.Errorf("tool %q not found（若刚创建了实现该工具的插件文件，请先调用 reload_plugins 工具加载后再试"+"；/xxx 斜杠命令不能作为工具调用）", name)
 	}
 	// 统计回调（技能每次使用 +1）
 	m.mu.RLock()

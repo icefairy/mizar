@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"mizar/internal/agent"
+	"mizar/internal/plugins"
 )
 
 // findAtSuffix 找行末尾的 @ 部分（用于实时补全）。
@@ -198,4 +201,56 @@ func resolveAtRef(line string, cmdNames, toolNames []string) string {
 	}
 
 	return strings.TrimSpace(line[:last]) + resolved
+}
+
+// reloadPlugins 强制重载插件目录中的全部插件，并同步斜杠命令、失效系统提示缓存。
+// 返回给调用方（模型/命令）的人类可读摘要。供 write/edit 自动热重载、/reload 命令、
+// 以及模型显式调用 reload_plugins 工具共用，保证各处行为一致。
+func reloadPlugins(pm *plugins.Manager, a *agent.Agent) string {
+	loaded, failed := pm.ReloadAll()
+	// 同步插件导出的斜杠命令到注册表
+	cmds := make([]agent.Command, 0, len(pm.Commands()))
+	for _, c := range pm.Commands() {
+		cc := c
+		cmds = append(cmds, agent.Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
+	}
+	a.Commands.SyncFromPlugins(cmds)
+	// 失效系统提示缓存（工具列表已变化，下次 SystemPrompt 重建）
+	a.ReloadTools()
+
+	var sb strings.Builder
+	if len(loaded) > 0 {
+		fmt.Fprintf(&sb, "✓ 插件已重载: %s", strings.Join(loaded, ", "))
+	}
+	for f, e := range failed {
+		fmt.Fprintf(&sb, "\n✗ 插件加载失败: %s: %v", f, e)
+	}
+	if sb.Len() == 0 {
+		return "插件目录无变更，未触发重载"
+	}
+	return sb.String()
+}
+
+// onPluginFileWritten 判断 write/edit 写入的文件是否位于插件目录内的 .ts/.js，
+// 是则触发插件热重载并返回给模型的说明（否则返回空，不追加输出）。
+func onPluginFileWritten(pluginDir string, pm *plugins.Manager, a *agent.Agent) func(string) string {
+	return func(path string) string {
+		if pluginDir == "" || path == "" {
+			return ""
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".ts" && ext != ".js" {
+			return ""
+		}
+		// 插件管理器只扫描插件目录顶层，因此文件必须直接位于插件目录下
+		dir := filepath.Dir(path)
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			return ""
+		}
+		if absDir != pluginDir {
+			return ""
+		}
+		return "\n[自动热重载] " + reloadPlugins(pm, a)
+	}
 }

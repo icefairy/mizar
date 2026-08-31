@@ -266,11 +266,25 @@ func toolRead() plugins.Tool {
 	}
 }
 
+// notifyPluginChanged 若配置了回调则触发（写入的是插件文件时回调内部自行判断并重载），
+// 返回追加到工具输出末尾的说明（未触发时为空）。
+func notifyPluginChanged(cb func(path string) string, path string) string {
+	if cb == nil {
+		return ""
+	}
+	msg := cb(path)
+	if msg == "" {
+		return ""
+	}
+	return "\n" + msg
+}
+
 // toolWrite 写文件（对齐 pi 的 write：path + content，自动建父目录）。
-func toolWrite() plugins.Tool {
+// 写入插件目录内的 .ts/.js 文件时自动触发插件热重载。
+func toolWrite(onPluginFileChanged func(path string) string) plugins.Tool {
 	return plugins.Tool{
 		Name:        "write",
-		Description: "Write content to a file (creates parent dirs, overwrites). Args: {path: string, content: string}.",
+		Description: "Write content to a file (creates parent dirs, overwrites). Writing a .ts/.js file inside the plugin dir auto-reloads plugins. Args: {path: string, content: string}.",
 		Run: func(args string) (string, error) {
 			var p struct {
 				Path    string `json:"path"`
@@ -287,13 +301,14 @@ func toolWrite() plugins.Tool {
 			if err := os.WriteFile(p.Path, []byte(p.Content), 0o644); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("wrote %d bytes to %s", len(p.Content), p.Path), nil
+			return fmt.Sprintf("wrote %d bytes to %s", len(p.Content), p.Path) + notifyPluginChanged(onPluginFileChanged, p.Path), nil
 		},
 	}
 }
 
 // toolEdit 精准替换（对齐 pi 的 edit：path + oldText + newText，可多组 edits）。
-func toolEdit() plugins.Tool {
+// 编辑插件目录内的 .ts/.js 文件时自动触发插件热重载。
+func toolEdit(onPluginFileChanged func(path string) string) plugins.Tool {
 	return plugins.Tool{
 		Name:        "edit",
 		Description: "Edit a file with targeted replacements. Args: {path: string, oldText: string, newText: string} or {path: string, edits: [{oldText, newText}]}. oldText must be unique. Returns diff summary.",
@@ -394,7 +409,7 @@ func toolEdit() plugins.Tool {
 					return "", err
 				}
 			}
-			return fmt.Sprintf("applied %d edit(s) to %s%s", len(reps), p.Path, warn), nil
+			return fmt.Sprintf("applied %d edit(s) to %s%s", len(reps), p.Path, warn) + notifyPluginChanged(onPluginFileChanged, p.Path), nil
 		},
 	}
 }

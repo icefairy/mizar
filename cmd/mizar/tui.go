@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -92,7 +94,8 @@ type tuiModel struct {
 
 	// 钩子通信：每次任务用新 channel
 	liveMu sync.Mutex
-	evtCh  chan toolCallInfo
+	evtCh   chan toolCallInfo
+	toolLog []agent.Message // 本次任务的工具交换历史（OnToolExchange 收集，任务结束落盘）
 
 	// 流式显示状态（streamMu 保护）：LLM 回复逐 token 回调 → 增量提取 → TUI 实时渲染
 	streamMu        sync.Mutex
@@ -111,6 +114,11 @@ type tuiModel struct {
 	// ask_user_question 支持：pending ask 队列（工具侧阻塞等待用户回答）
 	askMu     sync.Mutex
 	askPending *askPending // nil = 无待处理问题
+
+	// canceling：ESC 已请求取消、旧任务 goroutine 尚未完全退出。
+	// 期间新输入一律排队，防止新任务的 Run→resetAbort() 清掉旧任务的
+	// abort 标志（否则旧任务“复活”继续跑）及两个 Run 并发争用 Agent 状态。
+	canceling atomic.Bool
 }
 
 type askPending struct {
@@ -404,6 +412,10 @@ func (m *tuiModel) startTask(input string) {
 	m.streamLastFlush = time.Now()
 	m.streamFlushBusy = false
 	m.agent.OnLLMStream = func(step int, d agent.StreamDelta) {
+		// 已请求中止：丢弃后续流式渲染（agent 循环将在下一个检查点退出）
+		if m.agent.Aborted() {
+			return
+		}
 		m.streamMu.Lock()
 		if step != m.streamStep {
 			// 新步骤（新一轮 LLM 调用）：重置提取器
@@ -460,7 +472,21 @@ func (m *tuiModel) startTask(input string) {
 		}
 	}
 
+	// 工具交换收集：每次工具执行后记录，任务结束时持久化到会话文件 + Initial。
+	// 会话恢复后模型能看到之前试过什么（修复“工具调用过程不落盘”的黑盒问题）。
+	m.liveMu.Lock()
+	m.toolLog = nil
+	m.liveMu.Unlock()
+	m.agent.OnToolExchange = func(tool, args, out string, err error) {
+		msgs := agent.ToolExchangeMessages(tool, args, out, err)
+		m.liveMu.Lock()
+		m.toolLog = append(m.toolLog, msgs...)
+		m.liveMu.Unlock()
+	}
+
 	go func() {
+		// 任务 goroutine 退出时解除“取消中”状态（新任务可安全启动，不会再干扰本任务）
+		defer m.canceling.Store(false)
 		reply, err := m.agent.Run(input)
 
 		// 任务结束：卸载流式回调、停止流式渲染，并强制刷新一次补上尾部增量
@@ -481,9 +507,19 @@ func (m *tuiModel) startTask(input string) {
 		if mine {
 			m.evtCh = nil
 		}
+		exchanges := m.toolLog
+		m.toolLog = nil
 		m.liveMu.Unlock()
+		m.agent.OnToolExchange = nil
 		if !mine {
 			return
+		}
+
+		// 工具交换历史落盘：会话文件（Initial 的追加在下方 user 之后，保持对话顺序）
+		for _, msg := range exchanges {
+			if m.store != nil && m.sessionID != "" {
+				_ = m.store.Append(m.sessionID, msg)
+			}
 		}
 
 		elapsed := time.Since(m.stats.RequestStartTime)
@@ -500,9 +536,19 @@ func (m *tuiModel) startTask(input string) {
 
 		// 无论成功与否，都追加本次 user 消息到初始历史（供下次 Run 继承）
 		m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: input})
+		// 工具交换追加到 Initial（user 之后、reply 之前，与循环内消息顺序一致；
+		// 会话恢复后模型能看到之前试过什么，不再重复无效尝试）
+		for _, msg := range exchanges {
+			m.agent.Initial = append(m.agent.Initial, msg)
+		}
 
 		if err != nil {
-			m.addChatLineAsync(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+			if errors.Is(err, agent.ErrAborted) {
+				// 用户已通过 ESC 主动取消：不重复报错（ESC 时已提示过），只做收尾
+				log.Printf("任务已被用户取消")
+			} else {
+				m.addChatLineAsync(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+			}
 		} else {
 			m.addChatLineAsync(chatLine{role: "bot", content: reply, ts: time.Now()})
 			if m.store != nil && m.sessionID != "" {
@@ -565,6 +611,19 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 	// 若有加载的历史消息，渲染到聊天区
 	if len(a.Initial) > 0 {
 		for _, msg := range a.Initial {
+			// 会话中的工具交换消息渲染为工具行（而非 user/bot 长文本）
+			switch msg.Kind {
+			case agent.KindToolCall:
+				m.lines = append(m.lines, chatLine{role: "tool", content: "🔄 " + msg.ToolName + "(" + truncateArgs(msg.ToolArgs) + ")", ts: time.Now()})
+				continue
+			case agent.KindToolResult:
+				result := strings.TrimSpace(strings.TrimPrefix(msg.Content, "工具结果: "))
+				if len(result) > 300 {
+					result = result[:297] + "..."
+				}
+				m.lines = append(m.lines, chatLine{role: "tool", content: "🔄 → " + result, ts: time.Now()})
+				continue
+			}
 			role := "bot"
 			if msg.Role == agent.RoleUser {
 				role = "user"
@@ -672,8 +731,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return nil
 		}
 		if event.Key() == tcell.KeyEsc && m.loading {
+			// 真正请求中止 agent 循环：循环在下一个检查点停止并返回 ErrAborted。
+			// 此前这里只做了 setLoading(false) + 打印提示，从未调用 Abort()，
+			// 导致 agent 在后台继续跑，工具调用/流式输出继续刷屏（任务实际未取消）。
+			m.agent.Abort()
+			m.canceling.Store(true) // 阻止新任务启动，直到旧任务 goroutine 真正退出
 			m.setLoading(false)
-			m.addChatLine(chatLine{role: "err", content: "任务已取消", ts: time.Now()})
+			m.addChatLine(chatLine{role: "err", content: "任务已取消（当前步骤结束后停止）", ts: time.Now()})
 			return nil
 		}
 		// Ctrl+C 不退出：清空输入框并退出历史浏览
@@ -930,6 +994,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 	// 钩子只注册一次：从 m.evtCh 发送工具调用
 	if a.Hooks != nil {
 		a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
+			// 已请求中止：不再渲染后续工具调用（循环将在下一个检查点退出）
+			if m.agent.Aborted() {
+				return nil
+			}
 			call := toolCallInfo{Tool: ctx.Tool, Args: truncateArgs(ctx.Args)}
 			// 工具调用步：流式控制文本不显示——重置提取器、停止流式渲染（后续由工具行接替）
 			m.streamMu.Lock()
@@ -941,6 +1009,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return nil
 		})
 		a.Hooks.OnToolResult(func(ctx *agent.HookContext) error {
+			// 已请求中止：不再渲染后续工具结果
+			if m.agent.Aborted() {
+				return nil
+			}
 			if ctx.Err != nil {
 				m.addChatLineAsync(chatLine{role: "err", content: ctx.Tool + " 失败: " + ctx.Err.Error(), ts: time.Now()})
 			} else if ctx.Result != "" {
@@ -1008,7 +1080,23 @@ func (m *tuiModel) submitInput(s string) {
 		return
 	}
 
-	if m.loading {
+	// @ 引用解析：@file: / @cmd: / @tool: / 纯路径 → 自然语言指令（与 interactive 模式一致）。
+	// 此前 TUI 缺失这一步，模型收到的是 "@/tmp/x.png 看看这个图" 原文，
+	// 引导模型去用 read/bash 乱试而不是用相关工具（如插件提供的 image_describe）。
+	// 注意：必须在入队之前解析，排队消息经 setLoadingAsync 回调直接 startTask，
+	// 不再经过 submitInput，若原文入队会跳过解析。
+	var cmdNames, toolNames []string
+	for _, c := range m.agent.Commands.List() {
+		cmdNames = append(cmdNames, "/"+c.Name)
+	}
+	for _, t := range m.agent.Plugins.Tools() {
+		toolNames = append(toolNames, t.Name)
+	}
+	s = resolveAtRef(s, cmdNames, toolNames)
+
+	if m.loading || m.canceling.Load() {
+		// 任务运行中，或 ESC 已请求取消但旧任务 goroutine 尚未退出：排队等待。
+		// 排队消息在任务结束后的 setLoadingAsync(false) 回调中自动发送。
 		m.queue = append(m.queue, s)
 		m.renderAllDirect()
 		m.renderQueue()

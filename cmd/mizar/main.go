@@ -290,13 +290,26 @@ func main() {
 	pm := plugins.NewManager(extAbs, host)
 	// 禁用工具（来自技能统计周报，用户确认后记录）——只影响工具注册表，不动 System prompt
 	pm.SetDisabledTools(stats.DisabledNames())
+	// agent 实例先声明后赋值（builtins.All 的插件热重载回调需要引用它）
+	a := agent.New(client, pm)
+	// 插件自动热重载：write/edit 写入插件目录内的 .ts/.js 文件后触发。
+	// 解决“模型自己写插件 → 未重载就调用 → tool not found 错误循环”的自举断裂问题。
+	onPluginChanged := onPluginFileWritten(extAbs, pm, a)
 	// 注册 pi 式内置工具（bash/grep/find/read/write/edit/ls/skill_manage + dsh 复刻）
-	for _, t := range builtins.All(skAbs) {
+	for _, t := range builtins.All(skAbs, onPluginChanged) {
 		pm.RegisterBuiltin(t)
 	}
 	for _, t := range lsp.All() {
 		pm.RegisterBuiltin(t)
 	}
+	// 显式 reload 工具（自举兜底：模型用 bash 等方式改动插件文件后可主动调用 reload_plugins）
+	pm.RegisterBuiltin(plugins.Tool{
+		Name:        "reload_plugins",
+		Description: "Reload all plugin files from the plugin directory (hot reload). Call this after creating/modifying a plugin (.ts/.js) file via bash or other means so its tool_*/command_* functions take effect. Returns loaded/failed list with compile errors. Args: {}.",
+		Run: func(args string) (string, error) {
+			return reloadPlugins(pm, a), nil
+		},
+	})
 	lsp.Init(*lspBinary)
 	loaded, failed := pm.LoadAll()
 	for _, f := range loaded {
@@ -381,7 +394,6 @@ func main() {
 		log.Printf("路径记忆: 新会话 %s（当前路径）", *sessionID)
 	}
 
-	a := agent.New(client, pm)
 	a.PluginDir = extAbs
 	// 默认启用弱模型宽容策略：死循环检测 + 解析失败降级 + LLM 故障重试
 	a.Tuner = agent.DefaultTuner()
@@ -453,7 +465,7 @@ func main() {
 
 ## 任务聚焦（重要）
 - 工具拿来即用：可用工具列表中的工具（如 mem_write/bash/read/write 等）描述已说明用途与参数，直接调用即可，不要为了确认功能而先读取插件源码或二进制。插件源码只在「开发新工具」时读。
-- 工具出错先看错误信息：根据错误修正调用参数重试，而不是一开始就修改工具本身的实现（插件改动需 /reload 后才生效，日常任务不要中途改已加载的插件）。
+- 工具出错先看错误信息：根据错误修正调用参数重试，而不是一开始就修改工具本身的实现（插件改动写入插件目录会自动重载生效；用 bash 改动插件后需调用 reload_plugins 工具；日常任务不要中途改已加载的插件）。
 - 写代码/插件时：按系统提示末尾「插件」段给出的宿主函数清单与最小示例直接创建文件，不要在源码或二进制里搜索 API 定义。
 - 避免空转：同一方向最多探索 2 次；连续 2 次工具调用未获得新信息立即换更直接的方案。strings/find/grep 换花样搜同一目标属于空转。
 - 分步交付：任务无法在几步内完成时，先完成核心部分并及时给出阶段性回复。` + skPrompt + agentsPrompt
@@ -685,26 +697,14 @@ func main() {
 					a.Compactor.ContextWindow = cfg.ContextWindow
 				}
 			}
-			// 插件热重载
-			loaded, failed := pm.ReloadAll()
-			// 同步插件命令到注册表
-			cmds := make([]agent.Command, 0)
-			for _, c := range pm.Commands() {
-				cc := c
-				cmds = append(cmds, agent.Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
-			}
-			a.Commands.SyncFromPlugins(cmds)
+			// 插件热重载 + 命令同步 + 系统提示缓存失效（统一逻辑见 reloadPlugins）
+			pluginSummary := reloadPlugins(pm, a)
 			// Prompt 模板热重载
 			promptReg.Reload()
 			// 汇总
 			var sb strings.Builder
 			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%s\n", cfg.Model, cfg.ContextWindow, cfg.ThinkingStr())
-			if len(loaded) > 0 {
-				fmt.Fprintf(&sb, "✓ 插件重载: %s\n", strings.Join(loaded, ", "))
-			}
-			for f, e := range failed {
-				fmt.Fprintf(&sb, "✗ 插件失败: %s: %v\n", f, e)
-			}
+			fmt.Fprintf(&sb, "%s\n", pluginSummary)
 			return sb.String(), nil
 		},
 	})
@@ -1049,6 +1049,14 @@ func main() {
   思考等级 thinking_level: %s
   模型 model: %s
   供应商 base_url: %s
+可修改项: max_steps ｜ 修改方法: /config max_steps 30`, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
+			}
+			return fmt.Sprintf(`当前运行配置:
+  最大步数 max_steps: %d
+  上下文窗口 context_window: %d (token, 配置:%d)
+  思考等级 thinking_level: %s
+  模型 model: %s
+  供应商 base_url: %s
 可修改项: max_steps ｜ 修改方法: /config max_steps 30`, ms, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
 			}
 			fields := strings.Fields(args)
@@ -1073,13 +1081,11 @@ func main() {
 		Description: "手动触发上下文压缩（/compact 或 /compact <摘要指引>）",
 		Run: func(args string) (string, error) {
 			if a.Compactor == nil {
-				return "✗ 会话压缩未启用（启动时使用了 --no-compact）",
-nil
+				return "✗ 会话压缩未启用（启动时使用了 --no-compact）", nil
 			}
 			msgs := a.Initial
 			if len(msgs) <= 1 {
-				return "✗ 消息不足，无需压缩",
-nil
+				return "✗ 消息不足，无需压缩", nil
 			}
 			est := agent.EstimateMessages(msgs)
 			limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
@@ -1342,7 +1348,13 @@ nil
 	}
 
 	if *task != "" {
+		// 工具交换收集：任务结束落盘（与 TUI/interactive 一致）
+		var exchanges []agent.Message
+		a.OnToolExchange = func(tool, args, out string, err error) {
+			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, out, err)...)
+		}
 		reply, err := a.Run(*task)
+		a.OnToolExchange = nil
 		if err != nil {
 			log.Fatalf("执行失败: %v", err)
 		}
@@ -1350,6 +1362,9 @@ nil
 		fmt.Println(reply)
 		if *sessionID != "" {
 			st.Append(*sessionID, agent.Message{Role: agent.RoleUser, Content: *task})
+			for _, msg := range exchanges {
+				_ = st.Append(*sessionID, msg)
+			}
 			st.Append(*sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 			// 首次会话：用首条 user 消息推导标题
 			if titleCache.Get(*sessionID) == "" {

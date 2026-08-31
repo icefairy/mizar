@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"mizar/internal/plugins"
 )
 
 // TestSteerInjectedBeforeNextLLM 循环中发送 steer，下一轮 LLM 调用应看到纠正消息。
@@ -97,5 +99,40 @@ func TestAbortStopsLoop(t *testing.T) {
 	_, err := a.Run("task")
 	if err != ErrAborted {
 		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+}
+// TestAbortSkipsToolExecutionAfterLLM 模拟 ESC 在 LLM 请求进行中按下：
+// LLM 已返回工具调用，但回复到达时用户已按 ESC。循环必须在执行工具【前】退出，
+// 不再执行任何工具（修复点：解析回复后、工具执行前的 abort 检查点）。
+func TestAbortSkipsToolExecutionAfterLLM(t *testing.T) {
+	pm := testManager(t)
+	// 用 Go 侧内置工具替换插件 ping，以便统计真实调用次数
+	var toolCalls int
+	pm.RegisterBuiltin(plugins.Tool{
+		Name: "ping",
+		Run: func(args string) (string, error) {
+			toolCalls++
+			return "pong", nil
+		},
+	})
+
+	llm := &scriptLLM{fn: func(msgs []Message) (string, error) {
+		// 模拟慢 LLM 请求：给外部 goroutine 留出按 ESC 的窗口
+		time.Sleep(15 * time.Millisecond)
+		return `{"action":"tool","tool":"ping","args":"{\"x\":1}"}`, nil
+	}}
+	a := New(llm, pm)
+	a.MaxSteps = 10
+	// 外部 goroutine：LLM 调用正在进行时请求中止（等价于 TUI 的 ESC → agent.Abort()）
+	go func() {
+		time.Sleep(2 * time.Millisecond)
+		a.Abort()
+	}()
+	_, err := a.Run("task")
+	if err != ErrAborted {
+		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	if toolCalls != 0 {
+		t.Fatalf("tool executed %d time(s) after abort, want 0", toolCalls)
 	}
 }

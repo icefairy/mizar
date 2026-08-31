@@ -26,14 +26,16 @@ import (
 )
 
 // All 返回全部内置工具。skillsDir 为技能目录（skill_manage / skill 用）。
-func All(skillsDir string) []plugins.Tool {
+// onPluginFileChanged 可选回调：write/edit 写入插件目录内文件后触发（插件自动热重载，nil = 不启用）；
+// 返回值会追加到工具输出（如“✓ 插件已重载”或编译错误），让模型立即感知插件生效与否。
+func All(skillsDir string, onPluginFileChanged func(path string) string) []plugins.Tool {
 	return []plugins.Tool{
 		toolBash(),
 		toolGrep(),
 		toolFind(),
 		toolRead(),
-		toolWrite(),
-		toolEdit(),
+		toolWrite(onPluginFileChanged),
+		toolEdit(onPluginFileChanged),
 		toolLS(),
 		toolRepoMap(),
 		skillManage(skillsDir),

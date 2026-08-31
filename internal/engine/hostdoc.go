@@ -252,11 +252,27 @@ func HostDocBriefs() string {
 	for _, d := range hostDocs {
 		sb.WriteString("- ")
 		sb.WriteString(d.Name)
-		sb.WriteString(" — ")
+		sb.WriteString("(")
+		sb.WriteString(signatureOf(d.Full))
+		sb.WriteString(") — ")
 		sb.WriteString(d.Brief)
 		sb.WriteString("\n")
 	}
+	sb.WriteString("- 写插件前如需某函数的完整参数/返回值/示例，用 doc_get(函数名) 查询完整文档（避免猜参数）\n")
 	return sb.String()
+}
+
+// signatureOf 从 Full 文档首行提取参数签名（如 `http_post(url, body)`）。
+// 宿主函数清单带签名后，模型写插件时不会凭直觉猜参数（此前 http_post 被误传第 3 个
+// headers 参数导致 401——清单只有名称+一句话描述，参数只能靠猜）。
+func signatureOf(full string) string {
+	// Full 首行形如 `http_post(url, body) -> string`，取 -> 之前的参数部分
+	if i := strings.Index(full, "("); i >= 0 {
+		if j := strings.Index(full[i:], ")"); j >= 0 {
+			return full[i+1 : i+j]
+		}
+	}
+	return "..."
 }
 
 // HostDocList 返回全部文档条目（生成命令统计用）。
