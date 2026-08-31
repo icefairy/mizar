@@ -643,7 +643,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 		
 		// 解析 arg_key/arg_value 对
 		argsMap := make(map[string]string)
-		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([^<]*)</arg_value>`)
+		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([\s\S]*)</arg_value>`)
 		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
 			argsMap[m[1]] = m[2]
 		}
@@ -663,7 +663,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 		
 		// 解析 arg_key/arg_value 对
 		argsMap := make(map[string]string)
-		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([^<]*)</arg_value>`)
+		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([\s\S]*)</arg_value>`)
 		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
 			argsMap[m[1]] = m[2]
 		}
