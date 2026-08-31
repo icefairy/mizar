@@ -1082,7 +1082,7 @@ func (m *tuiModel) submitInput(s string) {
 			if len(short) > 8 {
 				short = short[:8]
 			}
-			fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, m.sessionID)
+			fmt.Fprintf(os.Stderr, "\n会话 %s: 用 mizar -session %s 续接\n", short, m.sessionID)
 		}
 		m.app.Stop()
 		return
@@ -1144,7 +1144,7 @@ func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *ses
 			if len(short) > 8 {
 				short = short[:8]
 			}
-			fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+			fmt.Fprintf(os.Stderr, "\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
 		}
 		return
 	}
@@ -1154,7 +1154,7 @@ func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *ses
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+		fmt.Fprintf(os.Stderr, "\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
 	}
 }
 
