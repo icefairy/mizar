@@ -576,19 +576,50 @@ func (a *Agent) log(format string, args ...any) {
 
 // parseCallJSON 从模型回复中提取 action 控制 JSON。容忍 ```json 围栏、前后缀文本、
 // 以及文本中夹带的花括号内容（如 API 路径 {namespace}）。
+// 当 JSON 格式不规范时（如缺闭合括号、转义错误），尝试自动修复并提供详细错误。
 func parseCallJSON(text string) (*callRequest, error) {
 	extracted, ok := ExtractActionJSON(text)
 	if !ok {
-		return nil, fmt.Errorf("no action JSON object found in reply")
+		return nil, fmt.Errorf("无法识别的控制指令：未找到含 action 字段的合法 JSON 对象\n请输出格式如：{\"action\":\"tool\",\"tool\":\"工具名\",\"args\":\"参数JSON\"} 或 {\"action\":\"reply\",\"text\":\"回复内容\"}")
 	}
 	var req callRequest
 	if err := json.Unmarshal([]byte(extracted), &req); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %v", err)
+		// 尝试常见修复：补全缺失的闭合括号
+		fixed := tryFixJSON(extracted)
+		if fixed != extracted {
+			if err2 := json.Unmarshal([]byte(fixed), &req); err2 == nil {
+				return &req, nil
+			}
+		}
+		return nil, fmt.Errorf("JSON 格式错误：%v\n原始输出片段：%s\n请确保 JSON 完整闭合，内部引号需双重转义（如 \\\"）", err, truncate(extracted, 80))
 	}
 	if req.Action == "" {
-		return nil, fmt.Errorf("missing action field")
+		return nil, fmt.Errorf("缺少 action 字段：提取到的 JSON 没有 action 字段\n请输出：{\"action\":\"tool\"...} 或 {\"action\":\"reply\"...}")
 	}
 	return &req, nil
+}
+
+// tryFixJSON 尝试修复常见的 JSON 格式错误（如缺失闭合括号）。
+// 返回修复后的文本，若无法修复则返回原样。
+func tryFixJSON(s string) string {
+	s = strings.TrimSpace(s)
+	// 情况1：末尾缺 } —— 检查是否以 \"} 结尾（未转义的引号后缺括号）
+	if !strings.HasSuffix(s, "}") && strings.HasSuffix(s, "\"") {
+		return s + "}"
+	}
+	// 情况2：内层 JSON 字符串未正确闭合（如 args 值以 \"} 结尾但外层也缺 }）
+	if strings.Count(s, "{") > strings.Count(s, "}") {
+		// 尝试在末尾追加足够多的 } 使平衡
+		for strings.Count(s, "{") > strings.Count(s, "}") {
+			s += "}"
+		}
+		// 验证是否有效
+		var dummy map[string]any
+		if json.Unmarshal([]byte(s), &dummy) == nil {
+			return s
+		}
+	}
+	return s
 }
 
 // ExtractActionJSON 从任意文本中提取第一个包含 action 字段的 JSON 对象（agent 控制协议）。
