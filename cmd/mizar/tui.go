@@ -1126,20 +1126,27 @@ func truncateArgs(s string) string {
 }
 
 func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *session.TitleCache) {
-	// 退出提示
+	m := newTuiModel(a, st, sessionID, titleCache)
+	if err := m.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI 退出: %v，回退经典模式\n", err)
+		fmt.Println(banner())
+		classicFallback(a, st, sessionID)
+		if sessionID != "" {
+			short := sessionID
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+		}
+		return
+	}
+	// 正常退出时显示续接提示
 	if sessionID != "" {
 		short := sessionID
 		if len(short) > 8 {
 			short = short[:8]
 		}
 		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
-	}
-	m := newTuiModel(a, st, sessionID, titleCache)
-	if err := m.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "TUI 退出: %v，回退经典模式\n", err)
-		fmt.Println(banner())
-		classicFallback(a, st, sessionID)
-		return
 	}
 }
 
