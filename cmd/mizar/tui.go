@@ -1076,6 +1076,14 @@ func (m *tuiModel) submitInput(s string) {
 
 
 	if s == "/quit" || s == "/exit" {
+		// 退出时显示续接提示
+		if m.sessionID != "" {
+			short := m.sessionID
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, m.sessionID)
+		}
 		m.app.Stop()
 		return
 	}
