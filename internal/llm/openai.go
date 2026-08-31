@@ -264,11 +264,12 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 		return toolCallsToText(msg.ToolCalls), nil
 	}
 	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
-	// 若模型已自行输出合法 JSON（如 {"action":"reply",...}），直接透传避免双重包装。
+	// 若模型已输出控制 JSON（含混合文本中嵌入的 tool/reply JSON），优先透传提取结果，
+	// 避免“解释文本 + tool JSON”被整段包成 reply 导致工具不执行、JSON 原样显示。
 	if fr == "stop" {
 		s := strings.TrimSpace(msg.Content)
-		if strings.HasPrefix(s, "{") {
-			return s, nil
+		if extracted, ok := agent.ExtractActionJSON(s); ok {
+			return extracted, nil
 		}
 		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(msg.Content)), nil
 	}
@@ -478,11 +479,13 @@ func (o *OpenAI) streamCore(req *chatReq, wrapReply bool, onToken func(agent.Str
 		}
 		return toolCallsToText(tcs), nil
 	}
-	// 按协议包装回复（仅 agent 循环路径 wrapReply=true）
+	// 按协议包装回复（仅 agent 循环路径 wrapReply=true）。
+	// 若模型输出了控制 JSON（含“解释文本 + tool JSON”混合形态），优先透传提取结果；
+	// 否则包成 reply（此时纯文本展示，工具调用已在上层处理）。
 	if wrapReply && lastFinishReason == "stop" {
 		s := strings.TrimSpace(content.String())
-		if strings.HasPrefix(s, "{") {
-			return s, nil
+		if extracted, ok := agent.ExtractActionJSON(s); ok {
+			return extracted, nil
 		}
 		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
 	}
