@@ -10,11 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"github.com/charmbracelet/glamour"
 
 	"mizar/internal/agent"
+	"mizar/internal/builtins"
 	"mizar/internal/config"
 	"mizar/internal/session"
 )
@@ -69,43 +71,43 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 }
 
 type tuiModel struct {
-	agent          *agent.Agent
-	store          *session.Store
-	sessionID      string
-	lines          []chatLine
-	stats          tuiStats
-	userColor      string // 用户消息颜色（默认 white）
-	aiColor        string // AI 回复颜色（默认 green）
-	renderer     *glamour.TermRenderer // Markdown 渲染器
-	loading        bool
-	queue          []string // 排队的待发送消息（LIFO）
-	queueVisible   bool     // queueView 当前是否在 flex 中可见
-	histIdx        int      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
-	histSnapshot   string   // 浏览历史时保存的输入框快照
-	numpadState    int      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
-	numpadWait     rune     // 小键盘状态机：存储第一个字符
-	app            *tview.Application
-	textView       *tview.TextView
-	queueView      *tview.TextView // 排队消息列表（显示在输入框上方）
-	inputField     *tview.TextArea
-	autoComplete   *tview.TextView // 自动提示条（输入 / 或 @ 时显示匹配命令/文件）
-	autoCompleteList []string       // 当前补全候选列表（用于 Tab 填入）
-	statusBar      *tview.TextView
-	flex           *tview.Flex
-	userScrolledUp bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
+	agent            *agent.Agent
+	store            *session.Store
+	sessionID        string
+	lines            []chatLine
+	stats            tuiStats
+	userColor        string                // 用户消息颜色（默认 white）
+	aiColor          string                // AI 回复颜色（默认 green）
+	renderer         *glamour.TermRenderer // Markdown 渲染器
+	loading          bool
+	queue            []string // 排队的待发送消息（LIFO）
+	queueVisible     bool     // queueView 当前是否在 flex 中可见
+	histIdx          int      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
+	histSnapshot     string   // 浏览历史时保存的输入框快照
+	numpadState      int      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
+	numpadWait       rune     // 小键盘状态机：存储第一个字符
+	app              *tview.Application
+	textView         *tview.TextView
+	queueView        *tview.TextView // 排队消息列表（显示在输入框上方）
+	inputField       *tview.TextArea
+	autoComplete     *tview.TextView // 自动提示条（输入 / 或 @ 时显示匹配命令/文件）
+	autoCompleteList []string        // 当前补全候选列表（用于 Tab 填入）
+	statusBar        *tview.TextView
+	flex             *tview.Flex
+	userScrolledUp   bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
 
 	// 钩子通信：每次任务用新 channel
-	liveMu sync.Mutex
+	liveMu  sync.Mutex
 	evtCh   chan toolCallInfo
 	toolLog []agent.Message // 本次任务的工具交换历史（OnToolExchange 收集，任务结束落盘）
 
 	// 流式显示状态（streamMu 保护）：LLM 回复逐 token 回调 → 增量提取 → TUI 实时渲染
 	streamMu        sync.Mutex
-	streamStep      int                // 当前流式步骤（agent 循环 step）
-	streamActive    bool               // 当前步骤是否正在流式输出
+	streamStep      int                       // 当前流式步骤（agent 循环 step）
+	streamActive    bool                      // 当前步骤是否正在流式输出
 	extr            agent.StreamTextExtractor // 增量提取器（提取 reply 的 text 字段）
-	streamLastFlush time.Time          // 上次刷新时间戳（节流）
-	streamFlushBusy bool               // 一次刷新进行中（防止重入）
+	streamLastFlush time.Time                 // 上次刷新时间戳（节流）
+	streamFlushBusy bool                      // 一次刷新进行中（防止重入）
 
 	// 等待进度指示（spinner 动画 + 宣传语轮换，状态栏显示）
 	spinnerOn   atomic.Bool  // spinner 循环是否运行中
@@ -114,7 +116,7 @@ type tuiModel struct {
 	spinnerSet  atomic.Int64 // 开始时间戳（UnixNano，用于显示已等待秒数）
 
 	// ask_user_question 支持：pending ask 队列（工具侧阻塞等待用户回答）
-	askMu     sync.Mutex
+	askMu      sync.Mutex
 	askPending *askPending // nil = 无待处理问题
 
 	// canceling：ESC 已请求取消、旧任务 goroutine 尚未完全退出。
@@ -154,10 +156,12 @@ func (m *tuiModel) renderAllDirect() {
 		case "bot":
 			sb.WriteString(sgrColor(m.aiColor, fmt.Sprintf("▲ [%s]", t)) + "\n")
 			// 使用 glamour 渲染 Markdown（处理 \n 换行、列表、代码块等）
+			// glamour 输出含 ANSI 颜色码（[38;5;xxx]），tview 不认这些格式，
+			// 用 ansi.Strip 去掉 ANSI 后保留纯 markdown 结构，再由 sgrColor 统一上色。
 			if m.renderer != nil {
 				rendered, err := m.renderer.Render(l.content)
 				if err == nil && rendered != "" {
-					sb.WriteString(sgrColor(m.aiColor, rendered) + "\n\n")
+					sb.WriteString(sgrColor(m.aiColor, ansi.Strip(rendered)) + "\n\n")
 				} else {
 					sb.WriteString(sgrColor(m.aiColor, l.content) + "\n\n")
 				}
@@ -177,7 +181,7 @@ func (m *tuiModel) renderAllDirect() {
 	text := m.extr.Text()
 	m.streamMu.Unlock()
 	if active && text != "" {
-		sb.WriteString(sgrColor(m.aiColor, "▲ 回复中" + "\n"))
+		sb.WriteString(sgrColor(m.aiColor, "▲ 回复中"+"\n"))
 		sb.WriteString(text)
 		sb.WriteString(sgrColor(m.aiColor, "▍\n\n"))
 	}
@@ -357,20 +361,25 @@ func (m *tuiModel) spinnerLoop() {
 	}
 }
 
-// renderQueue 渲染排队消息列表（仅从事件循环调用）
+// renderQueue 渲染排队消息列表（仅从事件循环调用）。
+// queueView 初始注册为 0 高度（不可见）；队列非空时用 ResizeItem 动态分配高度。
+// 旧 bug：AddItem(queueView, 0, 0) 的 fixedSize=0+proportion=0 恒为 0 高度，排队永远不可见。
 func (m *tuiModel) renderQueue() {
 	if len(m.queue) == 0 {
-		m.queueView.SetText("").SetDynamicColors(true)
-		// 队列空时隐藏 queueView
-		if m.queueVisible {
-			m.queueVisible = false
-			m.flex.RemoveItem(m.queueView)
-		}
+		m.queueView.SetText("")
+		m.flex.ResizeItem(m.queueView, 0, 0) // 隐藏：0 高度
+		m.queueVisible = false
 		return
 	}
 	var sb strings.Builder
 	sb.WriteString(sgrColor("yellow", fmt.Sprintf("排队 (%d条)  Alt+↑ 取回：", len(m.queue))))
+	shown := 0
 	for i, q := range m.queue {
+		if shown >= 7 {
+			sb.WriteString("\n")
+			sb.WriteString(sgrColor("yellow", fmt.Sprintf("... 还有 %d 条", len(m.queue)-i)))
+			break
+		}
 		// 截断长消息，每行最多 60 字符
 		content := q
 		if len(content) > 60 {
@@ -378,13 +387,16 @@ func (m *tuiModel) renderQueue() {
 		}
 		sb.WriteString("\n")
 		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%d: %s", i+1, content)))
+		shown++
 	}
 	m.queueView.SetText(sb.String()).SetDynamicColors(true)
-	// 队列非空时显示 queueView
-	if !m.queueVisible {
-		m.queueVisible = true
-		m.flex.AddItem(m.queueView, 0, 0, false)
+	// 固定高度：标题 + 最多 7 条（含省略行），防止队列内容挤压聊天区
+	h := len(m.queue) + 1
+	if h > 8 {
+		h = 8
 	}
+	m.flex.ResizeItem(m.queueView, h, 0)
+	m.queueVisible = true
 }
 
 // setLoadingAsync 从 goroutine 安全设置加载状态（loading 赋值挪入事件循环回调，避免数据竞争）
@@ -399,6 +411,7 @@ func (m *tuiModel) setLoadingAsync(loading bool) {
 		if !loading && len(m.queue) > 0 {
 			q := m.queue[len(m.queue)-1]
 			m.queue = m.queue[:len(m.queue)-1]
+			m.renderQueue() // 队列条数已变，刷新列表/移除组件
 			m.startTask(q)
 		}
 	})
@@ -613,7 +626,8 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		renderer: func() *glamour.TermRenderer {
 			r, _ := glamour.NewTermRenderer(
 				glamour.WithAutoStyle(),
-				glamour.WithWordWrap(80),
+				// 不用 WithWordWrap：glamour 会把 \n 替换成空格+\n，剥除 ANSI 后
+				// 这些字面量 \n 会原样显示。改由 tview 根据终端宽度自动换行。
 			)
 			return r
 		}(),
@@ -636,7 +650,8 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 				m.lines = append(m.lines, chatLine{role: "tool", content: "🔄 " + msg.ToolName + "(" + truncateArgs(msg.ToolArgs) + ")", ts: time.Now()})
 				continue
 			case agent.KindToolResult:
-				result := strings.TrimSpace(strings.TrimPrefix(msg.Content, "工具结果: "))
+				result := builtins.StripTodoMarker(strings.TrimPrefix(msg.Content, "工具结果: "))
+				result = strings.TrimSpace(result)
 				if len(result) > 300 {
 					result = result[:297] + "..."
 				}
@@ -682,6 +697,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		SetText("")
 
 	// 布局：垂直排列（聊天区占满剩余空间 → 排队列表 → 自动提示 → 输入框 → 状态栏）
+	// queueView 初始 0 高度隐藏；渲染队列时由 renderQueue → ResizeItem 动态调高。
 	// 输入框固定 5 行高度（内容多时内部滚动），聊天区独占剩余空间
 	m.flex = tview.NewFlex().
 		SetDirection(tview.FlexRow).
@@ -694,7 +710,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 	// 应用
 	m.app = tview.NewApplication()
 	m.app.EnableMouse(true)
-	m.app.EnablePaste(true)  // 启用 bracketed paste：粘贴多行文本时作为整体处理
+	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理
 
 	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
 	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
@@ -1035,8 +1051,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			if ctx.Err != nil {
 				m.addChatLineAsync(chatLine{role: "err", content: ctx.Tool + " 失败: " + ctx.Err.Error(), ts: time.Now()})
 			} else if ctx.Result != "" {
-				// 工具结果：显示内容，长文本截断（避免刷屏）
-				result := strings.TrimSpace(ctx.Result)
+				// 工具结果：显示内容，长文本截断（避免刷屏）；todo 状态标记剥离
+				result := builtins.StripTodoMarker(ctx.Result)
+				result = strings.TrimSpace(result)
 				if len(result) > 300 {
 					result = result[:297] + "..."
 				}
@@ -1092,7 +1109,6 @@ func (m *tuiModel) submitInput(s string) {
 		}()
 		return
 	}
-
 
 	if s == "/quit" || s == "/exit" {
 		m.app.Stop()
