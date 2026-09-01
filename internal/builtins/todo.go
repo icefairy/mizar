@@ -7,8 +7,8 @@ package builtins
 import (
 	"encoding/json"
 
-	"mizar/internal/plugins"
 	"fmt"
+	"mizar/internal/plugins"
 	"strings"
 	"sync"
 )
@@ -20,9 +20,9 @@ type TodoItem struct {
 }
 
 const (
-	StatusPending   = "pending"
+	StatusPending    = "pending"
 	StatusInProgress = "in_progress"
-	StatusCompleted = "completed"
+	StatusCompleted  = "completed"
 )
 
 // Registry 进程内 todo 清单（单 session 级，Reset 清空）。

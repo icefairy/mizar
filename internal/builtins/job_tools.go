@@ -119,4 +119,3 @@ func jobKillTool(reg *jobs.Registry) plugins.Tool {
 		},
 	}
 }
-

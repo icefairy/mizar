@@ -10,11 +10,11 @@ import (
 
 // Question 单个问题（对齐 dsh tool-ask-user schema）。
 type Question struct {
-	ID         string     `json:"id"`
-	Question   string     `json:"question"`
-	Header     string     `json:"header,omitempty"`
-	Options    []Option   `json:"options,omitempty"`
-	MultiSelect bool      `json:"multi_select,omitempty"`
+	ID          string   `json:"id"`
+	Question    string   `json:"question"`
+	Header      string   `json:"header,omitempty"`
+	Options     []Option `json:"options,omitempty"`
+	MultiSelect bool     `json:"multi_select,omitempty"`
 }
 
 // Option 单选/多选选项。
@@ -25,9 +25,9 @@ type Option struct {
 
 // Answer 单个问题的回答（id 对应 Question.ID）。
 type Answer struct {
-	ID        string   `json:"id"`
-	Value     string   `json:"value"`
-	Values    []string `json:"values,omitempty"` // multi_select
+	ID     string   `json:"id"`
+	Value  string   `json:"value"`
+	Values []string `json:"values,omitempty"` // multi_select
 }
 
 // toolAskUser 返回 ask_user_question 工具。

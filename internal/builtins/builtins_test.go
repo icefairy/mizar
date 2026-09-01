@@ -30,7 +30,7 @@ func call(t *testing.T, tool string, args string) (string, error) {
 
 // TestBash echo + 超时。
 func TestBash(t *testing.T) {
-	out, err := call(t, "bash", `{"command":"echo hello"}`, )
+	out, err := call(t, "bash", `{"command":"echo hello"}`)
 	if err != nil || !strings.Contains(out, "hello") {
 		t.Fatalf("bash: out=%q err=%v", out, err)
 	}

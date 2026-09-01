@@ -37,10 +37,10 @@ func (sm *SkillManager) Tool() plugins.Tool {
 
 func (sm *SkillManager) run(args string) (string, error) {
 	var p struct {
-		Action string `json:"action"`
-		Name   string `json:"name"`
-		Body   string `json:"body,omitempty"`
-		Find   string `json:"find,omitempty"`
+		Action  string `json:"action"`
+		Name    string `json:"name"`
+		Body    string `json:"body,omitempty"`
+		Find    string `json:"find,omitempty"`
 		Replace string `json:"replace,omitempty"`
 	}
 	if err := parseArgs(args, &p); err != nil {

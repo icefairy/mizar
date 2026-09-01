@@ -14,12 +14,12 @@ func TestNormalizeForFuzzyMatch(t *testing.T) {
 		{"'hello'", "'hello'"},
 		{"\"world\"", "\"world\""},
 		// 各种破折号 → -
-		{"a–b", "a-b"},   // en-dash
-		{"a—b", "a-b"},   // em-dash
-		{"a‐b", "a-b"},   // hyphen
+		{"a–b", "a-b"}, // en-dash
+		{"a—b", "a-b"}, // em-dash
+		{"a‐b", "a-b"}, // hyphen
 		// 特殊空格 → 普通空格
-		{"a b", "a b"},   // NBSP
-		{"a　b", "a b"},  // 全角空格
+		{"a b", "a b"}, // NBSP
+		{"a　b", "a b"}, // 全角空格
 		// 连字
 		{"ﬁre", "fire"},
 		{"ﬂag", "flag"},
