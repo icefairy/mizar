@@ -4,22 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
-
-// processAlive 判断 pid 进程是否存活
-func processAlive(pidStr string) bool {
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil || pid <= 0 {
-		return false
-	}
-	err = syscall.Kill(pid, 0)
-	return err == nil
-}
 
 // P0-1: 多编辑倒序应用——前面 edit 改变长度不应导致后面 edit 错配
 func TestEditReverseOrder(t *testing.T) {

@@ -29,7 +29,7 @@ import (
 // onPluginFileChanged 可选回调：write/edit 写入插件目录内文件后触发（插件自动热重载，nil = 不启用）；
 // 返回值会追加到工具输出（如“✓ 插件已重载”或编译错误），让模型立即感知插件生效与否。
 func All(skillsDir string, onPluginFileChanged func(path string) string) []plugins.Tool {
-	return []plugins.Tool{
+	tools := []plugins.Tool{
 		toolBash(),
 		toolGrep(),
 		toolFind(),
@@ -40,10 +40,13 @@ func All(skillsDir string, onPluginFileChanged func(path string) string) []plugi
 		toolRepoMap(),
 		skillManage(skillsDir),
 		toolTodoWrite(),
+		toolTodo(),
 		toolAskUser(),
 		toolSkill(skillsDir),
 		toolExitPlanMode(),
 	}
+	tools = append(tools, platformTools()...)
+	return tools
 }
 
 // toolBash 执行 shell 命令（对齐 pi 的 bash 工具：timeout 可选，无默认超时）。
