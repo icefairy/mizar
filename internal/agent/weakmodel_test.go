@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestTunerParseEscalation 连续解析失败触发升级提示。
@@ -116,4 +117,28 @@ func TestTunerInAgentLoop(t *testing.T) {
 	if !found {
 		t.Fatalf("未出现升级提示, prompts=%v", prompts)
 	}
+}
+
+// TestTunerRetryDelay 验证可配置退避延迟。
+func TestTunerRetryDelay(t *testing.T) {
+	// 默认 1s 起跳
+	t.Run("default", func(t *testing.T) {
+		tuner := DefaultTuner()
+		if d := tuner.RetryDelay(1); d != 1000*time.Millisecond {
+			t.Fatalf("expected 1s, got %v", d)
+		}
+		if d := tuner.RetryDelay(2); d != 2000*time.Millisecond {
+			t.Fatalf("expected 2s, got %v", d)
+		}
+	})
+	// 自定义 baseDelayMs
+	t.Run("custom", func(t *testing.T) {
+		tuner := DefaultTuner().WithRetryConfig(3, 500)
+		if d := tuner.RetryDelay(1); d != 500*time.Millisecond {
+			t.Fatalf("expected 500ms, got %v", d)
+		}
+		if d := tuner.RetryDelay(2); d != 1000*time.Millisecond {
+			t.Fatalf("expected 1s, got %v", d)
+		}
+	})
 }

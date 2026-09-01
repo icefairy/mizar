@@ -363,14 +363,20 @@ func main() {
 	if skPrompt != "" {
 		log.Printf("技能注入 %d 个 (%s)", len(skLoaded), skMode)
 	}
+	a.SkillsPrompt = skPrompt
 	// AGENTS.md 自动读取（全局 ~/.mizar/AGENTS.md + 局部向上查找，相加注入）
 	wd := *workDir
 	if wd == "" {
 		wd, _ = os.Getwd()
 	}
-	agentsPrompt := context.Load(wd)
-	if agentsPrompt != "" {
-		log.Printf("AGENTS.md 注入: %s", strings.Join(context.AGENTSFiles(wd), ", "))
+	contextPrompt := context.LoadContextFiles(wd)
+	if contextPrompt != "" {
+		log.Printf("上下文文件注入: %s", strings.Join(context.ContextFiles(wd), ", "))
+	}
+	// SOUL.md 身份声明（跨会话稳定，注入 stable+context 层）
+	a.Soul = context.LoadSoul()
+	if a.Soul != "" {
+		log.Printf("SOUL.md 注入: %s", context.SoulPath())
 	}
 
 	// 会话存储（模仿 pi Agent：按工作路径自动分目录，路径记忆）
@@ -395,8 +401,13 @@ func main() {
 	}
 
 	a.PluginDir = extAbs
+	a.WorkDir = wd
 	// 默认启用弱模型宽容策略：死循环检测 + 解析失败降级 + LLM 故障重试
 	a.Tuner = agent.DefaultTuner()
+	// 从配置读取重试参数（0 = 保持默认）
+	if cfg, err := config.Load(config.DefaultPath()); err == nil {
+		a.Tuner.WithRetryConfig(cfg.RetryMaxRetries, cfg.RetryBaseDelayMs)
+	}
 	// 后台任务注册表（bash run_in_background + job_* 工具共用）
 	a.Jobs = jobs.NewRegistry()
 	// 会话目标服务
@@ -468,7 +479,7 @@ func main() {
 - 工具出错先看错误信息：根据错误修正调用参数重试，而不是一开始就修改工具本身的实现（插件改动写入插件目录会自动重载生效；用 bash 改动插件后需调用 reload_plugins 工具；日常任务不要中途改已加载的插件）。
 - 写代码/插件时：按系统提示末尾「插件」段给出的宿主函数清单与最小示例直接创建文件，不要在源码或二进制里搜索 API 定义。
 - 避免空转：同一方向最多探索 2 次；连续 2 次工具调用未获得新信息立即换更直接的方案。strings/find/grep 换花样搜同一目标属于空转。
-- 分步交付：任务无法在几步内完成时，先完成核心部分并及时给出阶段性回复。` + skPrompt + agentsPrompt
+- 分步交付：任务无法在几步内完成时，先完成核心部分并及时给出阶段性回复。`
 	a.VerboseLog = func(msg string) { log.Print(msg) }
 
 	// Prompt Templates：~/.mizar/prompts/*.md + 项目 .mizar/prompts/*.md
@@ -892,6 +903,14 @@ func main() {
 			}
 		},
 	})
+	// 内置 /todos 命令：查看待办清单（pi 式 todo 工具的状态展示）
+	a.Commands.Register(agent.Command{
+		Name:        "todos",
+		Description: "查看当前待办清单（todo 工具创建的待办）",
+		Run: func(args string) (string, error) {
+			return builtins.RenderPiTodos(), nil
+		},
+	})
 	// 内置 /quit 命令：退出交互模式
 	a.Commands.Register(agent.Command{
 		Name:        "quit",
@@ -928,55 +947,55 @@ func main() {
   /color user blue    设置用户消息为蓝色
   /color ai cyan      设置 AI 回复为青色
   /color reset        恢复默认颜色（用户 white, AI green）`, userColor, aiColor), nil
-		}
-		fields := strings.Fields(args)
-		if len(fields) < 2 {
-			return "", fmt.Errorf("用法: /color <user|ai|reset> [<颜色>]\n示例: /color user blue  或 /color reset")
-		}
-		target := fields[0]
-		color := ""
-		if len(fields) > 1 {
-			color = fields[1]
-		}
-		// 验证颜色值
-		validColors := map[string]bool{
-			"black": true, "red": true, "green": true, "yellow": true,
-			"blue": true, "magenta": true, "cyan": true, "white": true,
-			"grey": true, "default": true,
-		}
-		if color != "" && !validColors[color] {
-			return "", fmt.Errorf("无效颜色 %q，可用: black, red, green, yellow, blue, magenta, cyan, white, grey, default", color)
-		}
-		switch target {
-		case "user":
-			if color == "" {
-				return "", fmt.Errorf("用法: /color user <颜色>，示例: /color user blue")
 			}
-			cfg.UserColor = color
-			if err := config.Save(config.DefaultPath(), cfg); err != nil {
-				return "", fmt.Errorf("保存失败: %v", err)
+			fields := strings.Fields(args)
+			if len(fields) < 2 {
+				return "", fmt.Errorf("用法: /color <user|ai|reset> [<颜色>]\n示例: /color user blue  或 /color reset")
 			}
-			return fmt.Sprintf("✓ 用户消息颜色已设置为: %s（下次启动生效，当前会话需重启 TUI）", color), nil
-		case "ai":
-			if color == "" {
-				return "", fmt.Errorf("用法: /color ai <颜色>，示例: /color ai cyan")
+			target := fields[0]
+			color := ""
+			if len(fields) > 1 {
+				color = fields[1]
 			}
-			cfg.AiColor = color
-			if err := config.Save(config.DefaultPath(), cfg); err != nil {
-				return "", fmt.Errorf("保存失败: %v", err)
+			// 验证颜色值
+			validColors := map[string]bool{
+				"black": true, "red": true, "green": true, "yellow": true,
+				"blue": true, "magenta": true, "cyan": true, "white": true,
+				"grey": true, "default": true,
 			}
-			return fmt.Sprintf("✓ AI 回复颜色已设置为: %s（下次启动生效，当前会话需重启 TUI）", color), nil
-		case "reset":
-			cfg.UserColor = ""
-			cfg.AiColor = ""
-			if err := config.Save(config.DefaultPath(), cfg); err != nil {
-				return "", fmt.Errorf("保存失败: %v", err)
+			if color != "" && !validColors[color] {
+				return "", fmt.Errorf("无效颜色 %q，可用: black, red, green, yellow, blue, magenta, cyan, white, grey, default", color)
 			}
-			return "✓ 颜色已恢复默认（用户 white, AI green）", nil
-		default:
-			return "", fmt.Errorf("未知目标 %q，支持: user, ai, reset", target)
-		}
-	},
+			switch target {
+			case "user":
+				if color == "" {
+					return "", fmt.Errorf("用法: /color user <颜色>，示例: /color user blue")
+				}
+				cfg.UserColor = color
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("保存失败: %v", err)
+				}
+				return fmt.Sprintf("✓ 用户消息颜色已设置为: %s（下次启动生效，当前会话需重启 TUI）", color), nil
+			case "ai":
+				if color == "" {
+					return "", fmt.Errorf("用法: /color ai <颜色>，示例: /color ai cyan")
+				}
+				cfg.AiColor = color
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("保存失败: %v", err)
+				}
+				return fmt.Sprintf("✓ AI 回复颜色已设置为: %s（下次启动生效，当前会话需重启 TUI）", color), nil
+			case "reset":
+				cfg.UserColor = ""
+				cfg.AiColor = ""
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("保存失败: %v", err)
+				}
+				return "✓ 颜色已恢复默认（用户 white, AI green）", nil
+			default:
+				return "", fmt.Errorf("未知目标 %q，支持: user, ai, reset", target)
+			}
+		},
 	})
 	// 内置 /think 命令：查看/切换思考等级（auto/off/low/medium/high）
 	a.Commands.Register(agent.Command{
@@ -1050,8 +1069,8 @@ func main() {
   模型 model: %s
   供应商 base_url: %s
 可修改项: max_steps ｜ 修改方法: /config max_steps 30`, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
-			}
-			return fmt.Sprintf(`当前运行配置:
+				}
+				return fmt.Sprintf(`当前运行配置:
   最大步数 max_steps: %d
   上下文窗口 context_window: %d (token, 配置:%d)
   思考等级 thinking_level: %s
@@ -1343,6 +1362,8 @@ func main() {
 				msgs = msgs[len(msgs)-*history:]
 			}
 			a.Initial = msgs
+			// 恢复 pi 式 todo 状态：回放会话历史中的 todo 工具结果（参照 pi reconstructState）
+			builtins.SetTodosFromHistory(msgs)
 			log.Printf("恢复会话 %s: %d 条历史", *sessionID, len(msgs))
 		}
 	}

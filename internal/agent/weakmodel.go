@@ -24,6 +24,9 @@ type WeakModelTuner struct {
 	// 死循环检测：记录最近 N 个工具调用，若连续重复则中断
 	loopWindowSize int // 窗口大小（默认 3）
 
+	// LLM 重试退避
+	retryBaseDelayMs int // 初始退避毫秒（默认 1000）
+
 	// 状态
 	parseFailures        atomic.Int32 // 当前连续解析失败数
 	consecutiveToolCalls atomic.Value // 最近 N 个工具调用
@@ -41,6 +44,17 @@ func DefaultTuner() *WeakModelTuner {
 		maxStepLimit:     50,
 		loopWindowSize:   3,
 	}
+}
+
+// WithRetryConfig 用配置中的 retry 参数覆盖默认值（0 = 保持默认）。
+func (t *WeakModelTuner) WithRetryConfig(maxRetries, baseDelayMs int) *WeakModelTuner {
+	if maxRetries > 0 {
+		t.maxLLMRetries = maxRetries
+	}
+	if baseDelayMs > 0 {
+		t.retryBaseDelayMs = baseDelayMs
+	}
+	return t
 }
 
 // Reset 重置所有计数（新任务开始时调用）。
@@ -148,7 +162,11 @@ func (t *WeakModelTuner) RemainingSteps(current, maxSteps int) (int, bool) {
 }
 
 // RetryDelay 返回 LLM 重试的退避等待时间。
+// 指数退避：baseDelayMs * 2^(retryCount-1)
 func (t *WeakModelTuner) RetryDelay(retryCount int) time.Duration {
-	// 指数退避：1s, 2s, 4s
-	return time.Duration(1<<uint(retryCount-1)) * time.Second
+	base := t.retryBaseDelayMs
+	if base <= 0 {
+		base = 1000 // 默认 1s
+	}
+	return time.Duration(base*(1<<uint(retryCount-1))) * time.Millisecond
 }

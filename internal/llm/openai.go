@@ -32,6 +32,10 @@ type OpenAI struct {
 	ThinkingLevel string
 	// 最后一次响应的 token 用量（只读，供 TUI 状态栏展示）
 	lastUsage *agent.Usage
+	// forcedToolCalls 连续强制工具调用的次数：
+	// 模型在可用工具时跳过工具调用（直接 reply），此计数器递增；
+	// 重置条件：模型实际调用了工具 或 请求未携带工具定义。
+	forcedToolCalls int
 }
 
 // NewOpenAI 创建客户端。
@@ -96,6 +100,7 @@ type chatReq struct {
 	Model           string    `json:"model"`
 	Messages        []chatMsg `json:"messages"`
 	Tools           []toolDef `json:"tools,omitempty"`
+	ToolChoice      any       `json:"tool_choice,omitempty"` // "auto" / "required" / 命名对象
 	MaxTokens       int       `json:"max_tokens,omitempty"`
 	Temperature     float64   `json:"temperature,omitempty"`
 	Stream          bool      `json:"stream,omitempty"`
@@ -202,6 +207,30 @@ func (c *OpenAI) reasoningEffort(level string) string {
 	return ""
 }
 
+// maxForcedToolCalls 连续强制工具调用的上限，超过则放弃强制（防止死循环）。
+const maxForcedToolCalls = 3
+
+// setToolChoice 根据当前 forcedToolCalls 状态设置 tool_choice。
+// 当工具列表非空且已累积强制次数时，设为 "required" 强制模型调用工具；
+// 否则不传该字段（模型默认 auto）。
+func (o *OpenAI) setToolChoice(req *chatReq, tools []plugins.Tool) {
+	if len(tools) > 0 && o.forcedToolCalls >= 1 {
+		req.ToolChoice = "required"
+	}
+}
+
+// updateForcedToolCalls 根据本次响应是否包含工具调用，更新 forcedToolCalls 计数器。
+// hadToolCall=true 时重置；hadToolCall=false 时递增（不超过上限）。
+func (o *OpenAI) updateForcedToolCalls(hadToolCall bool) {
+	if hadToolCall {
+		o.forcedToolCalls = 0
+	} else {
+		if o.forcedToolCalls < maxForcedToolCalls {
+			o.forcedToolCalls++
+		}
+	}
+}
+
 // ============================================================================
 // 核心方法
 // ============================================================================
@@ -219,6 +248,7 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	for _, t := range tools {
 		req.Tools = append(req.Tools, pluginsToolToDef(t))
 	}
+	c.setToolChoice(&req, tools)
 	c.setThinking(&req)
 
 	body, err := json.Marshal(req)
@@ -261,8 +291,10 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	fr := out.Choices[0].FinishReason
 	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
 	if len(msg.ToolCalls) > 0 {
+		c.updateForcedToolCalls(true)
 		return toolCallsToText(msg.ToolCalls), nil
 	}
+	c.updateForcedToolCalls(false)
 	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
 	// 若模型已输出控制 JSON（含混合文本中嵌入的 tool/reply JSON），优先透传提取结果，
 	// 避免“解释文本 + tool JSON”被整段包成 reply 导致工具不执行、JSON 原样显示。
@@ -344,8 +376,15 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 	for _, t := range tools {
 		req.Tools = append(req.Tools, pluginsToolToDef(t))
 	}
+	o.setToolChoice(&req, tools)
 	o.setThinking(&req)
-	return o.streamCore(&req, true, onToken)
+	reply, err := o.streamCore(&req, true, onToken)
+	if err != nil {
+		return reply, err
+	}
+	// 根据响应是否包含工具调用，更新 forcedToolCalls 计数器
+	o.updateForcedToolCalls(isToolCallResponse(reply))
+	return reply, err
 }
 
 // AIChatStream 插件直连对话（流式）：ai_chat_stream 宿主函数的底层实现。
@@ -821,7 +860,11 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "..."
 }
 
-// escapeJSONString 将字符串中的特殊字符转义，使其可安全嵌入 JSON 字符串值。
+// isToolCallResponse 判断响应是否为工具调用 JSON（{"action":"tool",...}）。
+func isToolCallResponse(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, `{"action":"tool"`)
+}
 // 仅处理必须转义的字符（"、\、控制字符），不转义 Unicode。
 func escapeJSONString(s string) string {
 	var b strings.Builder

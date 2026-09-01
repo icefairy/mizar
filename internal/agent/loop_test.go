@@ -269,3 +269,59 @@ func TestRunStreamReplyWithTool(t *testing.T) {
 		t.Fatalf("want 3 个分片回调（工具 JSON 1 + 回复 2），got %d: %v", len(got), got)
 	}
 }
+
+// ============================================================================
+// Context overflow / non-retryable error 分类测试
+// ============================================================================
+
+func TestIsContextOverflow(t *testing.T) {
+	tests := []struct {
+		err    string
+		wantOK bool
+	}{
+		{"llm status 400: maximum context length exceeded", true},
+		{"llm error: context_length_exceeded", true},
+		{"llm status 400: prompt is too long", true},
+		{"llm status 400: 超出上下文长度限制", true},
+		{"llm status 500: internal server error", false},
+		{"http: connection refused", false},
+		{"decode: unexpected EOF", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		var err error
+		if tt.err != "" {
+			err = errors.New(tt.err)
+		}
+		got := isContextOverflow(err)
+		if got != tt.wantOK {
+			t.Errorf("isContextOverflow(%q) = %v, want %v", tt.err, got, tt.wantOK)
+		}
+	}
+}
+
+func TestIsNonRetryableError(t *testing.T) {
+	tests := []struct {
+		err    string
+		wantOK bool
+	}{
+		{"llm error: model not found", true},
+		{"llm status 401: unauthorized", true},
+		{"llm status 403: forbidden", true},
+		{"llm status 402: insufficient quota", true},
+		{"llm status 429: rate limit exceeded, retry after 60s", false}, // 带 retry 提示的 429 可重试
+		{"llm status 500: internal server error", false},
+		{"http: connection refused", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		var err error
+		if tt.err != "" {
+			err = errors.New(tt.err)
+		}
+		got := isNonRetryableError(err)
+		if got != tt.wantOK {
+			t.Errorf("isNonRetryableError(%q) = %v, want %v", tt.err, got, tt.wantOK)
+		}
+	}
+}

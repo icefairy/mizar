@@ -1,10 +1,12 @@
-// Package context 提供 AGENTS.md 自动读取（全局 + 局部相加）。
+// Package context 提供 SOUL.md + AGENTS.md 自动读取（全局 + 局部相加）。
 //
-// 规则（参照 Claude Code / Hermes 的 AGENTS.md 约定）：
-//   - 全局文件：~/.mizar/AGENTS.md（所有项目共享的全局指令）
+// 规则（参照 Claude Code / Hermes 的上下文文件约定）：
+//   - SOUL.md：~/.mizar/SOUL.md（用户个人化身份声明，stable 层，跨会话稳定）
+//   - 全局 AGENTS.md：~/.mizar/AGENTS.md（所有项目共享的全局指令）
 //   - 局部文件：从工作目录向上递归查找 AGENTS.md（最近者优先，类似 git
 //     向上查找）；也可用 --agents-file 显式指定
-//   - 相加方式：全局内容 + 局部内容拼接（全局在前），都注入 System prompt
+//   - 扩展文件：.cursorrules、USER.md（可选，同目录查找）
+//   - 注入顺序：SOUL.md → 全局 AGENTS.md → 局部 AGENTS.md → .cursorrules → USER.md
 package context
 
 import (
@@ -15,6 +17,24 @@ import (
 
 	"mizar/internal/config"
 )
+
+// SoulPath 返回 SOUL.md 路径（~/.mizar/SOUL.md）。
+func SoulPath() string {
+	return filepath.Join(config.ConfigDir(), "SOUL.md")
+}
+
+// LoadSoul 读取 ~/.mizar/SOUL.md，不存在返回空字符串。
+func LoadSoul() string {
+	b, err := os.ReadFile(SoulPath())
+	if err != nil {
+		return ""
+	}
+	content := strings.TrimSpace(string(b))
+	if content == "" {
+		return ""
+	}
+	return content
+}
 
 // AGENTSFiles 返回 [全局, 局部] 两个 AGENTS.md 文件路径（不存在的返回空）。
 // 全局文件与配置文件同目录：~/.mizar/AGENTS.md。
@@ -30,26 +50,77 @@ func AGENTSFiles(workDir string) []string {
 	return files
 }
 
-// Load 读取全局 + 局部 AGENTS.md 并相加渲染。
+// ContextFiles 返回所有上下文文件路径，按注入优先级排序：
+// [全局 AGENTS.md, 局部 AGENTS.md, .cursorrules, USER.md]。
+// 文件不存在则跳过。
+func ContextFiles(workDir string) []string {
+	var files []string
+	for _, name := range []string{"AGENTS.md", ".cursorrules", "USER.md"} {
+		if local := findUpwards(workDir, name); local != "" {
+			files = append(files, local)
+		}
+	}
+	// 全局 AGENTS.md 固定在前（即使局部不存在）
+	global := filepath.Join(config.ConfigDir(), "AGENTS.md")
+	if fileExists(global) && !contains(files, global) {
+		files = append([]string{global}, files...)
+	}
+	return files
+}
+
+func contains(slice []string, val string) bool {
+	for _, s := range slice {
+		if s == val {
+			return true
+		}
+	}
+	return false
+}
+
+// Load 读取全局 + 局部 AGENTS.md 并相加渲染（向后兼容）。
 // 返回渲染后的提示文本；文件不存在或为空返回空字符串。
 func Load(workDir string) string {
+	return LoadContextFiles(workDir)
+}
+
+// LoadContextFiles 读取所有上下文文件（含全局/局部 AGENTS.md、.cursorrules、USER.md）
+// 并相加渲染。SOUL.md 需单独调用 LoadSoul()。
+// 返回渲染后的提示文本；无文件时返回空字符串。
+func LoadContextFiles(workDir string) string {
+	labels := map[string]string{
+		"AGENTS.md":   "全局",
+		".cursorrules": "项目配置",
+		"USER.md":     "用户档案",
+	}
 	var sb strings.Builder
-	for i, f := range AGENTSFiles(workDir) {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			continue
+	// 先放全局 AGENTS.md
+	global := filepath.Join(config.ConfigDir(), "AGENTS.md")
+	if fileExists(global) {
+		appendFile(&sb, global, "全局 AGENTS.md")
+	}
+	// 再放局部文件（工作目录向上查找）
+	for _, name := range []string{"AGENTS.md", ".cursorrules", "USER.md"} {
+		if local := findUpwards(workDir, name); local != "" {
+			label := labels[name]
+			if name == "AGENTS.md" && global == local {
+				continue // 全局已处理，跳过重复
+			}
+			appendFile(&sb, local, label)
 		}
-		content := strings.TrimSpace(string(b))
-		if content == "" {
-			continue
-		}
-		label := "全局"
-		if i == 1 {
-			label = "项目"
-		}
-		fmt.Fprintf(&sb, "\n=== %s AGENTS.md (%s) ===\n%s\n", label, f, content)
 	}
 	return sb.String()
+}
+
+func appendFile(sb *strings.Builder, path, label string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := strings.TrimSpace(string(b))
+	if content == "" {
+		return
+	}
+	fmt.Fprintf(sb, "\n=== %s (%s) ===\n%s\n", label, path, content)
 }
 
 // findUpwards 从 dir 开始向上递归查找 filename，返回第一个命中的路径。

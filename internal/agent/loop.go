@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"mizar/internal/context"
 	"mizar/internal/engine"
 	"mizar/internal/jobs"
 	"mizar/internal/lifecycle"
@@ -20,10 +21,10 @@ import (
 // CacheStats 系统提示词缓存命中率统计。
 // 由 Agent 维护，启动/重启时打印摘要。
 type CacheStats struct {
-	mu      sync.Mutex
-	hits    int // SystemPrompt() 命中缓存的调用次数
-	misses  int // 缓存失效后重建的次数
-	total   int // hits + misses
+	mu     sync.Mutex
+	hits   int // SystemPrompt() 命中缓存的调用次数
+	misses int // 缓存失效后重建的次数
+	total  int // hits + misses
 }
 
 // RecordHit 记录一次缓存命中。
@@ -92,24 +93,27 @@ const maxStepsWarnRemain = 3
 
 // Agent 是主循环。
 type Agent struct {
-	LLM        LLM
-	Plugins    *plugins.Manager
-	System     string
-	PluginDir  string          // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
-	Initial    []Message       // 会话恢复时的历史消息（置于 task 之前）
-	MaxSteps   int             // 最大循环步数（默认 maxStepsDefault=60）
-	VerboseLog func(string)    // 可选日志回调
-	Compactor  *Compactor      // 会话压缩器（nil = 不压缩）
-	Hooks      *Hooks          // 挂载点（nil = 无钩子）
-	Tuner      *WeakModelTuner // 弱模型宽容策略（nil = 不启用）
-	Guard      *RepeatGuard    // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
-	Jobs       *jobs.Registry  // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
-	PlanMode   *PlanMode       // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
-	GoalService *GoalService   // 会话目标服务（nil = 不启用；复刻 dsh goal）
-	GoalLoop   *GoalLoop       // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
-	SubAgents  *SubagentManager // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
-	BgReview   *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
-	StatsData  *StatsDataRef // 会话统计（nil = 不启用）
+	LLM         LLM
+	Plugins     *plugins.Manager
+	System      string // 用户自定义个性化指令（注入 context 层）
+	Soul        string // SOUL.md 内容（identity 层，跨会话稳定）
+	SkillsPrompt string // 技能索引/正文（volatile 层，插件热加载时通过 ReloadTools 失效缓存）
+	PluginDir   string            // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
+	WorkDir     string            // 当前工作目录，注入系统提示供模型锚定搜索范围
+	Initial     []Message         // 会话恢复时的历史消息（置于 task 之前）
+	MaxSteps    int               // 最大循环步数（默认 maxStepsDefault=60）
+	VerboseLog  func(string)      // 可选日志回调
+	Compactor   *Compactor        // 会话压缩器（nil = 不压缩）
+	Hooks       *Hooks            // 挂载点（nil = 无钩子）
+	Tuner       *WeakModelTuner   // 弱模型宽容策略（nil = 不启用）
+	Guard       *RepeatGuard      // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
+	Jobs        *jobs.Registry    // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
+	PlanMode    *PlanMode         // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
+	GoalService *GoalService      // 会话目标服务（nil = 不启用；复刻 dsh goal）
+	GoalLoop    *GoalLoop         // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
+	SubAgents   *SubagentManager  // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
+	BgReview    *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
+	StatsData   *StatsDataRef     // 会话统计（nil = 不启用）
 
 	// AuxLLM 辅助模型（judge / background review 用；nil = 使用主 LLM）
 	AuxLLM AuxiliaryLLM
@@ -187,9 +191,9 @@ func (a *Agent) Model() string {
 	return "mizar-agent"
 }
 
-// SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
-// 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
-	const defaultSystemPrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。
+// stableBasePrompt 系统提示的稳定前缀（identity + 工作方法 + 搜索定位）。
+// 跨会话不变，保证 prefix cache 命中。
+const stableBasePrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。
 
 ## 工作方法
 遵循以下高效工作流，避免盲目尝试：
@@ -202,43 +206,15 @@ func (a *Agent) Model() string {
 7. 修改代码前先读要改的文件，改完给出摘要。
 8. 回复要简洁，展示文件路径要清晰。
 
-## 会话上下文
-- 当前工作目录由用户所在目录决定，不确定时用 pwd 确认。
-- 项目可能有 AGENTS.md 或 .mizar 上下文文件，相关时先读取。
-- 技能（SKILL.md）通过 index 模式注入系统提示，可用 skill_manage 管理。
+## 搜索与文件定位
+- 当前工作目录已明确告知，**所有文件操作默认相对于当前目录**。
+- 搜索文件时优先用 grep/find 在当前目录递归，不要盲目向上层目录或全局搜索。
+- 只有在当前目录找不到目标时，才扩大搜索范围并说明原因。
+- 使用绝对路径时优先使用相对于当前目录的路径（如 ./src/main.go 而不是 /home/user/project/src/main.go）。
 `
 
-// HostPlugins 定位插件目录（如 ~/.mizar/extensions）。
-// 由系统提示词使用，让模型知道在哪里创建/查找插件。可留空以省略该段。
-
-// SystemPrompt 构建系统提示（含工具列表）。结果被缓存——工具列表在运行期
-// 不可变（插件热加载通过 ReloadTools 显式失效），保证前缀字节级稳定。
-func (a *Agent) SystemPrompt() string {
-	if a.systemPromptCache != "" {
-		a.cacheStats.RecordHit()
-		return a.systemPromptCache
-	}
-	a.cacheStats.RecordMiss()
-	tools := a.Plugins.Tools()
-	var sb strings.Builder
-	sys := a.System
-	if sys == "" {
-		sys = defaultSystemPrompt
-	}
-	sb.WriteString(sys)
-	sb.WriteString("\n")
-	// 计划模式引导（活跃时注入，退出时为空字符串，不影响缓存键稳定）
-	if section := a.PlanMode.SystemSection(); section != "" {
-		sb.WriteString(section)
-	}
-	if len(tools) == 0 {
-		sb.WriteString("（无）\n")
-	} else {
-		for _, t := range tools {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", t.Name, t.Description))
-		}
-	}
-	sb.WriteString(`
+// replyFormatSection 回复格式要求（稳定部分，不随工具变化）。
+const replyFormatSection = `
 ## 回复格式
 你的每轮回复必须是以下两种 XML 标签之一：
 - 调用工具：<tool name="工具名">参数 JSON</tool>
@@ -255,8 +231,78 @@ func (a *Agent) SystemPrompt() string {
 1. 只输出上述标签，不要输出其他文字
 2. tool 标签内的参数是标准 JSON 字符串
 3. reply 标签内是纯文本回答
-`)
+`
 
+// SystemPrompt 构建三层系统提示：stable（identity+基础指令）→ context（SOUL+AGENTS+工作目录）→ volatile（工具+插件）。
+// 结果被缓存——只有 volatile 部分在插件热加载后失效，stable+context 前缀保持字节级稳定。
+func (a *Agent) SystemPrompt() string {
+	if a.systemPromptCache != "" {
+		a.cacheStats.RecordHit()
+		return a.systemPromptCache
+	}
+	a.cacheStats.RecordMiss()
+	var sb strings.Builder
+
+	// === 1. Stable 层：跨会话不变的 identity + 基础指令 ===
+	sb.WriteString(stableBasePrompt)
+
+	// === 2. Context 层：SOUL.md + 用户自定义指令 + 上下文文件 + 工作目录 ===
+	sb.WriteString(a.buildContextSection())
+
+	// === 3. Volatile 层：工具列表 + 插件信息（工具变化时通过 ReloadTools 失效缓存）===
+	sb.WriteString(replyFormatSection)
+	sb.WriteString(a.buildVolatileSection())
+
+	a.systemPromptCache = sb.String()
+	return a.systemPromptCache
+}
+
+// buildContextSection 构建 context 层：SOUL.md → 用户自定义指令 → AGENTS.md → 工作目录 → 计划模式。
+// 这部分在会话内稳定，与 stable 层共同构成缓存前缀。
+func (a *Agent) buildContextSection() string {
+	var sb strings.Builder
+	// SOUL.md（identity，最高优先级）
+	if a.Soul != "" {
+		sb.WriteString("\n## 身份声明（SOUL.md）\n")
+		sb.WriteString(a.Soul)
+		sb.WriteString("\n")
+	}
+	// 用户自定义指令（来自 main.go 的 a.System）
+	if a.System != "" {
+		sb.WriteString(a.System)
+		sb.WriteString("\n")
+	}
+	// 上下文文件（AGENTS.md / .cursorrules / USER.md）
+	if ctx := context.LoadContextFiles(a.WorkDir); ctx != "" {
+		sb.WriteString(ctx)
+	}
+	// 工作目录
+	if a.WorkDir != "" {
+		sb.WriteString(fmt.Sprintf("\n## 当前工作目录\n%s\n", a.WorkDir))
+	}
+	// 计划模式引导（活跃时注入，退出时为空字符串）
+	if section := a.PlanMode.SystemSection(); section != "" {
+		sb.WriteString(section)
+	}
+	return sb.String()
+}
+
+// buildVolatileSection 构建 volatile 层：工具列表 + 技能索引 + 插件目录信息。
+// 工具列表/技能变化时通过 ReloadTools 使缓存失效。
+func (a *Agent) buildVolatileSection() string {
+	var sb strings.Builder
+	tools := a.Plugins.Tools()
+	if len(tools) == 0 {
+		sb.WriteString("（无）\n")
+	} else {
+		for _, t := range tools {
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", t.Name, t.Description))
+		}
+	}
+	// 技能索引/正文（volatile：技能增删时通过 ReloadTools 失效缓存）
+	if a.SkillsPrompt != "" {
+		sb.WriteString(a.SkillsPrompt)
+	}
 	// 插件目录信息（引导模型自己创建/扩展插件）
 	if a.PluginDir != "" {
 		pluginNames := a.Plugins.PluginNames()
@@ -264,7 +310,6 @@ func (a *Agent) SystemPrompt() string {
 		if len(pluginNames) > 0 {
 			sb.WriteString("已加载插件：\n")
 			for _, p := range pluginNames {
-				// 统计每个插件导出了多少个工具
 				sb.WriteString(fmt.Sprintf("- %s\n", p))
 			}
 		}
@@ -293,8 +338,7 @@ func (a *Agent) SystemPrompt() string {
 				"}\n" +
 				"```\n")
 	}
-	a.systemPromptCache = sb.String()
-	return a.systemPromptCache
+	return sb.String()
 }
 
 // ReloadTools 插件热加载后调用：使 SystemPrompt 缓存失效。
@@ -425,6 +469,36 @@ func (a *Agent) Run(task string) (string, error) {
 		}
 		q.EndOperation("llm")
 		if llmErr != nil {
+			// Context overflow：不走重试，直接触发压缩后继续
+			if isContextOverflow(llmErr) {
+				a.log("%s", q.FormatLog("llm_overflow", "err=", truncate(llmErr.Error(), 100)))
+				if a.Compactor != nil {
+					est := EstimateMessages(msgs)
+					if a.Compactor.ShouldCompact(est) {
+						a.log("%s", q.FormatLog("compact_on_overflow", "est=", fmt.Sprintf("%d", est)))
+						var compErr error
+						msgs, compErr = a.Compactor.Compact(msgs)
+						if compErr != nil {
+							a.log("%s", q.FormatLog("compact_fail_on_overflow", "err=", compErr.Error()))
+						} else {
+							a.log("%s", q.FormatLog("compact_on_overflow_result", "msgs=", fmt.Sprintf("%d", len(msgs))))
+							continue // 压缩后继续下一轮 LLM 调用
+						}
+					} else {
+						// 压缩器存在但未触发压缩条件（上下文还不够大），说明 overflow 信号不可靠，走正常失败路径
+					}
+				}
+				// 无压缩器或压缩失败：当作普通错误处理
+			}
+			// 不可重试错误：直接失败，不消耗重试预算
+			if isNonRetryableError(llmErr) {
+				if a.Tuner != nil {
+					a.Tuner.LLMSucceeded() // 重置计数器（不算失败）
+				}
+				q.Complete(llmErr)
+				a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: llmErr}, a.logf)
+				return "", fmt.Errorf("llm chat: %w", llmErr)
+			}
 			if a.Tuner != nil {
 				if retry, retryCnt := a.Tuner.LLMFailed(); retry {
 					time.Sleep(a.Tuner.RetryDelay(retryCnt))
@@ -623,7 +697,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 	if strings.HasPrefix(s, "{") {
 		s = s[1:]
 	}
-	
+
 	// 模式1: 标准 XML <tool name="xxx">JSON</tool>
 	reTool := regexp.MustCompile(`<tool\s+name="([^"]+)">([^<]+)</tool>`)
 	if matches := reTool.FindStringSubmatch(s); matches != nil {
@@ -634,50 +708,50 @@ func extractActionXML(text string) (*callRequest, bool) {
 		}
 		return req, true
 	}
-	
+
 	// 模式2: 混合格式 <tool name="xxx">\n<arg_key>key</arg_key>\n<arg_value>value</arg_value>\n</tool>
 	reMixed := regexp.MustCompile(`<tool\s+name="([^"]+)"[^>]*>([\s\S]*)</tool>`)
 	if matches := reMixed.FindStringSubmatch(s); matches != nil {
 		toolName := matches[1]
 		body := matches[2]
-		
+
 		// 解析 arg_key/arg_value 对
 		argsMap := make(map[string]string)
 		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([\s\S]*)</arg_value>`)
 		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
 			argsMap[m[1]] = m[2]
 		}
-		
+
 		// 构建 args JSON
 		if len(argsMap) > 0 {
 			argsJSON, _ := json.Marshal(argsMap)
 			return &callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)}, true
 		}
 	}
-	
+
 	// 模式2b: 带引号的 "tool 格式 (模型有时输出 "tool 而不是 <tool)
 	reMixed2 := regexp.MustCompile(`"tool\s+name="([^"]+)"[^>]*>([\s\S]*)</tool>`)
 	if matches := reMixed2.FindStringSubmatch(s); matches != nil {
 		toolName := matches[1]
 		body := matches[2]
-		
+
 		// 解析 arg_key/arg_value 对
 		argsMap := make(map[string]string)
 		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([\s\S]*)</arg_value>`)
 		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
 			argsMap[m[1]] = m[2]
 		}
-		
+
 		// 如果没有 arg_key/arg_value，直接使用 body 作为 args
 		if len(argsMap) == 0 {
 			return &callRequest{Action: "tool", Tool: toolName, Args: strings.TrimSpace(body)}, true
 		}
-		
+
 		// 构建 args JSON
 		argsJSON, _ := json.Marshal(argsMap)
 		return &callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)}, true
 	}
-	
+
 	// 模式3: 标准 reply
 	reReply := regexp.MustCompile(`<reply>([\s\S]+)</reply>`)
 	if matches := reReply.FindStringSubmatch(s); matches != nil {
@@ -687,7 +761,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 		}
 		return req, true
 	}
-	
+
 	return nil, false
 }
 
@@ -696,6 +770,7 @@ func extractActionXML(text string) (*callRequest, bool) {
 //  1. 补全缺失的闭合括号
 //  2. 修复内部未转义的引号（如 args 值中的 \" 应为 \\\"）
 //  3. 移除多余的尾部字符
+//
 // 返回修复后的文本，若所有尝试均失败则返回原样。
 func tryFixJSON(s string) string {
 	original := s
@@ -850,4 +925,41 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "..."
+}
+
+// isContextOverflow 检测 LLM 错误是否为上下文溢出。
+// 兼容 OpenAI、DeepSeek、通用网关的常见 overflow 信号。
+func isContextOverflow(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// OpenAI: "maximum context length" / "context_length_exceeded"
+	// DeepSeek: "maximum context length" / "prompt is too long"
+	// 通用网关: "too long" / "overflow" / "超出" / "上下文"
+	return strings.Contains(s, "maximum context") ||
+		strings.Contains(s, "context_length_exceeded") ||
+		strings.Contains(s, "prompt is too long") ||
+		strings.Contains(s, "context length") ||
+		strings.Contains(s, "超出上下文") ||
+		strings.Contains(s, "上下文溢出")
+}
+
+// isNonRetryableError 判断 LLM 错误是否不可重试（确定性失败）。
+// 不可重试的错误直接返回，不消耗 WeakModelTuner 的重试预算。
+// 429 rate limit 带有 retry-after 提示的属于可重试（指数退避已处理）。
+func isNonRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// 模型不存在 / 认证失败 / 配额耗尽 → 立即失败，重试无意义
+	return strings.Contains(s, "model not found") ||
+		strings.Contains(s, "invalid_model") ||
+		strings.Contains(s, "authentication") ||
+		strings.Contains(s, "unauthorized") ||
+		strings.Contains(s, "forbidden") ||
+		strings.Contains(s, "quota") ||
+		strings.Contains(s, "insufficient_quota") ||
+		strings.Contains(s, "billing")
 }
