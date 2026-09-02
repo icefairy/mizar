@@ -34,7 +34,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.3.0"
+var version = "v0.3.1"
 
 // startupHint 首次运行未配置供应商时，banner 末尾追加的引导提示。
 var startupHint string
@@ -912,13 +912,13 @@ func main() {
 		},
 	})
 	// 内置 /quit 命令：退出交互模式
+	// 注意：真正退出由 TUI/interactive 的拦截器负责（先打印续接提示再退出），
+	// 此命令只作为文档/帮助入口与兜底返回值，不再 os.Exit（否则续接提示永不显示）。
 	a.Commands.Register(agent.Command{
 		Name:        "quit",
 		Description: "退出交互模式",
 		Run: func(args string) (string, error) {
-			fmt.Println("再见")
-			os.Exit(0)
-			return "", nil
+			return "再见", nil
 		},
 	})
 	// 内置 /color 命令：查看/设置聊天颜色（/color 查看 ｜ /color user <颜色> ｜ /color ai <颜色>）

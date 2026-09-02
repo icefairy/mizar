@@ -1066,6 +1066,21 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 	return m
 }
 
+// addQuitHint 退出前把会话续接提示渲染为对话消息（用户要求退出时能直接看到，
+// 不依赖退出后的 stdout/stderr 时序）。
+func (m *tuiModel) addQuitHint() {
+	hint := "“再见”"
+	if m.sessionID != "" {
+		short := m.sessionID
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		hint = fmt.Sprintf("会话 %s: 用 mizar -session %s 续接", short, m.sessionID)
+	}
+	// addChatLine 会立即 renderAllDirect（事件循环内调用，提交在 app.Stop 前的最后一次绘制）
+	m.addChatLine(chatLine{role: "system", content: hint, ts: time.Now()})
+}
+
 // submitInput 处理发送：命令派发 / 退出 / 排队 / 启动任务
 func (m *tuiModel) submitInput(s string) {
 	s = strings.TrimSpace(s)
@@ -1085,6 +1100,14 @@ func (m *tuiModel) submitInput(s string) {
 	}
 
 	if strings.HasPrefix(s, "/") {
+		// /quit 与 /exit 在命令分发之前拦截：先把续接提示渲染进对话列表，
+		// 再优雅退出（旧实现走命令注册表的 quit→os.Exit(0)，进程直接终结，
+		// runTUI 退出后的续接提示永远不会打印）。
+		if s == "/quit" || s == "/exit" {
+			m.addQuitHint()
+			m.app.Stop()
+			return
+		}
 		// 异步执行命令，避免网络IO（如 /model）阻塞主线程
 		ch := m.agent.Commands.DispatchAsync(s, 5*time.Second)
 		go func() {

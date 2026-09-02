@@ -159,6 +159,19 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		}
 		rl.AppendHistory(trimmed)
 
+		// /quit 与 /exit 在命令分发之前拦截（注册表 quit 不再 os.Exit，
+		// 由本层打印续接提示后正常返回，不依赖退出后的 stdout/stderr 时序）
+		if trimmed == "/quit" || trimmed == "/exit" {
+			if sessionID != "" {
+				short := sessionID
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				fmt.Printf("会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+			}
+			return
+		}
+
 		// 斜杠命令分发
 		if handled, out, err := a.Commands.Dispatch(trimmed); handled {
 			if err != nil {
