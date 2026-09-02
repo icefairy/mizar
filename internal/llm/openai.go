@@ -97,14 +97,14 @@ type chatPartVideoURL struct {
 }
 
 type chatReq struct {
-	Model           string    `json:"model"`
-	Messages        []chatMsg `json:"messages"`
-	Tools           []toolDef `json:"tools,omitempty"`
-	ToolChoice      any       `json:"tool_choice,omitempty"` // "auto" / "required" / 命名对象
-	MaxTokens       int       `json:"max_tokens,omitempty"`
-	Temperature     float64   `json:"temperature,omitempty"`
-	Stream          bool      `json:"stream,omitempty"`
-	Thinking  *struct {
+	Model       string    `json:"model"`
+	Messages    []chatMsg `json:"messages"`
+	Tools       []toolDef `json:"tools,omitempty"`
+	ToolChoice  any       `json:"tool_choice,omitempty"` // "auto" / "required" / 命名对象
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Temperature float64   `json:"temperature,omitempty"`
+	Stream      bool      `json:"stream,omitempty"`
+	Thinking    *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
@@ -303,6 +303,11 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 		if extracted, ok := agent.ExtractActionJSON(s); ok {
 			return extracted, nil
 		}
+		// 修复：畸形工具调用 JSON（如缺 tool 字段、内层引号未转义）不包装成 reply，
+		// 返回原始内容让 agent 循环的 parseCallJSON 走错误处理路径（注入纠正提示）。
+		if agent.IsToolCallText(s) {
+			return s, nil
+		}
 		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(msg.Content)), nil
 	}
 	return msg.Content, nil
@@ -327,10 +332,10 @@ type streamToolCall struct {
 // streamDelta SSE chunk 中的 delta 字段。
 // 兼容 thinking 的两种字段名：reasoning（通用）与 reasoning_content（deepseek 系）。
 type streamDelta struct {
-	Content          string            `json:"content,omitempty"`
-	Reasoning        string            `json:"reasoning,omitempty"`
-	ReasoningContent string            `json:"reasoning_content,omitempty"`
-	ToolCalls        []streamToolCall  `json:"tool_calls,omitempty"`
+	Content          string           `json:"content,omitempty"`
+	Reasoning        string           `json:"reasoning,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []streamToolCall `json:"tool_calls,omitempty"`
 }
 
 // streamChunk 单个 SSE 数据块。
@@ -519,12 +524,19 @@ func (o *OpenAI) streamCore(req *chatReq, wrapReply bool, onToken func(agent.Str
 		return toolCallsToText(tcs), nil
 	}
 	// 按协议包装回复（仅 agent 循环路径 wrapReply=true）。
-	// 若模型输出了控制 JSON（含“解释文本 + tool JSON”混合形态），优先透传提取结果；
+	// 若模型输出了控制 JSON（含"解释文本 + tool JSON"混合形态），优先透传提取结果；
 	// 否则包成 reply（此时纯文本展示，工具调用已在上层处理）。
 	if wrapReply && lastFinishReason == "stop" {
 		s := strings.TrimSpace(content.String())
 		if extracted, ok := agent.ExtractActionJSON(s); ok {
 			return extracted, nil
+		}
+		// 修复：模型输出为工具调用 JSON 但 ExtractActionJSON 提取失败
+		// （如缺 tool 字段、内层引号未转义等畸形 JSON），说明模型想调工具但格式错误。
+		// 此时不应包装成 reply 让用户看到原始 JSON，而是返回原始内容让 agent 循环的
+		// parseCallJSON 走错误处理路径（注入纠正提示让模型重试）。
+		if agent.IsToolCallText(s) {
+			return s, nil
 		}
 		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
 	}
@@ -538,14 +550,14 @@ func (o *OpenAI) streamCore(req *chatReq, wrapReply bool, onToken func(agent.Str
 // AIChatRequest 插件 ai_chat / ai_chat_stream 请求参数。
 // 复用主程序已配置的 LLM 通道（BaseURL/APIKey/默认模型），可覆盖模型与参数。
 type AIChatRequest struct {
-	Model    string       `json:"model,omitempty"`    // 覆盖默认模型（空 = 用当前模型）
-	System   string       `json:"system,omitempty"`   // 系统提示词（追加到 messages 最前）
-	Messages []AIChatMsg  `json:"messages,omitempty"` // 对话消息（role: system/user/assistant）
-	Temperature *float64  `json:"temperature,omitempty"` // 温度（0-2，nil = 不传）
-	MaxTokens  int        `json:"max_tokens,omitempty"`  // 最大输出 token（0 = 不传）
-	Thinking   string     `json:"thinking,omitempty"`    // 思考等级: auto/off/low/medium/high
-	Images     []AIChatImage `json:"images,omitempty"`   // 图片（url 或 base64），附加到最后一条 user 消息
-	Video      string     `json:"video,omitempty"`       // 视频 url，附加到最后一条 user 消息
+	Model       string        `json:"model,omitempty"`       // 覆盖默认模型（空 = 用当前模型）
+	System      string        `json:"system,omitempty"`      // 系统提示词（追加到 messages 最前）
+	Messages    []AIChatMsg   `json:"messages,omitempty"`    // 对话消息（role: system/user/assistant）
+	Temperature *float64      `json:"temperature,omitempty"` // 温度（0-2，nil = 不传）
+	MaxTokens   int           `json:"max_tokens,omitempty"`  // 最大输出 token（0 = 不传）
+	Thinking    string        `json:"thinking,omitempty"`    // 思考等级: auto/off/low/medium/high
+	Images      []AIChatImage `json:"images,omitempty"`      // 图片（url 或 base64），附加到最后一条 user 消息
+	Video       string        `json:"video,omitempty"`       // 视频 url，附加到最后一条 user 消息
 }
 
 // AIChatMsg 对话消息。
@@ -556,9 +568,9 @@ type AIChatMsg struct {
 
 // AIChatImage 图片输入：URL 与 Base64 二选一。
 type AIChatImage struct {
-	URL    string `json:"url,omitempty"`        // 图片 URL（http/https 或 data: URI）
-	Base64 string `json:"base64,omitempty"`     // base64 编码的图片字节
-	MIME   string `json:"mime,omitempty"`       // 图片 MIME（默认 image/jpeg；data: URI 场景可省）
+	URL    string `json:"url,omitempty"`    // 图片 URL（http/https 或 data: URI）
+	Base64 string `json:"base64,omitempty"` // base64 编码的图片字节
+	MIME   string `json:"mime,omitempty"`   // 图片 MIME（默认 image/jpeg；data: URI 场景可省）
 }
 
 // AIChatStreamDelta 流式分片（回调给插件 JS）。
@@ -865,6 +877,7 @@ func isToolCallResponse(s string) bool {
 	s = strings.TrimSpace(s)
 	return strings.HasPrefix(s, `{"action":"tool"`)
 }
+
 // 仅处理必须转义的字符（"、\、控制字符），不转义 Unicode。
 func escapeJSONString(s string) string {
 	var b strings.Builder

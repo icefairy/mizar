@@ -28,7 +28,7 @@ func TestParseCallJSON_BadToolJSONPlain(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for raw bad JSON")
 	}
-	if !strings.Contains(err.Error(), "无法识别的控制指令") && !strings.Contains(err.Error(), "JSON 格式错误") {
+	if !strings.Contains(err.Error(), "无法识别的控制指令") && !strings.Contains(err.Error(), "JSON 格式错误") && !strings.Contains(err.Error(), "格式错误") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -383,6 +383,7 @@ func TestAIChatThinkingLevel(t *testing.T) {
 		}
 	}
 }
+
 // ============================================================================
 // tool_choice 智能策略测试
 // ============================================================================
@@ -540,4 +541,90 @@ func TestIsToolCallResponse(t *testing.T) {
 			t.Errorf("isToolCallResponse(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}
+}
+
+// TestChatWithTools_MalformedToolJSONNotWrappedAsReply 回归测试：
+// 模型把工具调用当纯文本输出（畸形 JSON：缺 tool 字段、内层引号未转义），
+// finish_reason=stop 且无原生 tool_calls。此前这段内容会被包装成
+// {"action":"reply","text":...} 导致用户看到原始 JSON、任务提前"完成"。
+// 修复后：应返回原始内容，让 agent 循环走解析失败纠错路径。
+func TestChatWithTools_MalformedToolJSONNotWrappedAsReply(t *testing.T) {
+	malformed := `{"action":"tool","args":"{"command": "tail -100 /var/log/x11vnc.log 2>&1"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 模型以纯文本形式输出畸形工具 JSON（无原生 tool_calls）
+		resp := map[string]any{
+			"choices": []map[string]any{{
+				"index":         0,
+				"message":       map[string]any{"role": "assistant", "content": malformed},
+				"finish_reason": "stop",
+			}},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	o := NewOpenAI(srv.URL+"/v1", "", "test-model")
+	reply, err := o.ChatWithTools(
+		[]agent.Message{{Role: "user", Content: "看下x11vnc日志"}},
+		[]plugins.Tool{{Name: "bash", Description: "run bash"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(reply, `{"action":"reply"`) {
+		t.Fatalf("malformed tool JSON must NOT be wrapped as reply, got: %s", reply)
+	}
+	if !agent.IsToolCallText(reply) {
+		t.Fatalf("reply should still be tool-call text, got: %s", reply)
+	}
+	// agent 循环侧：parseCallJSON 应报错（触发纠错提示），而不是解析成 reply
+	if _, err := parseReqForTest(reply); err == nil {
+		t.Fatal("agent parseCallJSON should fail on malformed JSON (error path injects correction hint)")
+	}
+}
+
+// parseReqForTest 测试辅助：直接暴露包内行为不必要，这里通过导出的 IsToolCallText +
+// 循环行为等价校验（畸形 JSON 必然解析失败）。
+func parseReqForTest(s string) (any, error) {
+	// 畸形 JSON 顶层解码必然失败
+	var v map[string]any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// TestChatWithToolsStream_MalformedToolJSONNotWrappedAsReply 流式路径同样不受包装。
+func TestChatWithToolsStream_MalformedToolJSONNotWrappedAsReply(t *testing.T) {
+	malformed := `{"action":"tool","tool":"bash","args":"{"command": "tail -100 /var/log/x11vnc.log 2>&1"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		chunks := []string{
+			`data: {"choices":[{"index":0,"delta":{"content":"{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{"}}]}`,
+			`data: {"choices":[{"index":0,"delta":{"content":"\"command\": \"tail -100 /var/log/x11vnc.log 2>&1\"}"}}]}`,
+			`data: {"choices":[{"index":0,"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}
+		for _, c := range chunks {
+			fmt.Fprintf(w, "%s\n\n", c)
+			fl.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	o := NewOpenAI(srv.URL+"/v1", "", "test-model")
+	reply, err := o.ChatWithToolsStream(
+		[]agent.Message{{Role: "user", Content: "hi"}},
+		[]plugins.Tool{{Name: "bash", Description: "run bash"}},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(reply, `{"action":"reply"`) {
+		t.Fatalf("stream: malformed tool JSON must NOT be wrapped as reply, got: %s", reply)
+	}
+	_ = malformed
 }

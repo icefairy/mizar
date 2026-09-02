@@ -38,6 +38,7 @@ type StreamToolCallLLM interface {
 //   - action=tool      → 控制文本，不显示
 //   - action=reply     → 返回 text 字段的增量（解码 \n / \" / \\ / \uXXXX），
 //     配合流式逐 token 渲染，UI/Server 看到的就是干净的回复文本。
+//
 // 供 CLI（TUI/readline）与 Server（SSE）共用；与 parseCallJSON 同源的协议理解。
 type StreamTextExtractor struct {
 	raw   strings.Builder // 当前步原始内容累积（含控制 JSON）
@@ -105,6 +106,14 @@ func (e *StreamTextExtractor) Text() string { return e.text.String() }
 
 // Replying 当前步是否已确认有可显示的回复内容。
 func (e *StreamTextExtractor) Replying() bool { return e.rep }
+
+// IsToolCallText 判断文本是否指向工具调用（顶层 action 字段值为 "tool"）。
+// 容忍空白与畸形 JSON（jsonValueOf 逐字符扫描，不依赖整体 JSON 合法性）。
+// 供 LLM 层识别「模型想调工具但 JSON 畸形」的场景：
+// 若不识别，畸形 tool JSON 会被包装成 reply 导致用户看到原始 JSON、任务提前结束。
+func IsToolCallText(s string) bool {
+	return jsonValueOf(s, "action") == "tool"
+}
 
 // jsonValueOf 提取 JSON 顶层字段的字符串值（容忍未闭合 / 转义，供流式增量用）。
 // 从首个 '{' 之后查找 "key": 模式（与 parseCallJSON 取段逻辑一致），

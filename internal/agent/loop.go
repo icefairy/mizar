@@ -93,27 +93,27 @@ const maxStepsWarnRemain = 3
 
 // Agent 是主循环。
 type Agent struct {
-	LLM         LLM
-	Plugins     *plugins.Manager
-	System      string // 用户自定义个性化指令（注入 context 层）
-	Soul        string // SOUL.md 内容（identity 层，跨会话稳定）
-	SkillsPrompt string // 技能索引/正文（volatile 层，插件热加载时通过 ReloadTools 失效缓存）
-	PluginDir   string            // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
-	WorkDir     string            // 当前工作目录，注入系统提示供模型锚定搜索范围
-	Initial     []Message         // 会话恢复时的历史消息（置于 task 之前）
-	MaxSteps    int               // 最大循环步数（默认 maxStepsDefault=60）
-	VerboseLog  func(string)      // 可选日志回调
-	Compactor   *Compactor        // 会话压缩器（nil = 不压缩）
-	Hooks       *Hooks            // 挂载点（nil = 无钩子）
-	Tuner       *WeakModelTuner   // 弱模型宽容策略（nil = 不启用）
-	Guard       *RepeatGuard      // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
-	Jobs        *jobs.Registry    // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
-	PlanMode    *PlanMode         // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
-	GoalService *GoalService      // 会话目标服务（nil = 不启用；复刻 dsh goal）
-	GoalLoop    *GoalLoop         // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
-	SubAgents   *SubagentManager  // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
-	BgReview    *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
-	StatsData   *StatsDataRef     // 会话统计（nil = 不启用）
+	LLM          LLM
+	Plugins      *plugins.Manager
+	System       string            // 用户自定义个性化指令（注入 context 层）
+	Soul         string            // SOUL.md 内容（identity 层，跨会话稳定）
+	SkillsPrompt string            // 技能索引/正文（volatile 层，插件热加载时通过 ReloadTools 失效缓存）
+	PluginDir    string            // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
+	WorkDir      string            // 当前工作目录，注入系统提示供模型锚定搜索范围
+	Initial      []Message         // 会话恢复时的历史消息（置于 task 之前）
+	MaxSteps     int               // 最大循环步数（默认 maxStepsDefault=60）
+	VerboseLog   func(string)      // 可选日志回调
+	Compactor    *Compactor        // 会话压缩器（nil = 不压缩）
+	Hooks        *Hooks            // 挂载点（nil = 无钩子）
+	Tuner        *WeakModelTuner   // 弱模型宽容策略（nil = 不启用）
+	Guard        *RepeatGuard      // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
+	Jobs         *jobs.Registry    // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
+	PlanMode     *PlanMode         // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
+	GoalService  *GoalService      // 会话目标服务（nil = 不启用；复刻 dsh goal）
+	GoalLoop     *GoalLoop         // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
+	SubAgents    *SubagentManager  // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
+	BgReview     *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
+	StatsData    *StatsDataRef     // 会话统计（nil = 不启用）
 
 	// AuxLLM 辅助模型（judge / background review 用；nil = 使用主 LLM）
 	AuxLLM AuxiliaryLLM
@@ -669,6 +669,11 @@ func parseCallJSON(text string) (*callRequest, error) {
 	// 回退到 JSON 格式解析
 	extracted, ok := ExtractActionJSON(text)
 	if !ok {
+		// 检测到「想调工具但 JSON 畸形」：缺 tool 字段 / args 内层引号未转义等。
+		// 给出针对性纠错提示（比通用提示更能帮助弱模型快速自纠，避免反复失败）。
+		if IsToolCallText(text) {
+			return nil, fmt.Errorf("检测到工具调用 JSON 但格式错误（args 值内部的引号需转义为 \\\"，或缺少 tool 字段）。\n正确示例：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{\\\"command\\\": \\\"ls\\\"}\"}，或用 XML：<tool name=\"bash\">{\"command\": \"ls\"}</tool>")
+		}
 		return nil, fmt.Errorf("无法识别的控制指令：未找到含 action 字段的合法 JSON 对象\n请输出格式如：<tool name=\"工具名\">参数 JSON</tool> 或 <reply>回答内容</reply>")
 	}
 	var reqJSON callRequest
