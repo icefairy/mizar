@@ -69,19 +69,19 @@ type Manager struct {
 // NewManager 创建插件管理器。
 func NewManager(dir string, host *engine.HostFuncs) *Manager {
 	m := &Manager{
-		dir:          dir,
-		host:         host,
-		engines:      make(map[string]*engine.Engine),
-		tools:        make(map[string]Tool),
-		commands:     make(map[string]Command),
-		rpcMethods:   make(map[string]RPCMethod),
-		modTime:      make(map[string]time.Time),
-		disabled:     make(map[string]bool),
-		maxExec:      30 * time.Second,
-		lspDiagNames: make(map[string][]string),
-		lspCompNames: make(map[string][]string),
+		dir:           dir,
+		host:          host,
+		engines:       make(map[string]*engine.Engine),
+		tools:         make(map[string]Tool),
+		commands:      make(map[string]Command),
+		rpcMethods:    make(map[string]RPCMethod),
+		modTime:       make(map[string]time.Time),
+		disabled:      make(map[string]bool),
+		maxExec:       30 * time.Second,
+		lspDiagNames:  make(map[string][]string),
+		lspCompNames:  make(map[string][]string),
 		activeServers: make(map[string][]*http.Server),
-		hookReg:      newHookRegistry(),
+		hookReg:       newHookRegistry(),
 	}
 	// 包装 LSP 宿主函数，跟踪文件名
 	if host != nil {
@@ -119,50 +119,50 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 		}
 		// host_listen：Manager 接管 HTTP 服务器创建，实现追踪和热重载关闭
 		host.HostListen = func(addr string, handler func(string) string) (string, error) {
-				m.mu.Lock()
-				file := m.loadFile
-				m.mu.Unlock()
+			m.mu.Lock()
+			file := m.loadFile
+			m.mu.Unlock()
 
-				srv := &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					body, _ := io.ReadAll(r.Body)
-					reqMap := map[string]any{
-						"method":  r.Method,
-						"path":    r.URL.Path,
-						"query":   r.URL.RawQuery,
-						"body":    string(body),
-						"headers": r.Header,
-					}
-					reqJSON, _ := json.Marshal(reqMap)
-					respStr := handler(string(reqJSON))
-					var resp struct {
-						Status  int               `json:"status"`
-						Body    string            `json:"body"`
-						Headers map[string]string `json:"headers,omitempty"`
-					}
-					if err := json.Unmarshal([]byte(respStr), &resp); err != nil {
-						http.Error(w, "handler 返回无效 JSON", 500)
-						return
-					}
-					if resp.Status == 0 {
-						resp.Status = 200
-					}
-					for k, v := range resp.Headers {
-						w.Header().Set(k, v)
-					}
-					w.WriteHeader(resp.Status)
-					w.Write([]byte(resp.Body))
-				})}
+			srv := &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				reqMap := map[string]any{
+					"method":  r.Method,
+					"path":    r.URL.Path,
+					"query":   r.URL.RawQuery,
+					"body":    string(body),
+					"headers": r.Header,
+				}
+				reqJSON, _ := json.Marshal(reqMap)
+				respStr := handler(string(reqJSON))
+				var resp struct {
+					Status  int               `json:"status"`
+					Body    string            `json:"body"`
+					Headers map[string]string `json:"headers,omitempty"`
+				}
+				if err := json.Unmarshal([]byte(respStr), &resp); err != nil {
+					http.Error(w, "handler 返回无效 JSON", 500)
+					return
+				}
+				if resp.Status == 0 {
+					resp.Status = 200
+				}
+				for k, v := range resp.Headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(resp.Status)
+				w.Write([]byte(resp.Body))
+			})}
 
-				m.mu.Lock()
-				m.activeServers[file] = append(m.activeServers[file], srv)
-				m.mu.Unlock()
+			m.mu.Lock()
+			m.activeServers[file] = append(m.activeServers[file], srv)
+			m.mu.Unlock()
 
-				go func() {
-					if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-						fmt.Fprintf(os.Stderr, "host_listen: %s: %v\n", addr, err)
-					}
-				}()
-				return fmt.Sprintf("HTTP 服务器已启动: http://%s", addr), nil
+			go func() {
+				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					fmt.Fprintf(os.Stderr, "host_listen: %s: %v\n", addr, err)
+				}
+			}()
+			return fmt.Sprintf("HTTP 服务器已启动: http://%s", addr), nil
 		}
 	}
 	return m
