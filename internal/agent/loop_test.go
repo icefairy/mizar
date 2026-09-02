@@ -325,3 +325,108 @@ func TestIsNonRetryableError(t *testing.T) {
 		}
 	}
 }
+
+// TestRespondToolReturnsText 模型调用 respond 工具 → 直接返回 text，不执行工具、不回填结果。
+// respond 是协议层面的回答出口，由 agent 循环拦截（无需工具注册）。
+func TestRespondToolReturnsText(t *testing.T) {
+	a, _, _ := newTestAgent(`{"action":"tool","tool":"respond","args":"{\"text\":\"任务完成！\"}"}`)
+	got, err := a.Run("汇报一下")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got != "任务完成！" {
+		t.Fatalf("want 任务完成！ got %q", got)
+	}
+}
+
+// TestRespondToolEmptyText respond 工具缺 text 参数 → 注入纠错提示，模型重试。
+func TestRespondToolEmptyText(t *testing.T) {
+	steps := 0
+	s := &scriptLLM{fn: func(msgs []Message) (string, error) {
+		steps++
+		if steps == 1 {
+			// 第一轮：空 text 参数
+			return `{"action":"tool","tool":"respond","args":"{}"}`, nil
+		}
+		// 第二轮：应收到纠错提示后在第二轮给出正确回答
+		for _, msg := range msgs {
+			if strings.Contains(msg.Content, "缺少 text 参数") {
+				return `{"action":"tool","tool":"respond","args":"{\"text\":\"修正后回答\"}"}`, nil
+			}
+		}
+		return `{"action":"tool","tool":"respond","args":"{\"text\":\"修正后回答\"}"}`, nil
+	}}
+	dir, _ := os.MkdirTemp("", "mizar-respond-*")
+	m := plugins.NewManager(dir, &engine.HostFuncs{Log: func(string) {}})
+	_, _ = m.LoadAll()
+	a := New(s, m)
+	got, err := a.Run("回答我")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got != "修正后回答" {
+		t.Fatalf("want 修正后回答 got %q", got)
+	}
+}
+
+// TestRespondToolPlainTextArgs 模型把回答文本直接当 args 传（非 JSON 格式）。
+func TestRespondToolPlainTextArgs(t *testing.T) {
+	a, _, _ := newTestAgent(`{"action":"tool","tool":"respond","args":"你好，我是开阳"}`)
+	got, err := a.Run("打招呼")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got != "你好，我是开阳" {
+		t.Fatalf("want 你好，我是开阳 got %q", got)
+	}
+}
+
+// TestRespondToolThenStop 模型调用 respond 后不再继续循环（respond 是 terminal action）。
+func TestRespondToolThenStop(t *testing.T) {
+	a, _, llm := newTestAgent(
+		`{"action":"tool","tool":"respond","args":"{\"text\":\"完成\"}"}`,
+		`{"action":"reply","text":"这轮不该执行"}`,
+	)
+	got, err := a.Run("任务")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got != "完成" {
+		t.Fatalf("want 完成 got %q", got)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("expected 1 LLM call (respond terminates), got %d", llm.calls)
+	}
+}
+
+// TestRespondToolInRequiredMode 模拟 tool_choice=required 场景：模型被迫调工具，
+// respond 作为合法出口。该测试验证 respond 在多步任务后可作为收尾回答。
+func TestRespondToolInRequiredMode(t *testing.T) {
+	// 模型先执行一个真实工具，再用 respond 收尾（模拟 required 模式下被迫调工具）
+	a, _, _ := newTestAgent(
+		`{"action":"tool","tool":"calc","args":"2+3"}`,
+		`{"action":"tool","tool":"respond","args":"{\"text\":\"最终答案：5\"}"}`,
+	)
+	got, err := a.Run("算 2+3 并回答")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got != "最终答案：5" {
+		t.Fatalf("want 最终答案：5 got %q", got)
+	}
+}
+
+// TestSystemPromptNoXMLFormat 验证系统提示不再包含 XML 双格式指令（避免模型混淆手写 JSON）。
+func TestSystemPromptNoXMLFormat(t *testing.T) {
+	a, _, _ := newTestAgent()
+	prompt := a.SystemPrompt()
+	if strings.Contains(prompt, "<tool name=") {
+		t.Fatal("system prompt should not contain XML tool tags")
+	}
+	if strings.Contains(prompt, "<reply>") {
+		t.Fatal("system prompt should not contain <reply> tag")
+	}
+	if !strings.Contains(prompt, "respond") {
+		t.Fatal("system prompt should mention respond tool")
+	}
+}

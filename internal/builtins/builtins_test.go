@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"mizar/internal/plugins"
 )
 
 func tmpFile(t *testing.T, content string) string {
@@ -121,5 +123,56 @@ func TestFind(t *testing.T) {
 	}
 	if !strings.Contains(out, "a.ts") || strings.Contains(out, "b.go") {
 		t.Fatalf("find: %s", out)
+	}
+}
+
+// TestRespondToolRegistered respond 工具已注册进 All()，且参数 schema 含必填 text。
+func TestRespondToolRegistered(t *testing.T) {
+	tools := All("", nil)
+	var found *plugins.Tool
+	for i := range tools {
+		if tools[i].Name == "respond" {
+			found = &tools[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("respond tool should be registered in builtins.All()")
+	}
+	schema := found.ArgsSchema()
+	if schema == nil {
+		t.Fatal("respond ArgsSchema should not be nil")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing: %v", schema)
+	}
+	if _, ok := props["text"]; !ok {
+		t.Fatal("respond schema should have text property")
+	}
+	req, _ := schema["required"].([]string)
+	if len(req) != 1 || req[0] != "text" {
+		t.Fatalf("respond text should be required, got %v", req)
+	}
+}
+
+// TestRespondToolRun 直接执行 respond 工具 Run 返回 text 本身。
+func TestRespondToolRun(t *testing.T) {
+	var found *plugins.Tool
+	for _, tt := range All("", nil) {
+		if tt.Name == "respond" {
+			found = &tt
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("respond not found")
+	}
+	out, err := found.Run(`{"text":"你好"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if out != "你好" {
+		t.Fatalf("want 你好 got %q", out)
 	}
 }

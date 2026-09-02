@@ -44,6 +44,7 @@ func All(skillsDir string, onPluginFileChanged func(path string) string) []plugi
 		toolAskUser(),
 		toolSkill(skillsDir),
 		toolExitPlanMode(),
+		toolRespond(),
 	}
 	tools = append(tools, platformTools()...)
 	return tools
@@ -63,6 +64,7 @@ func toolBash() plugins.Tool {
 			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Command == "" {
 				return "", fmt.Errorf("bash: args {command} required")
 			}
+			// pi-lens-ignore: go-command-injection (bash tool is designed to execute shell commands)
 			cmd := exec.Command("bash", "-c", p.Command)
 			// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化（平台抽象）
 			setupProcessGroup(cmd)

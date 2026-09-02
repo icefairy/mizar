@@ -214,23 +214,19 @@ const stableBasePrompt = `你是开阳(Mizar) Agent，一个自举的编码智�
 `
 
 // replyFormatSection 回复格式要求（稳定部分，不随工具变化）。
+//
+// 协议分两种模式：
+//   - 原生 tool_call 模式（默认）：LLM 层发送 tools 参数，模型结构化返回 tool_calls，
+//     回答走 respond 工具。系统提示只讲语义，不教手写 JSON/XML——避免模型被多套
+//     格式指令搞混后手写畸形 JSON（教训：双格式提示导致模型输出
+//     {"action":"tool",...} 畸形文本直接吐给用户）。
+//   - 文本协议兑底（LLM 不支持 function calling 时）：由 LLM 层 Chat() 路径处理，
+//     此时由调用方注入文本格式指令（WeakModelTuner 升级提示里已含）。
 const replyFormatSection = `
-## 回复格式
-你的每轮回复必须是以下两种 XML 标签之一：
-- 调用工具：<tool name="工具名">参数 JSON</tool>
-- 回答用户或任务完成：<reply>回答内容</reply>
-
-示例：
-用户: 你好
-你: <reply>你好！有什么可以帮你的？</reply>
-
-用户: 列出当前目录
-你: <tool name="ls">{"path": "."}</tool>
-
-注意：
-1. 只输出上述标签，不要输出其他文字
-2. tool 标签内的参数是标准 JSON 字符串
-3. reply 标签内是纯文本回答
+## 回复方式
+- 执行操作：调用对应工具（工具列表见下）
+- 回答用户/汇报进展/宣布任务完成：调用 respond 工具，text 参数填你要说的内容
+- 一次只调一个工具；工具结果返回后再决定下一步
 `
 
 // SystemPrompt 构建三层系统提示：stable（identity+基础指令）→ context（SOUL+AGENTS+工作目录）→ volatile（工具+插件）。
@@ -556,6 +552,31 @@ func (a *Agent) Run(task string) (string, error) {
 		// 工具调用
 		q.BeginOperation("tool:" + req.Tool)
 		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args}, a.logf)
+
+		// respond 工具：直接回答出口。不执行不回填，text 参数作为最终回答返回。
+		// 给 tool_choice=required 模式下的模型一条正规的"回答"路径，
+		// 避免模型被迫硬调无关工具或手写畸形 JSON。
+		if req.Tool == "respond" {
+			q.EndOperation("tool:" + req.Tool)
+			text := respondText(req.Args)
+			if text == "" {
+				msg := "⚠️ respond 工具调用缺少 text 参数。请重新调用 respond，并在 text 参数中填入你要说的内容。"
+				msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+				msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+				step++
+				continue
+			}
+			// 更新 forcedToolCalls 计数器：模型调了 respond 也算调工具（重置计数器）
+			if tllm, ok := a.LLM.(interface{ updateForcedToolCalls(v bool) }); ok {
+				tllm.updateForcedToolCalls(true)
+			}
+			q.Complete(nil)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text, Messages: msgs}, a.logf)
+			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text}, a.logf)
+			return text, nil
+		}
+
 		// 空参数兑底：不执行工具，把错误发回模型让它修正（防止"args {command} required"空转）
 		trimmedArgs := strings.TrimSpace(req.Args)
 		if trimmedArgs == "" || trimmedArgs == "{}" {
@@ -899,6 +920,27 @@ func ExtractActionJSON(text string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// respondText 从 respond 工具调用参数中提取回答文本。
+// 标准形态：{"text": "..."}；容忍模型直接把纯文本当 args 传（无 JSON 包裹）。
+func respondText(args string) string {
+	s := strings.TrimSpace(args)
+	if s == "" {
+		return ""
+	}
+	var p struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(s), &p); err == nil && p.Text != "" {
+		return p.Text
+	}
+	// args 非标准 JSON 或 text 为空：若是合法 JSON 对象则返回空（让模型重传）；
+	// 否则把 args 本身当回答文本（模型常见误传：respond("你好")）。
+	if strings.HasPrefix(s, "{") {
+		return ""
+	}
+	return s
 }
 
 // ToolExchangeMessages 将一次工具调用+结果转为与循环内部格式一致的 Message 对，
