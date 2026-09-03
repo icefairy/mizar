@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,13 @@ type StreamToolCallLLM interface {
 	// ChatWithToolsStream 发送消息 + 工具定义并流式接收回复分片。
 	// 原生 tool_calls 也以分片形式回调（Content 为空），返回完整回复（含工具调用 JSON 文本）。
 	ChatWithToolsStream(messages []Message, tools []plugins.Tool, onToken func(StreamDelta)) (string, error)
+}
+
+// CancellableStreamToolCallLLM 可选接口：支持流式回复 + 原生工具调用，且请求可被上下文取消。
+// 代理循环的 ESC 取消（Agent.Abort）会取消 Run 上下文；实现方应把该上下文绑定到 HTTP
+// 请求，使在途流式读取能立即中断（否则任务 goroutine 阻塞到流自然结束，取消不生效）。
+type CancellableStreamToolCallLLM interface {
+	ChatWithToolsStreamCtx(ctx context.Context, messages []Message, tools []plugins.Tool, onToken func(StreamDelta)) (string, error)
 }
 
 // StreamTextExtractor 增量提取模型流式输出中的「可显示回复文本」。

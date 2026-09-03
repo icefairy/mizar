@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 )
 
@@ -65,8 +66,15 @@ func (a *Agent) drainSteer() *steerMsg {
 
 // Abort 请求停止当前循环（线程安全）。
 // 循环会在下一个检查点停止并返回当前进度，不再调用 LLM。
+// 同时取消当前 Run 的上下文：若 LLM 请求正在进行中（阻塞在流式 HTTP 读取），
+// 立即中断在途请求，任务 goroutine 能迅速退出——否则取消只能等 LLM 自然返回。
 func (a *Agent) Abort() {
 	a.aborted.Store(true)
+	a.runMu.Lock()
+	if a.runCancel != nil {
+		a.runCancel()
+	}
+	a.runMu.Unlock()
 }
 
 // Aborted 查询是否已被请求中止。
@@ -89,4 +97,24 @@ func (a *Agent) Reset() {
 // resetAbort 清空 abort 标志（每次 Run 开始时调用）。
 func (a *Agent) resetAbort() {
 	a.aborted.Store(false)
+}
+
+// setRunCancel 登记当前 Run 的取消上下文（Run 开始时调用；结束/启动时置 nil）。
+// runCancel 供 Abort() 中断在途 LLM 请求使用。
+func (a *Agent) setRunCancel(ctx context.Context, cancel context.CancelFunc) {
+	a.runMu.Lock()
+	a.runCtx = ctx
+	a.runCancel = cancel
+	a.runMu.Unlock()
+}
+
+// currentRunCtx 返回当前 Run 的上下文（供 LLM 请求绑定取消）。
+// 无活跃 Run 时返回 Background（调用方不应在 Run 之外发起 LLM 请求）。
+func (a *Agent) currentRunCtx() context.Context {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+	if a.runCtx != nil {
+		return a.runCtx
+	}
+	return context.Background()
 }

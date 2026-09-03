@@ -4,6 +4,7 @@ package llm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -313,8 +314,83 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	return msg.Content, nil
 }
 
+
+// ChatWithToolsCtx 实现 agent.LLMWithContext 接口：发送消息 + 原生工具定义，
+// 支持通过 context 取消（ESC 中止时立即中断在途请求，无需等待 LLM 自然返回）。
+func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message, tools []plugins.Tool) (string, error) {
+	req := chatReq{Model: c.Model}
+	for _, m := range messages {
+		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
+	}
+	// 工具定义
+	for _, t := range tools {
+		req.Tools = append(req.Tools, pluginsToolToDef(t))
+	}
+	c.setToolChoice(&req, tools)
+	c.setThinking(&req)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	// 使用 streamHTTPClient（无硬超时），依靠 ctx 支持取消
+	resp, err := streamHTTPClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+
+	var out chatResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("llm error: %s", out.Error.Message)
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("llm: no choices")
+	}
+	c.lastUsage = out.Usage
+
+	msg := out.Choices[0].Message
+	fr := out.Choices[0].FinishReason
+	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
+	if len(msg.ToolCalls) > 0 {
+		c.updateForcedToolCalls(true)
+		return toolCallsToText(msg.ToolCalls), nil
+	}
+	c.updateForcedToolCalls(false)
+	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
+	if fr == "stop" {
+		s := strings.TrimSpace(msg.Content)
+		if extracted, ok := agent.ExtractActionJSON(s); ok {
+			return extracted, nil
+		}
+		if agent.IsToolCallText(s) {
+			return s, nil
+		}
+		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(msg.Content)), nil
+	}
+	return msg.Content, nil
+}
+
 // ============================================================================
 // 流式响应（SSE）
+// ============================================================================
 // ============================================================================
 
 // streamToolCall 流式 tool_calls 分片（OpenAI SSE 的 delta.tool_calls）。
@@ -363,17 +439,24 @@ func (d streamDelta) Thinking() string {
 // 单步 LLM 可能持续数分钟，120s 常规超时不够。
 var streamHTTPClient = &http.Client{Timeout: 0}
 
-// ChatStream 实现 agent.StreamLLM：流式对话（无 tools 参数）。
+// ChatStream 实现 agent.StreamLLM：流式对话（无 tools 参数，不带取消上下文）。
 func (o *OpenAI) ChatStream(messages []agent.Message, onToken func(agent.StreamDelta)) (string, error) {
-	return o.chatStream(messages, nil, onToken)
+	return o.chatStream(context.Background(), messages, nil, onToken)
 }
 
 // ChatWithToolsStream 实现 agent.StreamToolCallLLM：流式对话 + 原生工具调用。
+// 不带取消上下文（Background）。
 func (o *OpenAI) ChatWithToolsStream(messages []agent.Message, tools []plugins.Tool, onToken func(agent.StreamDelta)) (string, error) {
-	return o.chatStream(messages, tools, onToken)
+	return o.chatStream(context.Background(), messages, tools, onToken)
 }
 
-func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onToken func(agent.StreamDelta)) (string, error) {
+// ChatWithToolsStreamCtx 实现 agent.CancellableStreamToolCallLLM：
+// 流式对话 + 原生工具调用，HTTP 请求绑定 ctx（ESC 取消时立即中断在途流读取，不再阻塞到流自然结束）。
+func (o *OpenAI) ChatWithToolsStreamCtx(ctx context.Context, messages []agent.Message, tools []plugins.Tool, onToken func(agent.StreamDelta)) (string, error) {
+	return o.chatStream(ctx, messages, tools, onToken)
+}
+
+func (o *OpenAI) chatStream(ctx context.Context, messages []agent.Message, tools []plugins.Tool, onToken func(agent.StreamDelta)) (string, error) {
 	req := chatReq{Model: o.Model, Stream: true}
 	for _, m := range messages {
 		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
@@ -383,7 +466,7 @@ func (o *OpenAI) chatStream(messages []agent.Message, tools []plugins.Tool, onTo
 	}
 	o.setToolChoice(&req, tools)
 	o.setThinking(&req)
-	reply, err := o.streamCore(&req, true, onToken)
+	reply, err := o.streamCoreCtx(ctx, &req, true, onToken)
 	if err != nil {
 		return reply, err
 	}
@@ -415,15 +498,21 @@ func (o *OpenAI) AIChatStream(req AIChatRequest, onToken func(agent.StreamDelta)
 	return o.streamCore(&r, false, onToken)
 }
 
-// streamCore 流式核心：SSE 逐行解析，逐分片回调 onToken。
+// streamCore 流式核心：SSE 逐行解析，逐分片回调 onToken（不带取消上下文）。
+func (o *OpenAI) streamCore(req *chatReq, wrapReply bool, onToken func(agent.StreamDelta)) (string, error) {
+	return o.streamCoreCtx(context.Background(), req, wrapReply, onToken)
+}
+
+// streamCoreCtx 流式核心：SSE 逐行解析，逐分片回调 onToken。
 // wrapReply=true 时按 agent 循环协议包装（reply JSON / 工具调用 JSON）；
 // wrapReply=false 时直接返回原始 content（插件直连用）。
-func (o *OpenAI) streamCore(req *chatReq, wrapReply bool, onToken func(agent.StreamDelta)) (string, error) {
+// ctx 非空时将其绑定到 HTTP 请求：取消（ESC 中止）会中断在途流读取，函数立即返回。
+func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool, onToken func(agent.StreamDelta)) (string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", err
 	}
-	httpReq, err := http.NewRequest("POST", o.BaseURL+"/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", o.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}

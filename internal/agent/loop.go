@@ -2,6 +2,7 @@
 package agent
 
 import (
+	stdctx "context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,12 +66,23 @@ type LLM interface {
 	Chat(messages []Message) (string, error)
 }
 
+
+
 // ToolCallLLM 可选接口：支持原生工具调用的 LLM。
 // 若 LLM 实现此接口，Agent 循环会使用原生 tools 参数而非文本 JSON。
 type ToolCallLLM interface {
 	// ChatWithTools 发送消息 + 工具定义，返回模型回复文本。
 	// 若模型返回原生 tool_calls，实现方应将其转为 agent 循环可解析的 JSON 文本。
 	ChatWithTools(messages []Message, tools []plugins.Tool) (string, error)
+}
+
+// LLMWithContext 可选接口：支持原生工具调用且请求可被上下文取消的 LLM。
+// 所有支持 ChatWithTools 的 LLM 都应尽量实现此接口，以支持 ESC 取消。
+// 实现方应把 ctx 绑定到 HTTP 请求，使在途请求能立即中断。
+type LLMWithContext interface {
+	// ChatWithToolsCtx 发送消息 + 工具定义，返回模型回复文本；
+	// 响应 ctx.Done() 以支持 Abort() 中断在途请求。
+	ChatWithToolsCtx(ctx stdctx.Context, messages []Message, tools []plugins.Tool) (string, error)
 }
 
 // Message 对话消息（定义见 message.go：含 Kind 字段用于压缩切点）。
@@ -144,6 +156,11 @@ type Agent struct {
 	steer    *steerMsg  // 待插入消息（nil = 无）
 	steerSeq uint64     // 序号，最新覆盖用
 	aborted  atomic.Bool
+
+	// runMu 保护当前 Run 的取消上下文（Abort() 时取消，中断在途 LLM 请求）
+	runMu     sync.Mutex
+	runCtx    stdctx.Context
+	runCancel stdctx.CancelFunc
 
 	// OnLLMStream 可选：LLM 回复流式增量回调（step = 当前循环步，从 0 起）。
 	// 在 Run 的 LLM 请求 goroutine 内同步调用，必须快速返回（勿阻塞/勿做重 IO）。
@@ -353,6 +370,12 @@ func (a *Agent) Run(task string) (string, error) {
 		a.Hooks = NewHooks()
 	}
 	a.resetAbort()
+	// 创建 Run 级取消上下文：Abort()（ESC 取消）时立即中断在途 LLM 请求，
+	// 任务 goroutine 不再阻塞到流自然结束（否则 TUI 的 canceling 状态无法解除，
+	// 新消息只能排队等待）。Run 结束自动清理。
+	abortCtx, abortCancel := stdctx.WithCancel(stdctx.Background())
+	a.setRunCancel(abortCtx, abortCancel)
+	defer a.setRunCancel(nil, nil)
 	if a.Tuner != nil {
 		a.Tuner.Reset()
 	}
@@ -444,19 +467,29 @@ func (a *Agent) Run(task string) (string, error) {
 			// （另一个 goroutine 可能在检查后、调用前将 OnLLMStream 设为 nil）
 			onStream := a.OnLLMStream
 			emit := func(d StreamDelta) { onStream(qc.Step, d) }
-			if toolLLM, ok := a.LLM.(StreamToolCallLLM); ok {
+			// 优先使用支持取消的流式接口（ESC 取消可中断在途 HTTP 请求）；
+			// 不支持时回退旧接口（取消仍生效，但需等 LLM 自然返回）
+			if toolLLM, ok := a.LLM.(CancellableStreamToolCallLLM); ok {
+				reply, llmErr = toolLLM.ChatWithToolsStreamCtx(a.currentRunCtx(), msgs, a.Plugins.Tools(), emit)
+			} else if llmWithContext, ok := a.LLM.(LLMWithContext); ok {
+				// 支持上下文取消的一次性调用接口：非流式路径也可中断在途请求
+				reply, llmErr = llmWithContext.ChatWithToolsCtx(a.currentRunCtx(), msgs, a.Plugins.Tools())
+			} else if toolLLM, ok := a.LLM.(StreamToolCallLLM); ok {
 				reply, llmErr = toolLLM.ChatWithToolsStream(msgs, a.Plugins.Tools(), emit)
 			} else if sllm, ok := a.LLM.(StreamLLM); ok {
 				reply, llmErr = sllm.ChatStream(msgs, emit)
 			} else if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
-				// LLM 不支持流式但支持原生工具：回退一次性调用
+				// LLM 不支持流式且不支持上下文取消：回退一次性调用（ESC 仅设置标志位，需等 LLM 自然返回）
 				reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
 			} else {
 				reply, llmErr = a.LLM.Chat(msgs)
 			}
 		} else {
 			// 非流式路径（原逻辑）
-			if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
+			// 优先检查支持上下文取消的接口
+			if llmWithContext, ok := a.LLM.(LLMWithContext); ok {
+				reply, llmErr = llmWithContext.ChatWithToolsCtx(a.currentRunCtx(), msgs, a.Plugins.Tools())
+			} else if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
 				// 原生工具调用：发送 tools 参数，模型结构化返回
 				reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
 			} else {
@@ -465,6 +498,13 @@ func (a *Agent) Run(task string) (string, error) {
 		}
 		q.EndOperation("llm")
 		if llmErr != nil {
+			// 用户已请求中止（ESC 取消中断了在途 LLM 请求）：立即退出，
+			// 不走重试/压缩/弱模型宽容（否则 abort 后可能因重试继续空转）。
+			if a.Aborted() {
+				q.Complete(errors.New("aborted by user"))
+				a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
+				return "", ErrAborted
+			}
 			// Context overflow：不走重试，直接触发压缩后继续
 			if isContextOverflow(llmErr) {
 				a.log("%s", q.FormatLog("llm_overflow", "err=", truncate(llmErr.Error(), 100)))
