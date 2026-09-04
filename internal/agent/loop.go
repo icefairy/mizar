@@ -982,6 +982,18 @@ func ExtractActionJSON(text string) (string, bool) {
 			return strings.TrimSpace(s[i:min(end, len(s))]), true
 		}
 	}
+	// 严格三态扫描全部失败后，宽容兜底：文本以 { 开头、无 action，且逐字符扫描能同时
+	// 命中顶层 "tool" 与 "args"（容忍 args 内字面换行/未闭合，弱模型对多行 bash 命令常见）。
+	// 重建为合法工具调用 JSON（args 重新转义成 JSON 字符串），使畸形 bare 调用真正执行而非显示。
+	if strings.HasPrefix(s, "{") && jsonValueOf(s, "action") == "" {
+		tool := jsonValueOf(s, "tool")
+		args := jsonValueOf(s, "args")
+		if tool != "" && args != "" {
+			if rebuilt, err := json.Marshal(map[string]any{"action": "tool", "tool": tool, "args": args}); err == nil {
+				return string(rebuilt), true
+			}
+		}
+	}
 	return "", false
 }
 

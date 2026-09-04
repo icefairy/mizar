@@ -161,6 +161,36 @@ func TestProbe_BareWithLiteralNewlines_NotDisplayed(t *testing.T) {
 	if !IsToolCallText(in) {
 		t.Fatal("bare tool call with literal newlines should still be recognized as tool call text (not reply)")
 	}
-	// 严格解析仍是畸形（字面换行）→ ExtractActionJSON 不强行提取，但 IsToolCallText 已兜底防显示
 	_ = in
 }
+
+// 宽容路径必须能把「args 内含字面换行的畸形 bare 调用」提取并归一化为合法工具调用，
+// 使其真正执行而非原样显示。验证 ExtractActionJSON 重建 + parseCallJSON 归一化。
+func TestProbe_BareWithLiteralNewlines_ExtractsAndExecutes(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"args":"{\"command\":\"docker run -d`)
+	sb.WriteString("\n")
+	sb.WriteString(` --device /dev/alixpu_ctl`)
+	sb.WriteString("\n")
+	sb.WriteString(`\"}","tool":"bash"}`)
+	in := sb.String()
+
+	extracted, ok := ExtractActionJSON(in)
+	if !ok {
+		t.Fatal("ExtractActionJSON should extract literal-newline bare tool call")
+	}
+	if !isValidJSON(extracted) {
+		t.Fatalf("reconstructed JSON must be valid, got: %q", extracted)
+	}
+	req, err := parseCallJSON(in)
+	if err != nil {
+		t.Fatalf("parseCallJSON literal-newline: %v", err)
+	}
+	if req.Action != "tool" || req.Tool != "bash" {
+		t.Fatalf("action=%q tool=%q, want tool/bash", req.Action, req.Tool)
+	}
+	if !strings.Contains(req.Args, "docker run -d") || !strings.Contains(req.Args, "/dev/alixpu_ctl") {
+		t.Fatalf("args should preserve command text, got: %q", req.Args)
+	}
+}
+
