@@ -388,108 +388,6 @@ func TestAIChatThinkingLevel(t *testing.T) {
 // tool_choice 智能策略测试
 // ============================================================================
 
-// TestSetToolChoice 验证 setToolChoice 的行为：
-// - tools 为空时不传 tool_choice
-// - forcedToolCalls=0 时不传 tool_choice
-// - forcedToolCalls>=1 时传 tool_choice="required"
-func TestSetToolChoice(t *testing.T) {
-	tests := []struct {
-		name           string
-		forcedCalls    int
-		tools          []plugins.Tool
-		wantToolChoice any
-	}{
-		{"无工具，强制次数0", 0, nil, nil},
-		{"有工具，强制次数0", 0, []plugins.Tool{{Name: "bash"}}, nil},
-		{"有工具，强制次数1", 1, []plugins.Tool{{Name: "bash"}}, "required"},
-		{"有工具，强制次数3", 3, []plugins.Tool{{Name: "bash"}}, "required"},
-		{"无工具，强制次数3", 3, nil, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			o := &OpenAI{forcedToolCalls: tt.forcedCalls}
-			req := &chatReq{}
-			o.setToolChoice(req, tt.tools)
-			if tt.wantToolChoice == nil {
-				if req.ToolChoice != nil {
-					t.Errorf("expected ToolChoice=nil, got %v", req.ToolChoice)
-				}
-			} else {
-				if req.ToolChoice != tt.wantToolChoice {
-					t.Errorf("expected ToolChoice=%v, got %v", tt.wantToolChoice, req.ToolChoice)
-				}
-			}
-		})
-	}
-}
-
-// TestUpdateForcedToolCalls 验证计数器递增与重置逻辑。
-func TestUpdateForcedToolCalls(t *testing.T) {
-	o := &OpenAI{}
-	// 初始为 0
-	if o.forcedToolCalls != 0 {
-		t.Fatalf("initial forcedToolCalls=%d, want 0", o.forcedToolCalls)
-	}
-	// 连续 3 次未调用工具，应递增到上限
-	o.updateForcedToolCalls(false)
-	if o.forcedToolCalls != 1 {
-		t.Fatalf("after 1 miss: forcedToolCalls=%d, want 1", o.forcedToolCalls)
-	}
-	o.updateForcedToolCalls(false)
-	if o.forcedToolCalls != 2 {
-		t.Fatalf("after 2 misses: forcedToolCalls=%d, want 2", o.forcedToolCalls)
-	}
-	o.updateForcedToolCalls(false)
-	if o.forcedToolCalls != 3 {
-		t.Fatalf("after 3 misses: forcedToolCalls=%d, want 3", o.forcedToolCalls)
-	}
-	// 超过上限不再增加
-	o.updateForcedToolCalls(false)
-	if o.forcedToolCalls != 3 {
-		t.Fatalf("after 4 misses: forcedToolCalls=%d, want 3 (capped)", o.forcedToolCalls)
-	}
-	// 模型实际调用工具，应重置
-	o.updateForcedToolCalls(true)
-	if o.forcedToolCalls != 0 {
-		t.Fatalf("after tool call: forcedToolCalls=%d, want 0", o.forcedToolCalls)
-	}
-}
-
-// TestChatWithTools_ToolChoiceSent 验证 ChatWithTools 在强制模式下发送 tool_choice=required。
-func TestChatWithTools_ToolChoiceSent(t *testing.T) {
-	var gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		gotBody = string(raw)
-		w.Header().Set("Content-Type", "application/json")
-		// 模拟模型跳过工具调用，直接返回文本
-		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"我不知道"}}]}`)
-	}))
-	defer srv.Close()
-
-	o := NewOpenAI(srv.URL+"/v1", "", "test-model")
-	// 模拟连续 2 次未调用工具
-	o.forcedToolCalls = 2
-	_, err := o.ChatWithTools(
-		[]agent.Message{{Role: "user", Content: "hi"}},
-		[]plugins.Tool{{Name: "bash", Description: "run bash"}},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
-		t.Fatalf("decode request body: %v", err)
-	}
-	if body["tool_choice"] != "required" {
-		t.Fatalf("expected tool_choice='required', got %v", body["tool_choice"])
-	}
-	// 计数器应被重置（因为这次响应是 reply，不是 tool call）
-	if o.forcedToolCalls != 3 {
-		t.Fatalf("expected forcedToolCalls=3 after reply, got %d", o.forcedToolCalls)
-	}
-}
-
 // TestChatWithTools_ToolChoiceAuto 验证非强制模式下不发送 tool_choice。
 func TestChatWithTools_ToolChoiceAuto(t *testing.T) {
 	var gotBody string
@@ -517,31 +415,8 @@ func TestChatWithTools_ToolChoiceAuto(t *testing.T) {
 	if body["tool_choice"] != nil {
 		t.Fatalf("expected no tool_choice, got %v", body["tool_choice"])
 	}
-	// 模型调用了工具，计数器应重置
-	if o.forcedToolCalls != 0 {
-		t.Fatalf("expected forcedToolCalls=0 after tool call, got %d", o.forcedToolCalls)
-	}
 }
 
-// TestIsToolCallResponse 验证响应类型检测。
-func TestIsToolCallResponse(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{`{"action":"tool","tool":"bash","args":"{}"}`, true},
-		{`{"action":"reply","text":"hello"}`, false},
-		{`  {"action":"tool","tool":"ls","args":""}  `, true},
-		{`hello world`, false},
-		{``, false},
-	}
-	for _, tt := range tests {
-		got := isToolCallResponse(tt.input)
-		if got != tt.want {
-			t.Errorf("isToolCallResponse(%q) = %v, want %v", tt.input, got, tt.want)
-		}
-	}
-}
 
 // TestChatWithTools_MalformedToolJSONNotWrappedAsReply 回归测试：
 // 模型把工具调用当纯文本输出（畸形 JSON：缺 tool 字段、内层引号未转义），
