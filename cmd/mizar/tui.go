@@ -553,6 +553,32 @@ func (m *tuiModel) startTask(input string) {
 			return
 		}
 
+		// 未被当前循环消费的 steer（任务在 loop 吞掉纠正消息前就已结束）：抽出尾部未消费的
+		// steer 用户消息，作为新的独立任务补发（经 setLoadingAsync(false) 的 queue 回调），
+		// 避免用户刚发的纠正被静默丢弃。已消费的 steer 已进 toolLog，会按序持久化。
+		if m.agent.PendingSteer() {
+			var leftover string
+			// 收尾用：把尾部属于「steer 用户消息」（纯 RoleUser、非工具结果）的那几条抽出来
+			cut := len(exchanges)
+			for cut > 0 {
+				lastMsg := exchanges[cut-1]
+				if lastMsg.Role == agent.RoleUser && lastMsg.Kind == "" {
+					leftover = lastMsg.Content
+					cut--
+					break
+				}
+				break
+			}
+			if leftover != "" {
+				exchanges = exchanges[:cut]
+				// 在事件循环中入队，让 setLoadingAsync(false) 的 queue 回调启动补发任务
+				m.app.QueueUpdateDraw(func() {
+					m.queue = append(m.queue, leftover)
+					m.renderQueue()
+				})
+			}
+		}
+
 		// 工具交换历史落盘：会话文件（Initial 的追加在下方 user 之后，保持对话顺序）
 		for _, msg := range exchanges {
 			if m.store != nil && m.sessionID != "" {
@@ -1252,11 +1278,23 @@ func (m *tuiModel) submitInput(s string) {
 	s = resolveAtRef(s, cmdNames, toolNames)
 
 	if m.loading || m.canceling.Load() {
-		// 任务运行中，或 ESC 已请求取消但旧任务 goroutine 尚未退出：排队等待。
-		// 排队消息在任务结束后的 setLoadingAsync(false) 回调中自动发送。
-		m.queue = append(m.queue, s)
+		// 任务运行中：立即把用户消息 steer 进当前循环（对齐 pi 的快速介入），而不是等任务跑完。
+		// 循环在【下一次 LLM 调用前】把该消息注入为 user 消息，打断正在进行的工具链。
+		// 取消中（旧任务 goroutine 尚未退出）时 steer 无意义，改为排队，任务结束后自动发送。
+		if m.canceling.Load() {
+			m.queue = append(m.queue, s)
+			m.renderAllDirect()
+			m.renderQueue()
+			return
+		}
+		m.agent.Steer(s)
+		// 立即展示用户消息 + 收进工具交换日志（保证任务结束时能按顺序持久化到会话文件与 Initial，
+		// 当前 Run 的消息不落盘，否则下次 Run 会看不到这次纠正）。
+		m.liveMu.Lock()
+		m.toolLog = append(m.toolLog, agent.Message{Role: agent.RoleUser, Content: s})
+		m.liveMu.Unlock()
+		m.addChatLine(chatLine{role: "user", content: s, ts: time.Now()})
 		m.renderAllDirect()
-		m.renderQueue()
 		return
 	}
 

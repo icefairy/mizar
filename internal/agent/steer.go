@@ -51,6 +51,15 @@ func (a *Agent) Steer(content string) {
 	a.steer = &steerMsg{content: content, seq: a.steerSeq}
 }
 
+// PendingSteer 查询当前是否尚有未消费的纠正消息（线程安全，非阻塞）。
+// 用于 UI 侧判断：任务结束时若仍有 pending steer，说明它没被当前循环消费，
+// 应作为新任务补发，避免用户刚发的纠正消息丢失。
+func (a *Agent) PendingSteer() bool {
+	a.steerMu.Lock()
+	defer a.steerMu.Unlock()
+	return a.steer != nil
+}
+
 // drainSteer 取出待插入的纠正消息（循环内部调用，LLM 调用前）。
 // 返回 nil 表示无待插入消息。一次取出一条（最新的）。
 func (a *Agent) drainSteer() *steerMsg {

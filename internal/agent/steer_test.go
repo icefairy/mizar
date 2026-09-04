@@ -136,3 +136,60 @@ func TestAbortSkipsToolExecutionAfterLLM(t *testing.T) {
 		t.Fatalf("tool executed %d time(s) after abort, want 0", toolCalls)
 	}
 }
+
+// 用户痛点复现：任务正在多轮工具调用（bash → 结果 → 再调 bash …）时，用户在 TUI 发送
+// 一条消息。修复后这条消息应立即 steer 进循环，在【下一轮 LLM 前】注入为 user 纠正，
+// 打断后续工具调用链，而不是等整串跑完。此处模拟：LLM 本会继续调 ping，但 steer 后
+// 第二、三轮输入应包含纠正内容（证明介入生效、链被打断）。
+func TestSteer_InterruptsMidToolChain(t *testing.T) {
+	pm := testManager(t)
+	var mu sync.Mutex
+	var inputs [][]Message
+	callCount := 0
+	llm := &scriptLLM{fn: func(msgs []Message) (string, error) {
+		mu.Lock()
+		callCount++
+		n := callCount
+		// 复制一份输入快照供断言
+		cp := append([]Message(nil), msgs...)
+		inputs = append(inputs, cp)
+		mu.Unlock()
+		// 第一轮：开始干活，发起工具调用
+		if n == 1 {
+			time.Sleep(40 * time.Millisecond) // 给 steer 注入窗口
+			return `{"action":"tool","tool":"ping","args":"{\"x\":1}"}`, nil
+		}
+		// 第二轮：LLM 返回 reply 结束（若 steer 已注入，输入应含纠正）
+		return `{"action":"reply","text":"收到，已按你的最新要求改"}`, nil
+	}}
+	a := New(llm, pm)
+	a.MaxSteps = 10
+
+	go func() {
+		time.Sleep(10 * time.Millisecond) // 第一轮 LLM 调用窗口内注入
+		a.Steer("停，先别看别的，先检查磁盘空间")
+	}()
+
+	reply, err := a.Run("task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "最新要求") {
+		t.Fatalf("reply = %q", reply)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(inputs) < 2 {
+		t.Fatalf("llm calls = %d, want >= 2", len(inputs))
+	}
+	// 第二轮（打断后的那轮）输入的 user 纠正应已注入
+	var found bool
+	for _, m := range inputs[1] {
+		if m.Role == RoleUser && strings.Contains(m.Content, "检查磁盘空间") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("第二轮 LLM 输入未见用户 steer 纠正内容，介入未生效")
+	}
+}
