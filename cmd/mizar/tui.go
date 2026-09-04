@@ -695,9 +695,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		SetDynamicColors(true).
 		SetScrollable(true).
 		SetWordWrap(true)
-	m.textView.SetBorder(true).
-		SetTitle(" 开阳 Mizar ").
-		SetTitleAlign(tview.AlignLeft)
+	// 不画边框（SetBorder(false)）：左右竖线会在终端按住 Shift 多行选择复制时被一并选中，
+	// 干扰复制内容（垂直滚动仍需固定的 chat 区与输入框分隔由 banner/内容自身完成）。
+	// 保留滚动能力；标题「开阳 Mizar」已由首行 system banner 呈现，无需边框标题。
 
 	// 输入框（多行 textarea，仿"派"的编辑器形态：支持多行输入，Enter 发送，Alt+Enter 换行）
 	m.inputField = tview.NewTextArea().

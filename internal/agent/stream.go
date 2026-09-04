@@ -176,6 +176,7 @@ func (e *StreamTextExtractor) Replying() bool { return e.rep }
 //  1. 标准控制协议：顶层 action 字段值为 "tool"（容忍空白与畸形 JSON，逐字符扫描）。
 //  2. 原生 bare 形态：合法 JSON 但缺 action 字段，同时含 tool 与 args 字段
 //     （模型搞丢 action 时常见，例如 {"args":"{...}","tool":"bash"}）。
+//
 // 若不识别，tool JSON 会被包装成 reply 导致用户看到原始 JSON、任务提前结束。
 func IsToolCallText(s string) bool {
 	if jsonValueOf(s, "action") == "tool" {
