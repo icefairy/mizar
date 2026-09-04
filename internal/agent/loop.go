@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -599,6 +600,14 @@ func (a *Agent) Run(task string) (string, error) {
 		q.BeginOperation("tool:" + req.Tool)
 		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Reason: req.Reason}, a.logf)
 
+		// 空工具名兜底（规避 `tool "" not found`）：模型在某些形态下丢了 tool 字段，
+		// 但 args 里带了 bash 的 command 参数——此时猜为 bash 工具。
+		if req.Tool == "" && req.Action == "tool" {
+			if trimmed := strings.TrimSpace(req.Args); strings.Contains(trimmed, "\"command\":") {
+				req.Tool = "bash"
+			}
+		}
+
 		// respond 工具：直接回答出口。不执行不回填，text 参数作为最终回答返回。
 		// 给 tool_choice=required 模式下的模型一条正规的"回答"路径，
 		// 避免模型被迫硬调无关工具或手写畸形 JSON。
@@ -982,15 +991,32 @@ func ExtractActionJSON(text string) (string, bool) {
 			return strings.TrimSpace(s[i:min(end, len(s))]), true
 		}
 	}
-	// 严格三态扫描全部失败后，宽容兜底：文本以 { 开头、无 action，且逐字符扫描能同时
-	// 命中顶层 "tool" 与 "args"（容忍 args 内字面换行/未闭合，弱模型对多行 bash 命令常见）。
+	// 严格三态扫描全部失败后，宽容兜底：文本以 { 开头、无 action，且逐字符扫描能命中
+	// 畸形 bare 工具调用（args 内可能含字面换行/未闭合，弱模型对多行 bash 命令常见）。
 	// 重建为合法工具调用 JSON（args 重新转义成 JSON 字符串），使畸形 bare 调用真正执行而非显示。
 	if strings.HasPrefix(s, "{") && jsonValueOf(s, "action") == "" {
 		tool := jsonValueOf(s, "tool")
 		args := jsonValueOf(s, "args")
 		if tool != "" && args != "" {
+			// 形状A：{"tool":...,"args":...}
 			if rebuilt, err := json.Marshal(map[string]any{"action": "tool", "tool": tool, "args": args}); err == nil {
 				return string(rebuilt), true
+			}
+		}
+		// 形状B：只剩 bash 参数对象 {"command":...,"timeout":...}（弱模型丢掉外层 tool/args），
+		// 把 command 及可选 timeout 重建为 bash 的 args JSON 字符串，使其真正执行。
+		if cmd := jsonValueOf(s, "command"); cmd != "" {
+			if jsonValueOf(s, "text") == "" && jsonValueOf(s, "reply") == "" {
+				params := map[string]any{"command": cmd}
+				if t := jsonValueOfNum(s, "timeout"); t != "" {
+					if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
+						params["timeout"] = n
+					}
+				}
+				argsJSON, _ := json.Marshal(params)
+				if rebuilt, err := json.Marshal(map[string]any{"action": "tool", "tool": "bash", "args": string(argsJSON)}); err == nil {
+					return string(rebuilt), true
+				}
 			}
 		}
 	}

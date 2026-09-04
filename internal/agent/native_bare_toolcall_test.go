@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"mizar/internal/plugins"
 )
 
 // 用户报告的复现：模型输出缺 action 字段的原生 bare 工具调用 JSON。
@@ -194,3 +197,87 @@ func TestProbe_BareWithLiteralNewlines_ExtractsAndExecutes(t *testing.T) {
 	}
 }
 
+// 用户最近报告形态：模型只丢出 bash 参数对象 {"command":...,"timeout":N}，
+// 无 action/tool/args。应被识别为 bash 工具调用（形状B）。
+func TestProbe_BareCommandParams_InfersBash(t *testing.T) {
+	// 无字面换行版（合法 JSON）
+	in := `{"command": "echo hello; ls -la", "timeout": 90}`
+	if !IsToolCallText(in) {
+		t.Fatal("bare {command} params should be recognized as tool call text")
+	}
+	req, err := parseCallJSON(in)
+	if err != nil {
+		t.Fatalf("parseCallJSON bare command: %v", err)
+	}
+	if req.Action != "tool" || req.Tool != "bash" {
+		t.Fatalf("action=%q tool=%q, want tool/bash", req.Action, req.Tool)
+	}
+	var args struct {
+		Command string
+		Timeout int
+	}
+	if err := json.Unmarshal([]byte(req.Args), &args); err != nil {
+		t.Fatalf("reconstructed args invalid for bash: %v (args=%q)", err, req.Args)
+	}
+	if args.Command != "echo hello; ls -la" || args.Timeout != 90 {
+		t.Fatalf("args parsed wrong: %+v", args)
+	}
+}
+
+// 形状B + 字面换行：模型对 shell 循环多行命令写成字面换行，仍能重建执行。
+func TestProbe_BareCommandParams_Multiline_LiteralNewlines(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"command": "DEV=\"\"; for d in /dev/alixpu`)
+	sb.WriteString("\n")
+	sb.WriteString(` /dev/alixpu_ppu*; do DEV=\"$DEV --device $d\"; done; docker run`)
+	sb.WriteString("\n")
+	sb.WriteString(` $DEV --shm-size=32g docker.1ms.run/ubuntu:24.04 sleep infinity", "timeout": 90}`)
+	in := sb.String()
+
+	req, err := parseCallJSON(in)
+	if err != nil {
+		t.Fatalf("parseCallJSON multiline bare command: %v", err)
+	}
+	if req.Action != "tool" || req.Tool != "bash" {
+		t.Fatalf("action=%q tool=%q, want tool/bash", req.Action, req.Tool)
+	}
+	if !strings.Contains(req.Args, "for d in /dev/alixpu") || !strings.Contains(req.Args, "docker.1ms.run/ubuntu:24.04") {
+		t.Fatalf("multiline command not preserved, args=%q", req.Args)
+	}
+}
+
+// `tool "" not found` 场景：标准形态缺 tool 字段但 args 含 command，循环层应齐底为 bash 并真正执行。
+// 端到端验证：parse 层保持 Tool 空，loop 层（对应 loop.go 里 req.Tool==\"\" 且含 command 设 bash）推断为 bash。
+func TestProbe_EmptyToolWithCommand_FallsBackBash(t *testing.T) {
+	pm := testManager(t)
+	executed := ""
+	pm.RegisterBuiltin(plugins.Tool{
+		Name: "bash",
+		Run: func(args string) (string, error) {
+			executed = args
+			return "ran", nil
+		},
+	})
+	var called int
+	llm := &scriptLLM{fn: func(msgs []Message) (string, error) {
+		called++
+		if called == 1 {
+			return `{"action":"tool","args":"{\"command\":\"echo hi\"}"}` + "", nil // 缺 tool 字段
+		}
+		return `{"action":"reply","text":"done"}`, nil
+	}}
+	a := New(llm, pm)
+	got, err := a.Run("跑个命令")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got != "done" {
+		t.Fatalf("got %q", got)
+	}
+	if executed == "" {
+		t.Fatal("empty-tool fallback did not execute bash tool")
+	}
+	if !strings.Contains(executed, "echo hi") {
+		t.Fatalf("bash args = %q, want echo hi", executed)
+	}
+}

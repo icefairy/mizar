@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -197,25 +196,43 @@ func isNativeBareToolCall(s string) bool {
 	if !strings.HasPrefix(trimmed, "{") {
 		return false
 	}
-	// 有 action 字段：交标准协议分支处理，不做 bare 判定。
+	// 有 action 字段：交标准工具调用/reply 分支处理，不做 bare 判定。
 	if jsonValueOf(s, "action") != "" {
 		return false
 	}
-	// 严格路径：合法 JSON
-	dec := json.NewDecoder(strings.NewReader(trimmed))
-	var obj map[string]any
-	if err := dec.Decode(&obj); err == nil {
-		tool, _ := obj["tool"].(string)
-		_, hasArgs := obj["args"]
-		return tool != "" && hasArgs
+	// 形状A：bare 工具调用 {"tool":...,"args":...}（宽容扫描，容忍 args 内字面换行）
+	tool, args := jsonValueOf(s, "tool"), jsonValueOf(s, "args")
+	if tool != "" && args != "" {
+		return true
 	}
-	// 宽容路径：严格失败但能扫出顶层 tool+args
-	args := jsonValueOf(s, "args")
-	if args == "" {
-		return false
+	// 形状B：只剩 bash 参数对象 {"command":...,"timeout":...}（弱模型丢掉外层 tool/args）
+	if cmd := jsonValueOf(s, "command"); cmd != "" {
+		// 排除 reply 形态（有 text 字段）
+		if jsonValueOf(s, "text") == "" && jsonValueOf(s, "reply") == "" {
+			return true
+		}
 	}
-	tool := jsonValueOf(s, "tool")
-	return tool != ""
+	return false
+}
+
+// jsonValueOfNum 提取 JSON 顶层数字字段值（容忍畸形）。返回数值子串，查询不到返回 ""。
+func jsonValueOfNum(s, key string) string {
+	p := strings.Index(s, `"`+key+`":`)
+	if p < 0 {
+		return ""
+	}
+	p += len(key) + 3
+	for p < len(s) && strings.ContainsRune(" \t\n", rune(s[p])) {
+		p++
+	}
+	start := p
+	for p < len(s) && (s[p] == '-' || s[p] == '+' || ('0' <= s[p] && s[p] <= '9') || s[p] == '.' || s[p] == 'e' || s[p] == 'E') {
+		p++
+	}
+	if p == start {
+		return ""
+	}
+	return s[start:p]
 }
 
 // bareToolJSONStart 扫描 s 中所有 '{'，从每个位置尝试解析合法 JSON 并判断是否为
