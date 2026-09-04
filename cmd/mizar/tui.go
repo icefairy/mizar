@@ -101,6 +101,14 @@ type tuiModel struct {
 	evtCh   chan toolCallInfo
 	toolLog []agent.Message // 本次任务的工具交换历史（OnToolExchange 收集，任务结束落盘）
 
+	// 剪贴板桥接 + 拷贝模式（任意区域选择复制）
+	clip       *clipboard
+	copyMode   bool // 是否处于拷贝模式（暂停流式自动滚动，供选择复制）
+	copyCursor int  // 拷贝模式当前选中起点（m.lines 下标）
+	copyEnd    int  // 拷贝模式当前选中终点（闭区间）
+	copyBase   int  // 拷贝模式选区锚点（copyActive 时有效）
+	copyActive bool // 是否已标记选择起点（再次移动扩展选择）
+
 	// 流式显示状态（streamMu 保护）：LLM 回复逐 token 回调 → 增量提取 → TUI 实时渲染
 	streamMu        sync.Mutex
 	streamStep      int                       // 当前流式步骤（agent 循环 step）
@@ -141,6 +149,11 @@ func sgrColor(name, text string) string {
 
 // renderAllDirect 直接渲染聊天区 + 状态栏（事件循环内用）
 func (m *tuiModel) renderAllDirect() {
+	// 拷贝模式：切换到拷贝视图渲染（不在这里重建普通视图，避免覆盖选区/滚动位置）
+	if m.copyMode {
+		m.renderCopyMode()
+		return
+	}
 	var sb strings.Builder
 	start := 0
 	if len(m.lines) > 30 {
@@ -598,6 +611,11 @@ func (m *tuiModel) flushStream() {
 		m.streamFlushBusy = false
 		m.streamMu.Unlock()
 
+		// 拷贝模式：不覆盖拷贝视图（否则选择高亮/滚动位置被流式重绘打乱）。
+		// 流式内容仍在后台正常累积（text 持续写入），退出拷贝模式后一次补全。
+		if m.copyMode {
+			return
+		}
 		if !active || text == "" {
 			return
 		}
@@ -622,7 +640,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		lines: []chatLine{
 			{role: "system", content: banner(), ts: time.Now()},
 		},
-		stats: tuiStats{ModelName: a.Model()},
+		stats:    tuiStats{ModelName: a.Model()},
+		clip:     newClipboard(),
+		copyMode: false,
 		renderer: func() *glamour.TermRenderer {
 			r, _ := glamour.NewTermRenderer(
 				glamour.WithAutoStyle(),
@@ -684,6 +704,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		SetLabel("> ").
 		SetPlaceholder("输入任务（Enter 发送，Alt+Enter 换行），/help 查看命令，/quit 退出")
 
+	// 接上剪贴板桥接：Ctrl-Q 复制选中 / Ctrl-V 粘贴（内部缓冲 + OSC52 + X11 本地）
+	m.inputField.SetClipboard(m.clip.set, m.clip.get)
+
 	// 状态栏（无边框，flex 只用 fixedSize=1 不够放边框+内容）
 	m.statusBar = tview.NewTextView().
 		SetDynamicColors(true).
@@ -723,6 +746,19 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		// 文本选择：按住 Shift 拖动，由终端模拟器处理（tcell 鼠标跟踪模式下不拦截 Shift+拖拽）
 		switch action {
 		case tview.MouseLeftDown, tview.MouseLeftUp, tview.MouseLeftClick, tview.MouseLeftDoubleClick:
+			return nil, tview.MouseConsumed
+		case tview.MouseRightDown, tview.MouseRightUp, tview.MouseRightClick:
+			// 右键粘贴：鼠标跟踪模式下终端自带的右键粘贴菜单不会弹出，
+			// 这里在鼠标按下的瞬间把剪贴板内容插入输入框，恢复用户"右键粘贴"习惯。
+			if action == tview.MouseRightDown {
+				text := m.clip.get()
+				if text != "" && m.inputField.HasFocus() {
+					cur := m.inputField.GetText()
+					m.inputField.SetText(cur+text, true)
+				} else if text != "" {
+					m.inputField.SetText(text, true)
+				}
+			}
 			return nil, tview.MouseConsumed
 		}
 		return event, action
@@ -865,6 +901,58 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 				m.userScrolledUp = false
 				m.textView.ScrollToEnd()
 			}
+			return nil
+		}
+
+		// ---- 拷贝模式与剪贴板快捷键（Alt 系，避免与输入文本冲突） ----
+		// Alt+L：一键复制最近一条 AI 回复到剪贴板
+		if event.Key() == tcell.KeyRune && event.Rune() == 'l' && event.Modifiers()&tcell.ModAlt != 0 {
+			m.copyLastReply()
+			return nil
+		}
+		// Alt+C：进入/退出拷贝模式（任意区域选择复制，暂停流式自动滚动避免闪烁）
+		if event.Key() == tcell.KeyRune && event.Rune() == 'c' && event.Modifiers()&tcell.ModAlt != 0 {
+			if m.copyMode {
+				m.exitCopyMode()
+			} else {
+				m.enterCopyMode()
+			}
+			return nil
+		}
+		// Shift+Insert：粘贴（部分终端把它映射为 paste 键，这里并入剪贴板桥接）
+		if event.Key() == tcell.KeyInsert && event.Modifiers()&tcell.ModShift != 0 {
+			text := m.clip.get()
+			if text != "" {
+				cur := m.inputField.GetText()
+				m.inputField.SetText(cur+text, true)
+			}
+			return nil
+		}
+
+		// 拷贝模式：接管方向键 / 选择 / 复制 / 退出
+		if m.copyMode {
+			switch {
+			case event.Key() == tcell.KeyRune && event.Rune() == 'q',
+				event.Key() == tcell.KeyEsc:
+				m.exitCopyMode()
+			case event.Key() == tcell.KeyRune && (event.Rune() == 'v' || event.Rune() == ' '):
+				m.copyStartMark()
+			case event.Key() == tcell.KeyRune && event.Rune() == 'y':
+				m.copySelectionToClipboard()
+			case event.Key() == tcell.KeyUp:
+				m.copyMove(-1)
+			case event.Key() == tcell.KeyDown:
+				m.copyMove(1)
+			case event.Key() == tcell.KeyPgUp:
+				m.copyMove(-10)
+			case event.Key() == tcell.KeyPgDn:
+				m.copyMove(10)
+			case event.Key() == tcell.KeyEnd:
+				m.copyMoveToEnd()
+			default:
+				return event
+			}
+			m.renderCopyMode()
 			return nil
 		}
 		return event
@@ -1184,6 +1272,199 @@ func (m *tuiModel) Run() error {
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)
 	return m.app.Run()
+}
+
+// =============================================================================
+// 拷贝模式（任意区域选择复制）
+//
+// 背景：AI 流式回复时界面持续重绘，按住 Shift+鼠标选择的文本会被一次次画掉，
+// 根本无法完成复制。拷贝模式解决：进入后暂停流式重绘与自动滚动，把聊天记录渲染
+// 成可滚动的选择视图，用键盘移动光标标记选区，复制到剪贴板（内部缓冲 + OSC52 + X11）。
+//
+// 键位：
+//   Alt+C           进入/退出拷贝模式
+//   ↑/↓             移动光标 / 扩展选区
+//   PgUp/PgDn       大范围移动
+//   v 或 空格        标记选区起点（再次按＝取消选区）
+//   y               复制选中文本到剪贴板
+//   q 或 Esc         退出
+// =============================================================================
+
+// enterCopyMode 进入拷贝模式：暂停流式自动滚动，初始化选区光标到最新一行。
+func (m *tuiModel) enterCopyMode() {
+	m.copyMode = true
+	m.copyActive = false
+	n := len(m.lines)
+	if n == 0 {
+		m.copyCursor, m.copyEnd = 0, 0
+	} else {
+		m.copyCursor, m.copyEnd = n-1, n-1
+	}
+	m.userScrolledUp = true // 暂停自动滚动
+	m.autoComplete.SetText("")
+	m.autoCompleteList = nil
+	m.renderCopyMode()
+}
+
+// exitCopyMode 退出拷贝模式，恢复自动滚动。
+func (m *tuiModel) exitCopyMode() {
+	m.copyMode = false
+	m.copyActive = false
+	m.userScrolledUp = false
+	m.textView.ScrollToEnd()
+	m.renderAllDirect()
+}
+
+// copyMove 移动选区光标（delta 行数）；若已标记选区起点则扩展选区，否则光标单点移动。
+func (m *tuiModel) copyMove(delta int) {
+	if len(m.lines) == 0 {
+		return
+	}
+	n := len(m.lines)
+	if m.copyActive {
+		m.copyEnd += delta
+		if m.copyEnd < 0 {
+			m.copyEnd = 0
+		}
+		if m.copyEnd >= n {
+			m.copyEnd = n - 1
+		}
+		// 同步移动光标到选区活动端
+		m.copyCursor = m.copyEnd
+	} else {
+		m.copyCursor += delta
+		if m.copyCursor < 0 {
+			m.copyCursor = 0
+		}
+		if m.copyCursor >= n {
+			m.copyCursor = n - 1
+		}
+		m.copyEnd = m.copyCursor
+	}
+}
+
+// copyMoveToEnd 跳到最末一行（用于快速定位到最新回复）。
+func (m *tuiModel) copyMoveToEnd() {
+	if len(m.lines) == 0 {
+		return
+	}
+	m.copyCursor = len(m.lines) - 1
+	if m.copyActive {
+		m.copyEnd = m.copyCursor
+	} else {
+		m.copyEnd = m.copyCursor
+	}
+}
+
+// copyStartMark 标记/取消选区起点：首次按下把当前光标设为基础，再次按下清除选区。
+func (m *tuiModel) copyStartMark() {
+	if !m.copyActive {
+		m.copyActive = true
+		m.copyBase = m.copyCursor
+		m.copyEnd = m.copyCursor
+	} else {
+		m.copyActive = false
+		m.copyBase = m.copyCursor
+		m.copyEnd = m.copyCursor
+	}
+}
+
+// copySelectionToClipboard 把选区（m.copyBase..m.copyEnd）对应的原始文本复制到剪贴板。
+func (m *tuiModel) copySelectionToClipboard() {
+	lo, hi := m.copyBase, m.copyEnd
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	if hi >= len(m.lines) {
+		hi = len(m.lines) - 1
+	}
+	if lo > hi {
+		m.addChatLine(chatLine{role: "err", content: "拷贝模式：请先用 v/空格 标记选区起点", ts: time.Now()})
+		return
+	}
+	var sb strings.Builder
+	for i := lo; i <= hi; i++ {
+		sb.WriteString(m.linePlainText(i))
+		if i < hi {
+			sb.WriteString("\n")
+		}
+	}
+	text := strings.TrimSpace(sb.String())
+	if text == "" {
+		return
+	}
+	m.clip.set(text)
+	m.addChatLine(chatLine{role: "err", content: fmt.Sprintf("✓ 已复制 %d 行到剪贴板（Alt+P 或右键可在输入框粘贴）", hi-lo+1), ts: time.Now()})
+	m.exitCopyMode()
+}
+
+// copyLastReply 一键复制最近一条 bot（AI）回复到剪贴板。
+func (m *tuiModel) copyLastReply() {
+	for i := len(m.lines) - 1; i >= 0; i-- {
+		if m.lines[i].role == "bot" {
+			m.clip.set(strings.TrimSpace(m.lines[i].content))
+			m.addChatLine(chatLine{role: "err", content: "✓ 已复制最近一条 AI 回复到剪贴板", ts: time.Now()})
+			return
+		}
+	}
+	m.addChatLine(chatLine{role: "err", content: "拷贝：当前还没有 AI 回复可复制", ts: time.Now()})
+}
+
+// linePlainText 返回某行聊天消息的纯文本（无着色标记），供复制用。
+func (m *tuiModel) linePlainText(i int) string {
+	if i < 0 || i >= len(m.lines) {
+		return ""
+	}
+	l := m.lines[i]
+	t := l.ts.Format("15:04")
+	switch l.role {
+	case "user":
+		return fmt.Sprintf("▶ [%s] %s", t, l.content)
+	case "bot":
+		return fmt.Sprintf("▲ [%s]\n%s", t, l.content)
+	case "err":
+		return fmt.Sprintf("✗ [%s] %s", t, l.content)
+	case "tool":
+		return fmt.Sprintf("🔧 [%s] %s", t, l.content)
+	default: // system
+		return l.content
+	}
+}
+
+// renderCopyMode 渲染拷贝模式视图：全量聊天记录 + 选区高亮 + 底部键位提示条。
+func (m *tuiModel) renderCopyMode() {
+	var sb strings.Builder
+	sb.WriteString(sgrColor("yellow", "〔拷贝模式〕↑↓ 移动 · v/空格 标记选区起点 · y 复制 · q/Esc 退出\n"))
+	for i, l := range m.lines {
+		lo, hi := m.copyBase, m.copyEnd
+		if hi < lo {
+			lo, hi = hi, lo
+		}
+		selected := m.copyActive && i >= lo && i <= hi
+		content := m.linePlainText(i)
+		// 选中的行用反转高亮（黑字白底）模拟选区，其余正常显示。
+		prefix := "  "
+		if m.copyActive && i == lo {
+			prefix = "· "
+		}
+		if m.copyActive && i == hi {
+			prefix = "· "
+		}
+		if selected {
+			sb.WriteString(sgrColor("black:white", fmt.Sprintf("%s %s", prefix, content)) + "\n")
+		} else {
+			sb.WriteString(sgrColor("white", fmt.Sprintf("%s %s", prefix, content)) + "\n")
+		}
+		_ = l
+	}
+	m.textView.SetText(sb.String()).SetDynamicColors(true)
+	// 滚动到光标所在行，保证可见
+	m.textView.ScrollTo(m.copyCursor, 0)
+	// 状态栏提示
+	m.statusBar.SetText(sgrColor("yellow", "〔拷贝模式〕↑↓ 移动 · v/空格 标记 · y 复制 · q/Esc 退出"))
 }
 
 func truncateArgs(s string) string {

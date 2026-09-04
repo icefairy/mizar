@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -85,6 +86,23 @@ func (e *StreamTextExtractor) Feed(delta string) string {
 	e.raw.WriteString(delta)
 	s := e.raw.String()
 
+	// 缺 action 的原生 bare 工具调用（{"tool":...,"args":...}）：完整 JSON 一旦到达即确认。
+	// 可能被前导人话/围栏包裹（模型先说话再一次性吐 JSON），故扫描所有 '{' 尝试识别。
+	// 必须在 switch 之前判定：bare 形态无 action，永远进不了 action 分支。
+	// 仅当整个 raw 里完全没有 action 字段时才走 bare 识别，避免把 reply.text 内嵌的工具对象误判。
+	if jsonValueOf(s, "action") == "" {
+		if i := bareToolJSONStart(s); i >= 0 {
+			e.inTool = true
+			e.inRep = false
+			// 修正 intro：仅保留 JSON 前的真·人话（流式时 JSON 前半段可能已误入 intro）
+			if i > 0 {
+				e.intro.Reset()
+				e.intro.WriteString(strings.TrimSpace(s[:i]))
+			}
+			return ""
+		}
+	}
+
 	switch jsonValueOf(s, "action") {
 	case "tool":
 		// 已确认工具调用：进入 tool 状态。
@@ -129,11 +147,17 @@ func (e *StreamTextExtractor) Feed(delta string) string {
 		//   1. 纯前导说明文字（模型先说人话再调工具）→ 应透传给人看
 		//   2. reply JSON 的开头（以 { 起始）→ 不应透传，等 reply 分支提取 text
 		//   3. tool JSON 的开头（以 { 起始）→ 不应透传，等 tool 分支
+		//   4. 缺 action 的原生 bare 工具调用 （{"tool":...,"args":...}）→ 完整 JSON 到达时确认
 		// 以「是否以 { 起始」作为人话 vs 控制 JSON 的启发式分流：
 		//  - 不以 { 起始 → 视为前导说明文字，累积到 intro 并增量透传；
 		//  - 以 { 起始   → 已进入控制 JSON，静默等待 action 判定。
 		// 该启发式可能出现「人话以 { 开头」的罕见误判，对文本型 Agent 输出影响可忽略。
 		if strings.HasPrefix(strings.TrimSpace(s), "{") {
+			// 若完整 JSON 已到且是缺 action 的 bare 工具调用（工具 JSON 可能一次性到达），
+			// 同样进入 tool 状态、不透传，避免把原始 JSON 显示出来。
+			if isNativeBareToolCall(s) {
+				e.inTool = true
+			}
 			return ""
 		}
 		e.intro.WriteString(delta)
@@ -147,12 +171,50 @@ func (e *StreamTextExtractor) Text() string { return e.text.String() }
 // Replying 当前步是否已确认有可显示的回复内容。
 func (e *StreamTextExtractor) Replying() bool { return e.rep }
 
-// IsToolCallText 判断文本是否指向工具调用（顶层 action 字段值为 "tool"）。
-// 容忍空白与畸形 JSON（jsonValueOf 逐字符扫描，不依赖整体 JSON 合法性）。
-// 供 LLM 层识别「模型想调工具但 JSON 畸形」的场景：
-// 若不识别，畸形 tool JSON 会被包装成 reply 导致用户看到原始 JSON、任务提前结束。
+// IsToolCallText 判断文本是否指向工具调用。
+// 识别两类形态：
+//  1. 标准控制协议：顶层 action 字段值为 "tool"（容忍空白与畸形 JSON，逐字符扫描）。
+//  2. 原生 bare 形态：合法 JSON 但缺 action 字段，同时含 tool 与 args 字段
+//     （模型搞丢 action 时常见，例如 {"args":"{...}","tool":"bash"}）。
+// 若不识别，tool JSON 会被包装成 reply 导致用户看到原始 JSON、任务提前结束。
 func IsToolCallText(s string) bool {
-	return jsonValueOf(s, "action") == "tool"
+	if jsonValueOf(s, "action") == "tool" {
+		return true
+	}
+	return isNativeBareToolCall(s)
+}
+
+// isNativeBareToolCall 判断 JSON 文本是否为「缺 action 的原生 bare 工具调用」：
+// 顶层对象同时含 tool 与 args 字段即视为工具调用。
+// 只对合法 JSON 生效（避免把任意含 tool 字样的人话误判）。
+func isNativeBareToolCall(s string) bool {
+	dec := json.NewDecoder(strings.NewReader(s))
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil {
+		return false // 非合法 JSON，交由 parseCallJSON 的畸形路径处理
+	}
+	act, _ := obj["action"].(string)
+	if act != "" {
+		return false // 有 action 字段：由标准协议分支处理
+	}
+	tool, _ := obj["tool"].(string)
+	_, hasArgs := obj["args"]
+	return tool != "" && hasArgs
+}
+
+// bareToolJSONStart 扫描 s 中所有 '{'，从每个位置尝试解析合法 JSON 并判断是否为
+// 「缺 action 的原生 bare 工具调用」；命中返回该 '{' 下标，否则返回 -1。
+// 用于把「前导人话/围栏 + 裸工具 JSON」中的 JSON 对象分离出来做识别。
+func bareToolJSONStart(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' {
+			continue
+		}
+		if isNativeBareToolCall(s[i:]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // jsonValueOf 提取 JSON 顶层字段的字符串值（容忍未闭合 / 转义，供流式增量用）。

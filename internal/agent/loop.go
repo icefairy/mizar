@@ -754,6 +754,12 @@ func parseCallJSON(text string) (*callRequest, error) {
 		return nil, fmt.Errorf("JSON 格式错误：%v\n原始输出片段：%s\n请使用 XML 格式或确保 JSON 完整闭合", err, truncate(extracted, 80))
 	}
 	if reqJSON.Action == "" {
+		// 原生 bare 工具调用（缺 action 字段）：{"tool":...,"args":...}
+		// 含 tool 字段即视为工具调用（args 可为空字符串，循环内做空参数兜底），归一化为标准工具调用。
+		if reqJSON.Tool != "" {
+			reqJSON.Action = "tool"
+			return &reqJSON, nil
+		}
 		return nil, fmt.Errorf("缺少 action 字段：提取到的 JSON 没有 action 字段\n请使用 XML 格式：<tool name=\"工具名\">参数 JSON</tool> 或 <reply>回答内容</reply>")
 	}
 	return &reqJSON, nil
@@ -927,7 +933,8 @@ func isValidJSON(s string) bool {
 //  3. 混合文本："先解释一段话…\n\n{"action":"tool",...}" → 扫描提取控制 JSON
 //     （此前这种输出会被包装成 reply 文本，tool JSON 原样显示、工具不执行）
 //
-// 优先级：先找 action=tool（模型意图是调工具时优先执行），再找 action=reply。
+// 优先级：先找 action=tool（模型意图是调工具时优先执行），再找 action=reply，
+// 最后找缺 action 的原生 bare 工具调用（{"tool":...,"args":...}，模型搞丢 action 时常见）。
 // 返回提取到的原始 JSON 文本。文本内嵌的转义 tool JSON（reply.text 里的 \"action\"）
 // 不会被误提取——非转义的 { 开头才会进入解码尝试，转义形态解码必然失败。
 func ExtractActionJSON(text string) (string, bool) {
@@ -942,8 +949,8 @@ func ExtractActionJSON(text string) (string, bool) {
 			s = strings.TrimSpace(strings.TrimSuffix(lines[1], "```"))
 		}
 	}
-	// 两轮扫描：第一轮只要 action=tool，第二轮接受 action=reply
-	for _, want := range []string{"tool", "reply"} {
+	// 三轮扫描：第一轮只要 action=tool，第二轮接受 action=reply，第三轮接受缺 action 的 bare 工具调用
+	for _, want := range []string{"tool", "reply", "native"} {
 		for i := 0; i < len(s); i++ {
 			if s[i] != '{' {
 				continue
@@ -954,11 +961,21 @@ func ExtractActionJSON(text string) (string, bool) {
 				continue // 非 JSON 起始（如 {namespace} 占位符）：跳过
 			}
 			act, _ := obj["action"].(string)
-			if act == "" {
-				continue // 合法 JSON 但非控制协议：跳过
-			}
-			if want == "tool" && act != "tool" {
-				continue
+			switch want {
+			case "tool", "reply":
+				if act == "" || (want == "tool" && act != "tool") {
+					continue
+				}
+			case "native":
+				// 缺 action 的原生 bare 工具调用：{"tool":...,"args":...}
+				if act != "" {
+					continue // 有 action 的交由标准分支
+				}
+				tool, _ := obj["tool"].(string)
+				_, hasArgs := obj["args"]
+				if tool == "" || !hasArgs {
+					continue
+				}
 			}
 			end := i + int(dec.InputOffset())
 			// 解码器可能吃掉对象后的空白，截取到 '}' 为止更精确，但多余空白不影响 Unmarshal
