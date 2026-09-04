@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -702,10 +703,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			case agent.KindToolResult:
 				result := builtins.StripTodoMarker(strings.TrimPrefix(msg.Content, "工具结果: "))
 				result = strings.TrimSpace(result)
+				if parsed, ok := extractToolOutput(result); ok {
+					result = parsed
+				}
 				if len(result) > 300 {
 					result = result[:297] + "..."
 				}
-				m.lines = append(m.lines, chatLine{role: "tool", content: "🔄 → " + result, ts: time.Now()})
+				m.lines = append(m.lines, chatLine{role: "tool", content: "→ " + result, ts: time.Now()})
 				continue
 			}
 			role := "bot"
@@ -1176,13 +1180,16 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			if ctx.Err != nil {
 				m.addChatLineAsync(chatLine{role: "err", content: ctx.Tool + " 失败: " + ctx.Err.Error(), ts: time.Now()})
 			} else if ctx.Result != "" {
-				// 工具结果：显示内容，长文本截断（避免刷屏）；todo 状态标记剥离
+				// 工具结果：从 ToolResult JSON 中提取 output 字段，避免显示冗余的 JSON 包装
 				result := builtins.StripTodoMarker(ctx.Result)
 				result = strings.TrimSpace(result)
+				if parsed, ok := extractToolOutput(result); ok {
+					result = parsed
+				}
 				if len(result) > 300 {
 					result = result[:297] + "..."
 				}
-				m.addChatLineAsync(chatLine{role: "tool", content: ctx.Tool + "() → " + result, ts: time.Now()})
+				m.addChatLineAsync(chatLine{role: "tool", content: "→ " + result, ts: time.Now()})
 			}
 			return nil
 		})
@@ -1511,6 +1518,53 @@ func truncateArgs(s string) string {
 		return s
 	}
 	return s[:77] + "..."
+}
+
+// extractToolOutput 从 ToolResult JSON（{"tool_name":...,"args":...,"output":...}）中提取 output 字段。
+// 若解析失败或无 output 字段则返回原始字符串（回退行为）。
+func extractToolOutput(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") {
+		return s, false
+	}
+	// 宽容扫描 output 字段（容忍畸形 JSON）
+	idx := strings.Index(s, `"output":`)
+	if idx < 0 {
+		return s, false
+	}
+	idx += len(`"output":`)
+	for idx < len(s) && strings.ContainsRune(" \t\n", rune(s[idx])) {
+		idx++
+	}
+	if idx >= len(s) || s[idx] != '"' {
+		// output 非字符串值，尝试作为数字/布尔直接返回
+		end := idx
+		for end < len(s) && strings.ContainsRune("0123456789.+-eEtruefalsenull", rune(s[end])) {
+			end++
+		}
+		if end > idx {
+			return s[idx:end], true
+		}
+		return s, false
+	}
+	idx++ // skip opening quote
+	start := idx
+	for idx < len(s) && s[idx] != '"' {
+		if s[idx] == '\\' && idx+1 < len(s) {
+			idx++
+		}
+		idx++
+	}
+	if idx >= len(s) {
+		return s, false
+	}
+	// 反序列化 JSON 字符串值（处理转义）
+	raw := s[start:idx]
+	var unescaped string
+	if err := json.Unmarshal([]byte(`"`+raw+`"`), &unescaped); err != nil {
+		unescaped = raw
+	}
+	return unescaped, true
 }
 
 // toolCallReason 从工具调用控制 JSON（{"action":"tool",...,"reason":"..."}）中提取说明文字。
