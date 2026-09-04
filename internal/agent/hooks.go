@@ -74,6 +74,7 @@ type HookContext struct {
 	// 工具相关（ToolCall / ToolResult 挂载点）
 	Tool   string
 	Args   string
+	Reason string // 模型在调用工具前说的一句说明文字（ToolCall 挂载点）
 	Result string
 	Err    error // 工具执行错误（若有）
 
@@ -131,17 +132,72 @@ func NewHooks() *Hooks {
 
 // --- 注册方法（链式支持） ---
 
-func (h *Hooks) OnRunStart(f HookFunc) *Hooks        { h.mu.Lock(); h.RunStart = append(h.RunStart, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnRunEnd(f HookFunc) *Hooks          { h.mu.Lock(); h.RunEnd = append(h.RunEnd, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnStepStart(f HookFunc) *Hooks       { h.mu.Lock(); h.StepStart = append(h.StepStart, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnStepEnd(f HookFunc) *Hooks         { h.mu.Lock(); h.StepEnd = append(h.StepEnd, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnLLMRequest(f HookFunc) *Hooks      { h.mu.Lock(); h.LLMRequest = append(h.LLMRequest, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnLLMResponse(f HookFunc) *Hooks     { h.mu.Lock(); h.LLMResponse = append(h.LLMResponse, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnToolCall(f HookFunc) *Hooks        { h.mu.Lock(); h.ToolCall = append(h.ToolCall, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnToolResult(f HookFunc) *Hooks      { h.mu.Lock(); h.ToolResult = append(h.ToolResult, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnCompactionBefore(f HookFunc) *Hooks { h.mu.Lock(); h.CompactionBefore = append(h.CompactionBefore, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnCompactionAfter(f HookFunc) *Hooks { h.mu.Lock(); h.CompactionAfter = append(h.CompactionAfter, f); h.mu.Unlock(); return h }
-func (h *Hooks) OnError(f HookFunc) *Hooks           { h.mu.Lock(); h.Error = append(h.Error, f); h.mu.Unlock(); return h }
+func (h *Hooks) OnRunStart(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.RunStart = append(h.RunStart, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnRunEnd(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.RunEnd = append(h.RunEnd, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnStepStart(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.StepStart = append(h.StepStart, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnStepEnd(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.StepEnd = append(h.StepEnd, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnLLMRequest(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.LLMRequest = append(h.LLMRequest, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnLLMResponse(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.LLMResponse = append(h.LLMResponse, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnToolCall(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.ToolCall = append(h.ToolCall, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnToolResult(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.ToolResult = append(h.ToolResult, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnCompactionBefore(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.CompactionBefore = append(h.CompactionBefore, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnCompactionAfter(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.CompactionAfter = append(h.CompactionAfter, f)
+	h.mu.Unlock()
+	return h
+}
+func (h *Hooks) OnError(f HookFunc) *Hooks {
+	h.mu.Lock()
+	h.Error = append(h.Error, f)
+	h.mu.Unlock()
+	return h
+}
 
 // --- 触发（内部） ---
 
@@ -162,17 +218,72 @@ func (h *Hooks) fire(name string, hooks []HookFunc, ctx *HookContext, log func(s
 	}
 }
 
-func (h *Hooks) fireRunStart(ctx *HookContext, log func(string))     { h.mu.Lock(); hs := append([]HookFunc(nil), h.RunStart...); h.mu.Unlock(); h.fire("RunStart", hs, ctx, log) }
-func (h *Hooks) fireRunEnd(ctx *HookContext, log func(string))       { h.mu.Lock(); hs := append([]HookFunc(nil), h.RunEnd...); h.mu.Unlock(); h.fire("RunEnd", hs, ctx, log) }
-func (h *Hooks) fireStepStart(ctx *HookContext, log func(string))    { h.mu.Lock(); hs := append([]HookFunc(nil), h.StepStart...); h.mu.Unlock(); h.fire("StepStart", hs, ctx, log) }
-func (h *Hooks) fireStepEnd(ctx *HookContext, log func(string))      { h.mu.Lock(); hs := append([]HookFunc(nil), h.StepEnd...); h.mu.Unlock(); h.fire("StepEnd", hs, ctx, log) }
-func (h *Hooks) fireLLMRequest(ctx *HookContext, log func(string))   { h.mu.Lock(); hs := append([]HookFunc(nil), h.LLMRequest...); h.mu.Unlock(); h.fire("LLMRequest", hs, ctx, log) }
-func (h *Hooks) fireLLMResponse(ctx *HookContext, log func(string))  { h.mu.Lock(); hs := append([]HookFunc(nil), h.LLMResponse...); h.mu.Unlock(); h.fire("LLMResponse", hs, ctx, log) }
-func (h *Hooks) fireToolCall(ctx *HookContext, log func(string))     { h.mu.Lock(); hs := append([]HookFunc(nil), h.ToolCall...); h.mu.Unlock(); h.fire("ToolCall", hs, ctx, log) }
-func (h *Hooks) fireToolResult(ctx *HookContext, log func(string))   { h.mu.Lock(); hs := append([]HookFunc(nil), h.ToolResult...); h.mu.Unlock(); h.fire("ToolResult", hs, ctx, log) }
-func (h *Hooks) fireCompactionBefore(ctx *HookContext, log func(string)) { h.mu.Lock(); hs := append([]HookFunc(nil), h.CompactionBefore...); h.mu.Unlock(); h.fire("CompactionBefore", hs, ctx, log) }
-func (h *Hooks) fireCompactionAfter(ctx *HookContext, log func(string))  { h.mu.Lock(); hs := append([]HookFunc(nil), h.CompactionAfter...); h.mu.Unlock(); h.fire("CompactionAfter", hs, ctx, log) }
-func (h *Hooks) fireError(ctx *HookContext, log func(string))        { h.mu.Lock(); hs := append([]HookFunc(nil), h.Error...); h.mu.Unlock(); h.fire("Error", hs, ctx, log) }
+func (h *Hooks) fireRunStart(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.RunStart...)
+	h.mu.Unlock()
+	h.fire("RunStart", hs, ctx, log)
+}
+func (h *Hooks) fireRunEnd(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.RunEnd...)
+	h.mu.Unlock()
+	h.fire("RunEnd", hs, ctx, log)
+}
+func (h *Hooks) fireStepStart(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.StepStart...)
+	h.mu.Unlock()
+	h.fire("StepStart", hs, ctx, log)
+}
+func (h *Hooks) fireStepEnd(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.StepEnd...)
+	h.mu.Unlock()
+	h.fire("StepEnd", hs, ctx, log)
+}
+func (h *Hooks) fireLLMRequest(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.LLMRequest...)
+	h.mu.Unlock()
+	h.fire("LLMRequest", hs, ctx, log)
+}
+func (h *Hooks) fireLLMResponse(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.LLMResponse...)
+	h.mu.Unlock()
+	h.fire("LLMResponse", hs, ctx, log)
+}
+func (h *Hooks) fireToolCall(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.ToolCall...)
+	h.mu.Unlock()
+	h.fire("ToolCall", hs, ctx, log)
+}
+func (h *Hooks) fireToolResult(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.ToolResult...)
+	h.mu.Unlock()
+	h.fire("ToolResult", hs, ctx, log)
+}
+func (h *Hooks) fireCompactionBefore(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.CompactionBefore...)
+	h.mu.Unlock()
+	h.fire("CompactionBefore", hs, ctx, log)
+}
+func (h *Hooks) fireCompactionAfter(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.CompactionAfter...)
+	h.mu.Unlock()
+	h.fire("CompactionAfter", hs, ctx, log)
+}
+func (h *Hooks) fireError(ctx *HookContext, log func(string)) {
+	h.mu.Lock()
+	hs := append([]HookFunc(nil), h.Error...)
+	h.mu.Unlock()
+	h.fire("Error", hs, ctx, log)
+}
 
 // HookSpec 挂载点规格（文档生成/插件模板用）。
 type HookSpec struct {

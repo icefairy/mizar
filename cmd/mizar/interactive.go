@@ -188,8 +188,8 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 
 		// 工具交换收集：任务结束时持久化到会话文件（经典模式无需 Initial，历史逐轮重放）
 		var exchanges []agent.Message
-		a.OnToolExchange = func(tool, args, out string, err error) {
-			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, out, err)...)
+		a.OnToolExchange = func(tool, args, reason, out string, err error) {
+			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, reason, out, err)...)
 		}
 
 		// LLM 调用（流式）

@@ -49,20 +49,31 @@ type CancellableStreamToolCallLLM interface {
 //
 // 供 CLI（TUI/readline）与 Server（SSE）共用；与 parseCallJSON 同源的协议理解。
 type StreamTextExtractor struct {
-	raw   strings.Builder // 当前步原始内容累积（含控制 JSON）
-	shown string          // 已提取并显示的文本（用于增量 diff）
-	text  strings.Builder // 累计可显示文本（供整体渲染）
-	inRep bool            // 当前步是否已确认是 reply
-	rep   bool            // 当前步是否确认需要显示（reply 且 text 非空）
+	raw    strings.Builder // 当前步原始内容累积（含控制 JSON）
+	shown  string          // 已提取并显示的文本（用于增量 diff）
+	text   strings.Builder // 累计可显示文本（供整体渲染）
+	intro  strings.Builder // 工具调用前的说明文字（模型先说了一段话再调工具）
+	inRep  bool            // 当前步是否已确认是 reply
+	rep    bool            // 当前步是否确认需要显示（reply 且 text 非空）
+	inTool bool            // 当前步是否已确认是工具调用（tool JSON）
 }
+
+// ToolIntro 返回工具调用前的说明文字（模型先说了一段话再调工具时非空）。
+// UI 可将它渲染为 AI 的一句说明，紧邻其后的工具行，让用户理解模型为何执行这些命令。
+func (e *StreamTextExtractor) ToolIntro() string { return strings.TrimSpace(e.intro.String()) }
+
+// IsTool 返回当前步是否已确认是工具调用。
+func (e *StreamTextExtractor) IsTool() bool { return e.inTool }
 
 // Reset 重置为新步骤（agent 循环每步 LLM 调用开始时调用）。
 func (e *StreamTextExtractor) Reset() {
 	e.raw.Reset()
 	e.shown = ""
 	e.text.Reset()
+	e.intro.Reset()
 	e.inRep = false
 	e.rep = false
+	e.inTool = false
 }
 
 // Feed 追加一个内容分片，返回该分片新增的可显示文本。
@@ -76,14 +87,23 @@ func (e *StreamTextExtractor) Feed(delta string) string {
 
 	switch jsonValueOf(s, "action") {
 	case "tool":
-		// 工具调用控制文本：不显示
+		// 已确认工具调用：进入 tool 状态。
+		// 若此前有前导说明文字（模型先说话再调工具），已通过 intro 透传给人看；
+		// 之后的工具控制 JSON 不显示。
+		e.inTool = true
 		e.inRep = false
 		return ""
 	case "reply":
+		// 已确认 reply：若先有 intro 辅助内容（人话），把它作为回复起点并入 text，
+		// 再走 text 字段的流式提取，避免先前显示的 intro 与后续 text 断裂。
 		if !e.inRep {
 			e.inRep = true
 			e.shown = ""
 			e.text.Reset()
+			if intro := e.intro.String(); intro != "" {
+				e.text.WriteString(intro)
+				e.shown = intro
+			}
 		}
 		t := jsonValueOf(s, "text")
 		if strings.HasPrefix(t, e.shown) {
@@ -104,8 +124,20 @@ func (e *StreamTextExtractor) Feed(delta string) string {
 		}
 		return t
 	default:
-		// action 字段尚未完整到达：不显示（等待）
-		return ""
+		// action 尚未确认。
+		// 这里的 content 分片可能是：
+		//   1. 纯前导说明文字（模型先说人话再调工具）→ 应透传给人看
+		//   2. reply JSON 的开头（以 { 起始）→ 不应透传，等 reply 分支提取 text
+		//   3. tool JSON 的开头（以 { 起始）→ 不应透传，等 tool 分支
+		// 以「是否以 { 起始」作为人话 vs 控制 JSON 的启发式分流：
+		//  - 不以 { 起始 → 视为前导说明文字，累积到 intro 并增量透传；
+		//  - 以 { 起始   → 已进入控制 JSON，静默等待 action 判定。
+		// 该启发式可能出现「人话以 { 开头」的罕见误判，对文本型 Agent 输出影响可忽略。
+		if strings.HasPrefix(strings.TrimSpace(s), "{") {
+			return ""
+		}
+		e.intro.WriteString(delta)
+		return delta
 	}
 }
 

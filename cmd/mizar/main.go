@@ -34,7 +34,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.3.1"
+var version = "v0.4.0"
 
 // startupHint 首次运行未配置供应商时，banner 末尾追加的引导提示。
 var startupHint string
@@ -1369,10 +1369,33 @@ func main() {
 	}
 
 	if *task != "" {
+		// 实时输出：模型每步调工具前先说一句说明，再执行。让用户看到“为何执行这些命令”，便于判断是否打断。
+		if a.Hooks != nil {
+			a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {
+				if ctx.Reason != "" {
+					fmt.Printf("🧠 %s\n", ctx.Reason)
+				}
+				fmt.Printf("🔧 %s(%s)\n", ctx.Tool, truncateArgs(ctx.Args))
+				return nil
+			})
+			a.Hooks.OnToolResult(func(ctx *agent.HookContext) error {
+				if ctx.Err != nil {
+					fmt.Printf("❌ %s 失败: %v\n", ctx.Tool, ctx.Err)
+				} else if ctx.Result != "" {
+					res := builtins.StripTodoMarker(ctx.Result)
+					res = strings.TrimSpace(res)
+					if len(res) > 300 {
+						res = res[:297] + "..."
+					}
+					fmt.Printf("✅ %s → %s\n", ctx.Tool, res)
+				}
+				return nil
+			})
+		}
 		// 工具交换收集：任务结束落盘（与 TUI/interactive 一致）
 		var exchanges []agent.Message
-		a.OnToolExchange = func(tool, args, out string, err error) {
-			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, out, err)...)
+		a.OnToolExchange = func(tool, args, reason, out string, err error) {
+			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, reason, out, err)...)
 		}
 		reply, err := a.Run(*task)
 		a.OnToolExchange = nil

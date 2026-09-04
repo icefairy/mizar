@@ -139,7 +139,7 @@ func TestTodoSetFromHistory(t *testing.T) {
 		{"todo", `{"action":"add","text":"任务2"}`, out2},
 		{"todo", `{"action":"toggle","id":1}`, out3},
 	} {
-		msgs = append(msgs, agent.ToolExchangeMessages(te.tool, te.args, te.out, nil)...)
+		msgs = append(msgs, agent.ToolExchangeMessages(te.tool, te.args, "", te.out, nil)...)
 	}
 
 	// 清空内存态，模拟新进程/新会话开始

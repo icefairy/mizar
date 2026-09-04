@@ -66,8 +66,6 @@ type LLM interface {
 	Chat(messages []Message) (string, error)
 }
 
-
-
 // ToolCallLLM 可选接口：支持原生工具调用的 LLM。
 // 若 LLM 实现此接口，Agent 循环会使用原生 tools 参数而非文本 JSON。
 type ToolCallLLM interface {
@@ -135,10 +133,11 @@ type Agent struct {
 	AskUser func(questionsJSON string) (string, error)
 
 	// OnToolExchange 可选：每次工具真实执行后回调（供调用方持久化工具交换历史）。
-	// tool/args 为调用参数；out/err 为执行结果（err 非空表示工具执行失败，out 可能为部分输出）。
+	// tool/args 为调用参数；reason 为模型在调用该工具前说的一句说明文字（可为空）；
+	// out/err 为执行结果（err 非空表示工具执行失败，out 可能为部分输出）。
 	// 在工具执行线程同步调用，必须快速返回（勿阻塞/勿做重 IO；落盘请在回调内自行异步或任务结束时批量做）。
 	// 典型用途：TUI/CLI 把工具调用+结果持久化到会话文件，会话恢复后模型能看到之前试过什么。
-	OnToolExchange func(tool, args, out string, err error)
+	OnToolExchange func(tool, args, reason, out string, err error)
 
 	// 工具调用解析策略
 	callParser func(text string) (*callRequest, error)
@@ -178,6 +177,7 @@ type callRequest struct {
 	Tool   string `json:"tool,omitempty"`
 	Args   string `json:"args,omitempty"`
 	Text   string `json:"text,omitempty"`
+	Reason string `json:"reason,omitempty"` // 模型在调用工具前说的一句说明文字
 }
 
 // New 创建 Agent。
@@ -363,7 +363,11 @@ func (a *Agent) ReloadTools() {
 
 // Run 执行任务。返回最终回复。
 func (a *Agent) Run(task string) (string, error) {
-	if a.MaxSteps <= 0 {
+	// MaxSteps 语义：>0 有限步数；-1 表示无限（用户通过 /config max_steps -1 设置）；
+	// 0 表示未设置 → 落到默认 maxStepsDefault。
+	// 注意不能用 <=0，否则会把 -1（无限）误当成“未设置”而改写回默认值。
+	unlimited := a.MaxSteps == -1
+	if a.MaxSteps == 0 {
 		a.MaxSteps = maxStepsDefault
 	}
 	if a.Hooks == nil {
@@ -402,20 +406,22 @@ func (a *Agent) Run(task string) (string, error) {
 	step := 0
 	stepWarned := false // 步数预算预警只提醒一次
 	var qc lifecycle.QueryContext
-	for step < a.MaxSteps {
+	for unlimited || step < a.MaxSteps {
 		q.BeginStep()
 		qc = q.Context()
 		stepCtx := &HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}
 		// StepStart 挂载点（🟡 中等：可读，不建议改 Messages）
 		a.Hooks.fireStepStart(stepCtx, a.logf)
 
-		// 步数预算预警：剩余步数不足时提醒模型收敛（只注入一次，避免刷屏）
-		if remain := a.MaxSteps - step; remain <= maxStepsWarnRemain && !stepWarned {
-			stepWarned = true
-			msgs = append(msgs, Message{Role: RoleUser, Content: fmt.Sprintf(
-				"【系统提醒】剩余步骤仅 %d 步（当前上限 %d）。若任务已基本完成，请立即用 reply 输出最终回答；"+
-					"若仍需操作，请合并为一次工具调用（如一次 bash 完成多项检查/修改）快速收尾", remain, a.MaxSteps)})
-			a.log("%s", q.FormatLog("step_budget_warn", "remain=", fmt.Sprintf("%d", remain)))
+		// 步数预算预警：有限步数下剩余不足时提醒模型收敛（只注入一次，避免刷屏）。无限模式（-1）不提醒。
+		if !unlimited {
+			if remain := a.MaxSteps - step; remain <= maxStepsWarnRemain && !stepWarned {
+				stepWarned = true
+				msgs = append(msgs, Message{Role: RoleUser, Content: fmt.Sprintf(
+					"【系统提醒】剩余步骤仅 %d 步（当前上限 %d）。若任务已基本完成，请立即用 reply 输出最终回答；"+
+						"若仍需操作，请合并为一次工具调用（如一次 bash 完成多项检查/修改）快速收尾", remain, a.MaxSteps)})
+				a.log("%s", q.FormatLog("step_budget_warn", "remain=", fmt.Sprintf("%d", remain)))
+			}
 		}
 
 		// 快速插入检查
@@ -591,7 +597,7 @@ func (a *Agent) Run(task string) (string, error) {
 
 		// 工具调用
 		q.BeginOperation("tool:" + req.Tool)
-		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args}, a.logf)
+		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Reason: req.Reason}, a.logf)
 
 		// respond 工具：直接回答出口。不执行不回填，text 参数作为最终回答返回。
 		// 给 tool_choice=required 模式下的模型一条正规的"回答"路径，
@@ -633,7 +639,7 @@ func (a *Agent) Run(task string) (string, error) {
 		q.EndOperation("tool:" + req.Tool)
 		// 工具交换回调：供调用方持久化（会话记录工具调用过程/结果）
 		if a.OnToolExchange != nil {
-			a.OnToolExchange(req.Tool, req.Args, out, err)
+			a.OnToolExchange(req.Tool, req.Args, req.Reason, out, err)
 		}
 		tr := ToolResult{ToolName: req.Tool, Args: req.Args, Output: out}
 		if err != nil {
@@ -986,9 +992,15 @@ func respondText(args string) string {
 // ToolExchangeMessages 将一次工具调用+结果转为与循环内部格式一致的 Message 对，
 // 供调用方持久化到会话（恢复会话后 LLM 可无缝理解之前试过什么）。
 // toolCall 消息（role=assistant, Kind=tool_call）+ toolResult 消息（role=user, Kind=tool_result）。
-func ToolExchangeMessages(tool, args, out string, err error) []Message {
+// reason 为模型在调用工具前说的一句说明文字；非空时写入 tool_call 消息的 Content 中的 reason 字段，
+// 使会话恢复后 UI/LLM 能读到“为什么执行这些命令”。
+func ToolExchangeMessages(tool, args, reason, out string, err error) []Message {
 	// 还原与模型输出同构的工具调用 JSON（callParser 只读 action/tool/args 字段）
-	callJSON, _ := json.Marshal(map[string]any{"action": "tool", "tool": tool, "args": args})
+	cc := map[string]any{"action": "tool", "tool": tool, "args": args}
+	if reason != "" {
+		cc["reason"] = reason
+	}
+	callJSON, _ := json.Marshal(cc)
 	tr, _ := json.Marshal(ToolResult{ToolName: tool, Args: args, Output: out})
 	if err != nil {
 		tr, _ = json.Marshal(ToolResult{ToolName: tool, Args: args, Output: out, Error: err.Error()})

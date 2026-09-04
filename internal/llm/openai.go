@@ -151,17 +151,24 @@ func pluginsToolToDef(t plugins.Tool) toolDef {
 // toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
 // 新 schema 中 arguments 直接是原始参数（如 {"command":"hostname"}），
 // 用 json.Marshal 转成转义后的 JSON 字符串填入 args 字段。
-// 期望输出：{"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}
+// 期望输出：{"action":"tool","tool":"bash","args":"{...}","reason":"..."}
 //
+// reason 为模型在发起工具调用前说的一句说明文字（content 字段）；
+// 若非空则并入返回 JSON 的 reason 字段，使 agent 循环能把它存入历史并在 UI 展示。
 // 空 arguments 仍生成工具调用（args=""），由 agent 循环做空参数兜底。
-func toolCallsToText(tcs []toolCall) string {
+func toolCallsToText(tcs []toolCall, reason string) string {
 	if len(tcs) == 0 {
 		return ""
 	}
 	tc := tcs[0]
 	argsRaw := tc.Function.Arguments
 	argsEscaped, _ := json.Marshal(argsRaw)
-	return fmt.Sprintf(`{"action":"tool","tool":"%s","args":%s}`, tc.Function.Name, argsEscaped)
+	r := ""
+	if reason != "" {
+		res, _ := json.Marshal(strings.TrimSpace(reason))
+		r = "," + `"reason":` + string(res)
+	}
+	return fmt.Sprintf(`{"action":"tool","tool":"%s","args":%s%s}`, tc.Function.Name, argsEscaped, r)
 }
 
 // setThinking 根据 ThinkingLevel 设置思考参数
@@ -245,10 +252,6 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	for _, m := range messages {
 		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
 	}
-	// 工具定义
-	for _, t := range tools {
-		req.Tools = append(req.Tools, pluginsToolToDef(t))
-	}
 	c.setToolChoice(&req, tools)
 	c.setThinking(&req)
 
@@ -290,10 +293,10 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 
 	msg := out.Choices[0].Message
 	fr := out.Choices[0].FinishReason
-	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
+	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本（附带模型说明文字作为 reason）
 	if len(msg.ToolCalls) > 0 {
 		c.updateForcedToolCalls(true)
-		return toolCallsToText(msg.ToolCalls), nil
+		return toolCallsToText(msg.ToolCalls, msg.Content), nil
 	}
 	c.updateForcedToolCalls(false)
 	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
@@ -305,7 +308,7 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 			return extracted, nil
 		}
 		// 修复：畸形工具调用 JSON（如缺 tool 字段、内层引号未转义）不包装成 reply，
-		// 返回原始内容让 agent 循环的 parseCallJSON 走错误处理路径（注入纠正提示）。
+		// 返回原始内容让 agent 循环的 parseCallJSON 走错误处理路径（注入纠正提示）
 		if agent.IsToolCallText(s) {
 			return s, nil
 		}
@@ -313,7 +316,6 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	}
 	return msg.Content, nil
 }
-
 
 // ChatWithToolsCtx 实现 agent.LLMWithContext 接口：发送消息 + 原生工具定义，
 // 支持通过 context 取消（ESC 中止时立即中断在途请求，无需等待 LLM 自然返回）。
@@ -368,10 +370,10 @@ func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message,
 
 	msg := out.Choices[0].Message
 	fr := out.Choices[0].FinishReason
-	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本
+	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本（附带模型说明文字作为 reason）
 	if len(msg.ToolCalls) > 0 {
 		c.updateForcedToolCalls(true)
-		return toolCallsToText(msg.ToolCalls), nil
+		return toolCallsToText(msg.ToolCalls, msg.Content), nil
 	}
 	c.updateForcedToolCalls(false)
 	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
@@ -604,13 +606,13 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 		}
 	}
 
-	// 原生工具调用优先：合并后的分片转成 agent 循环可解析的 JSON 控制文本
+	// 原生工具调用优先：合并后的分片转成 agent 循环可解析的 JSON 控制文本（附带说明文字作为 reason）
 	if len(toolOrder) > 0 {
 		tcs := make([]toolCall, 0, len(toolOrder))
 		for _, idx := range toolOrder {
 			tcs = append(tcs, *toolCalls[idx])
 		}
-		return toolCallsToText(tcs), nil
+		return toolCallsToText(tcs, content.String()), nil
 	}
 	// 按协议包装回复（仅 agent 循环路径 wrapReply=true）。
 	// 若模型输出了控制 JSON（含"解释文本 + tool JSON"混合形态），优先透传提取结果；

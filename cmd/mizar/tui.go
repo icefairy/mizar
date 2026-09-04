@@ -502,8 +502,8 @@ func (m *tuiModel) startTask(input string) {
 	m.liveMu.Lock()
 	m.toolLog = nil
 	m.liveMu.Unlock()
-	m.agent.OnToolExchange = func(tool, args, out string, err error) {
-		msgs := agent.ToolExchangeMessages(tool, args, out, err)
+	m.agent.OnToolExchange = func(tool, args, reason, out string, err error) {
+		msgs := agent.ToolExchangeMessages(tool, args, reason, out, err)
 		m.liveMu.Lock()
 		m.toolLog = append(m.toolLog, msgs...)
 		m.liveMu.Unlock()
@@ -647,6 +647,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			// 会话中的工具交换消息渲染为工具行（而非 user/bot 长文本）
 			switch msg.Kind {
 			case agent.KindToolCall:
+				// 会话恢复：若该工具调用前模型说了说明文字（reason），先渲染为一条 AI 消息
+				if reason := toolCallReason(msg.Content); reason != "" {
+					m.lines = append(m.lines, chatLine{role: "bot", content: reason, ts: time.Now()})
+				}
 				m.lines = append(m.lines, chatLine{role: "tool", content: "🔄 " + msg.ToolName + "(" + truncateArgs(msg.ToolArgs) + ")", ts: time.Now()})
 				continue
 			case agent.KindToolResult:
@@ -1038,8 +1042,15 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			m.streamMu.Lock()
 			m.streamActive = false
 			m.streamStep = -1
+			// 若模型在调用工具前先说了一句说明文字，把它渲染为一条 AI 消息（让用户理解为何执行这些命令）
+			intro := m.extr.ToolIntro()
 			m.extr.Reset()
 			m.streamMu.Unlock()
+			if intro != "" {
+				m.addChatLineAsync(chatLine{role: "bot", content: intro, ts: time.Now()})
+			} else if ctx.Reason != "" {
+				m.addChatLineAsync(chatLine{role: "bot", content: ctx.Reason, ts: time.Now()})
+			}
 			m.addChatLineAsync(chatLine{role: "tool", content: call.Tool + "(" + call.Args + ")", ts: time.Now()})
 			return nil
 		})
@@ -1181,6 +1192,64 @@ func truncateArgs(s string) string {
 		return s
 	}
 	return s[:77] + "..."
+}
+
+// toolCallReason 从工具调用控制 JSON（{"action":"tool",...,"reason":"..."}）中提取说明文字。
+// 容忍畸形 JSON（若顶层 reason 字段可识别则返回，否则返回空）。
+// 供会话恢复时渲染“模型为何执行这些命令”的说明。
+func toolCallReason(content string) string {
+	s := strings.TrimSpace(content)
+	brace := strings.Index(s, "{")
+	if brace < 0 {
+		return ""
+	}
+	s = s[brace:]
+	p := strings.Index(s, `"reason":`)
+	if p < 0 {
+		return ""
+	}
+	p += len(`"reason":`)
+	for p < len(s) && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n') {
+		p++
+	}
+	if p >= len(s) || s[p] != '"' {
+		return ""
+	}
+	p++
+	var b strings.Builder
+	for p < len(s) {
+		c := s[p]
+		if c == '\\' && p+1 < len(s) {
+			switch s[p+1] {
+			case 'n':
+				b.WriteByte('\n')
+				p += 2
+			case 't':
+				b.WriteByte('\t')
+				p += 2
+			case 'r':
+				b.WriteByte('\r')
+				p += 2
+			case '"':
+				b.WriteByte('"')
+				p += 2
+			case '\\':
+				b.WriteByte('\\')
+				p += 2
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(s[p+1])
+				p += 2
+			}
+			continue
+		}
+		if c == '"' {
+			return strings.TrimSpace(b.String())
+		}
+		b.WriteByte(c)
+		p++
+	}
+	return ""
 }
 
 func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *session.TitleCache) {

@@ -1,39 +1,48 @@
 # Mizar 构建脚本
 # 用法：
-#   make           本机构建（strip）
+#   make           本机构建（strip，纯静态）
 #   make debug     本机构建（带调试信息，未 strip）
 #   make test      全量测试
-#   make release   三平台 strip 构建到 dist/（默认发布流程）
+#   make release   三平台 strip 构建到 dist/（默认发布流程，纯静态）
 #   make upx       UPX 压缩（仅在明确要求压缩时用，平时不用）
 #   make clean     清理 dist/
 #
 # 发布策略：默认只 strip（-s -w + -trimpath），不压 UPX。
 # UPX 压缩会显著拖慢构建且压缩产物不利于符号调试，除非显式要求否则不做。
+#
+# 静态编译策略：项目无真实 import "C"，强制 CGO_ENABLED=0 产出纯静态二进制，
+# 不依赖宿主 GLIBC，可跨发行版部署（解决 Alibaba Cloud Linux 等老 GLIBC 系统
+# 报 "GLIBC_2.34 not found" 的问题）。如需临时回到动态编译用 make dynamic。
 
 BINARY  := mizar
 PKG     := ./cmd/mizar
 LDFLAGS := -s -w
 TRIM    := -trimpath
+GOENV   := CGO_ENABLED=0
 
-.PHONY: all debug test release upx clean
+.PHONY: all build debug dynamic test release upx clean
 
 all: build
 
 build:
-	go build -ldflags="$(LDFLAGS)" $(TRIM) -o $(BINARY) $(PKG)
+	$(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o $(BINARY) $(PKG)
 
-# 本机构建（带调试信息，适合 gdb/dlv）
+# 本机构建（带调试信息，适合 gdb/dlv；静态）
 debug:
-	go build -o $(BINARY) $(PKG)
+	CGO_ENABLED=0 go build -o $(BINARY) $(PKG)
+
+# 动态编译（本地调试需要 cgo 时用）
+dynamic:
+	go build -ldflags="$(LDFLAGS)" $(TRIM) -o $(BINARY) $(PKG)
 
 test:
 	go test ./... -count=1
 
-# 三平台 strip 构建（发布用）
+# 三平台 strip 构建（发布用，全部纯静态，可跨发行版部署）
 release:
 	@mkdir -p dist
-	GOOS=linux   GOARCH=amd64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-amd64 $(PKG)
-	GOOS=linux   GOARCH=arm64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-arm64 $(PKG)
+	GOOS=linux   GOARCH=amd64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-amd64 $(PKG)
+	GOOS=linux   GOARCH=arm64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-arm64 $(PKG)
 	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
 	@echo "--- dist/ ---"
 	@ls -lh dist/ | awk '{print $$5, $$9}'
