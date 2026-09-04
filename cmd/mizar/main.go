@@ -34,7 +34,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.4.0"
+var version = "v0.4.1"
 
 // startupHint 首次运行未配置供应商时，banner 末尾追加的引导提示。
 var startupHint string
