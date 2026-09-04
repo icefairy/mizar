@@ -1,6 +1,6 @@
 # Mizar 构建脚本
 # 用法：
-#   make           本机构建（strip，纯静态）
+#   make           本机构建（strip，纯静态）并安装到 /usr/local/bin
 #   make debug     本机构建（带调试信息，未 strip）
 #   make test      全量测试
 #   make release   三平台 strip 构建到 dist/（默认发布流程，纯静态）
@@ -26,6 +26,7 @@ all: build
 
 build:
 	$(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o $(BINARY) $(PKG)
+	@install -m 0755 $(BINARY) /usr/local/bin/$(BINARY) && echo "已安装: /usr/local/bin/$(BINARY)"
 
 # 本机构建（带调试信息，适合 gdb/dlv；静态）
 debug:
