@@ -128,3 +128,39 @@ func TestRun_NativeBareToolCall_ExecutesAndContinues(t *testing.T) {
 		t.Fatalf("got %q, want 计算完成（bare 工具调用应被执行而非原样显示）", got)
 	}
 }
+
+// 复现用户近期报告的形态：缺 action 的 bare bash 工具调用，args 内含一长串
+// 多行 docker 命令与转义引号（去掉终端换行后的合法 JSON）。应被识别为工具调用。
+func TestProbe_BareBashDockerCommand_Valid(t *testing.T) {
+	in := `{"args":"{\"command\":\"docker run -d --name ppu-port --gpus all --device /dev/alixpu_ctl --device /dev/alixpu_ppu0 2>&1 | tail -2; docker ps --filter name=ppu-port --format '{{.Names}} {{.Status}}'\",\"timeout\":60}","tool":"bash"}`
+	if !IsToolCallText(in) {
+		t.Fatal("bare bash docker tool call (valid JSON) should be recognized as tool call text")
+	}
+	if _, ok := ExtractActionJSON(in); !ok {
+		t.Fatal("ExtractActionJSON should extract bare bash docker tool call")
+	}
+	req, err := parseCallJSON(in)
+	if err != nil {
+		t.Fatalf("parseCallJSON: %v", err)
+	}
+	if req.Action != "tool" || req.Tool != "bash" {
+		t.Fatalf("action=%q tool=%q, want tool/bash", req.Action, req.Tool)
+	}
+}
+
+// 弱模型把 args 内长命令写成字面换行（严格 JSON 非法）：不应被当 reply 显示，
+// 至少要识别为工具调用意图（进入纠错/重试路径而非原样展示）。
+func TestProbe_BareWithLiteralNewlines_NotDisplayed(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"args":"{\"command\":\"docker run -d`)
+	sb.WriteString("\n")
+	sb.WriteString(` --device /dev/alixpu_ctl`)
+	sb.WriteString("\n")
+	sb.WriteString(`\"}","tool":"bash"}`)
+	in := sb.String()
+	if !IsToolCallText(in) {
+		t.Fatal("bare tool call with literal newlines should still be recognized as tool call text (not reply)")
+	}
+	// 严格解析仍是畸形（字面换行）→ ExtractActionJSON 不强行提取，但 IsToolCallText 已兜底防显示
+	_ = in
+}

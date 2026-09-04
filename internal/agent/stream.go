@@ -187,20 +187,35 @@ func IsToolCallText(s string) bool {
 
 // isNativeBareToolCall 判断 JSON 文本是否为「缺 action 的原生 bare 工具调用」：
 // 顶层对象同时含 tool 与 args 字段即视为工具调用。
-// 只对合法 JSON 生效（避免把任意含 tool 字样的人话误判）。
+// 双路径：
+//  1. 严格解析：合法 JSON 且顶层含 tool+args、无 action。
+//  2. 宽容回退：严格解析失败时（如 args 值内含字面换行/未闭合，弱模型对多行 bash
+//     命令常见），用逐字符扫描同时命中顶层 "args": 与 "tool":"<名>" 且无 action 即视为。
+//     扫描依赖 jsonValueOf（容忍畸形），避免把人话误判。
 func isNativeBareToolCall(s string) bool {
-	dec := json.NewDecoder(strings.NewReader(s))
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, "{") {
+		return false
+	}
+	// 有 action 字段：交标准协议分支处理，不做 bare 判定。
+	if jsonValueOf(s, "action") != "" {
+		return false
+	}
+	// 严格路径：合法 JSON
+	dec := json.NewDecoder(strings.NewReader(trimmed))
 	var obj map[string]any
-	if err := dec.Decode(&obj); err != nil {
-		return false // 非合法 JSON，交由 parseCallJSON 的畸形路径处理
+	if err := dec.Decode(&obj); err == nil {
+		tool, _ := obj["tool"].(string)
+		_, hasArgs := obj["args"]
+		return tool != "" && hasArgs
 	}
-	act, _ := obj["action"].(string)
-	if act != "" {
-		return false // 有 action 字段：由标准协议分支处理
+	// 宽容路径：严格失败但能扫出顶层 tool+args
+	args := jsonValueOf(s, "args")
+	if args == "" {
+		return false
 	}
-	tool, _ := obj["tool"].(string)
-	_, hasArgs := obj["args"]
-	return tool != "" && hasArgs
+	tool := jsonValueOf(s, "tool")
+	return tool != ""
 }
 
 // bareToolJSONStart 扫描 s 中所有 '{'，从每个位置尝试解析合法 JSON 并判断是否为
