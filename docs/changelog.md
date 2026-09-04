@@ -7,12 +7,14 @@
 ## [v0.4.1] — 2026-09-04
 
 ### ✨ 新增
+
 - **TUI 拷贝模式（任意区域复制）**：`Alt+C` 进入/退出，↑↓/PgUp/PgDn 移动光标，`v`/空格 标记选区起点，`y` 复制到剪贴板（内部缓冲 + OSC52 + xsel/xclip），`q`/Esc 退出。进入后暂停流式重绘避免闪烁。
 - **一键复制最近一条 AI 回复**：`Alt+L`。
 - **剪贴板输入框桥接**：`Ctrl-Q` 复制 / `Ctrl-V` 粘贴 / `Shift+Insert` 粘贴，右键输入框＝粘贴（跨 SSH 终端，对齐 pi）。
 - **弱模型畸形工具调用重建**：识别“只剩 bash 参数对象 `{"command":...}`”的裸调用（无 action/tool/args 包裹）并重建为 `{"action":"tool","tool":"bash","args":"{...}"}` 真正执行，容忍 command 内字面换行，timeout 解析为 int。
 
 ### 🐛 修复
+
 - 移除了聊天区边框竖线（`SetBorder(false)`），多行复制不再被竖线污染，风格对齐 pi。
 - **TUI 排队消息无法快速介入**：任务运行中输入的消息立即 `Steer()` 进当前循环（下一次 LLM 调用前注入为 user 纠正，打断工具链），而非等整串工具调用跑完才发送；新增 `PendingSteer()` 兜底避免收尾瞬间的纠正消息丢失。
 - **`tool "" not found`**：标准形态缺 tool 字段但 args 含 command 时齐底推断为 bash 执行。
@@ -22,6 +24,7 @@
 ## [v0.4.0] — 2026-08-28
 
 ### ✨ 新增
+
 - **计划模式（Plan Mode）**：`/plan` 进入规划模式，模型先探索设计方案并通过 `exit_plan_mode` 工具提交计划，TUI 模式下弹出用户审批界面；`/plan off` 退出。系统提示词中注入规划引导语（可自定义）。
 - **会话目标（Goal）**：`get_goal` / `create_goal` / `update_goal` 三个工具，支持生命周期 `pending → in_progress → completed/blocked/paused`；create/edit/pause/resume 需人类直接消息权限；complete/blocked 可由模型自动报告（blocked 需满足连续 3 轮阈值）。
 - **定时提醒（Schedule）**：`schedule_create` / `schedule_list` / `schedule_delete` 工具，支持三种模式：`after <n>秒`（延迟）、`at <RFC3339>`（绝对时间）、`every <n>秒`（固定间隔，最小 5 分钟）。后台 ticker 每 10 秒检查到期项，到期后终端输出 + 日志通知。
@@ -40,6 +43,7 @@
 - **弱模型宽容调优**：死循环检测 + 解析失败降级 + LLM 故障重试三合一策略。
 
 ### 🐛 修复
+
 - TUI 小键盘数字键映射错误（多个提交修复，含 `numpad` 专用处理）。
 - TUI 输入框高度异常（bracketed paste 支持后修复）。
 - /help 输出颜色统一为绿色。
@@ -48,6 +52,7 @@
 - bash 进程树击杀平台兼容（unix Setpgid / windows taskkill /T）。
 
 ### 📝 文档
+
 - `docs/architecture.md` 补充深度复刻对比章节（Section 15，含 dsh vs mizar vs Pi 对比表）。
 - README.md 同步更新新增功能描述及 Pi 对比表。
 - 添加项目介绍语音版（`docs/mizar-intro.ogg`，TTS 合成）。
@@ -55,6 +60,7 @@
 - 添加 Apache License 2.0。
 
 ### 🔧 重构
+
 - 插件架构：JS 插件注册 Provider 接口，支持 LSP/Diagnostic/Completion 扩展。
 - `/sessions` 命令支持 UUID 会话 ID 和标题展示。
 - `build.sh` → `Makefile`（支持 `make build` / `make release` / `make upx`）。
@@ -64,11 +70,13 @@
 ## [v0.3.0] — 2026-08-12
 
 ### ✨ 新增
+
 - 插件直连 LLM：`ai_chat` / `ai_chat_stream` 宿主函数，插件可绕过 Agent 循环直接调用 LLM。
 - 网络层：TCP server/client、FTP client、WebSocket client。
 - Panic 隔离 + 执行超时（提升稳定性）。
 
 ### 🐛 修复
+
 - 插件工具可用性全链路修复。
 - bash 异步命令结果合并。
 
@@ -77,6 +85,7 @@
 ## [v0.2.x] — 2026-08-12 ~ 08-13
 
 ### ✨ 新增
+
 - 初始化向导 + 斜杠命令注册表 + 配置持久化。
 - 技能使用统计 + 周报 + 禁用（不破坏 System prompt 缓存）。
 - 技能索引注入（缓存友好，对齐 Pi pi-cache-guardian）。
@@ -86,6 +95,7 @@
 - Sequential / CircularBuffer / StableJSON / RaceAbort 工具库。
 
 ### 🐛 修复
+
 - P0: edit 多编辑倒序应用（防 offset 错配）+ bash 进程树击杀（Setpgid 防孤儿化）。
 - P1: read 双限截断（2000 行/50KB/续读提示/10MB 预检防 OOM）+ bash 输出截断（50KB 落盘 temp）。
 - 全代码内存风险扫描（FSRead 宿主函数 10MB 预检 + HTTP 响应体 LimitReader + toolRead 10MB 预检）。

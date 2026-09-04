@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -81,8 +82,11 @@ func TestRenderListEmpty(t *testing.T) {
 
 func TestDelivery(t *testing.T) {
 	var delivered []string
+	var mu sync.Mutex
 	reg := NewRegistry(func(id, prompt string) {
+		mu.Lock()
 		delivered = append(delivered, id)
+		mu.Unlock()
 	})
 	defer reg.Stop()
 	// 创建一条立即到期的提醒（用过去时间）
@@ -99,12 +103,18 @@ outer:
 		case <-deadline:
 			t.Fatal("timeout waiting for delivery")
 		case <-time.After(500 * time.Millisecond):
-			if len(delivered) > 0 {
+			mu.Lock()
+			n := len(delivered)
+			mu.Unlock()
+			if n > 0 {
 				break outer
 			}
 		}
 	}
-	if len(delivered) != 1 {
-		t.Fatalf("want 1 delivery, got %d", len(delivered))
+	mu.Lock()
+	n := len(delivered)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("want 1 delivery, got %d", n)
 	}
 }

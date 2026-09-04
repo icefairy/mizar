@@ -417,7 +417,6 @@ func TestChatWithTools_ToolChoiceAuto(t *testing.T) {
 	}
 }
 
-
 // TestChatWithTools_MalformedToolJSONNotWrappedAsReply 回归测试：
 // 模型把工具调用当纯文本输出（畸形 JSON：缺 tool 字段、内层引号未转义），
 // finish_reason=stop 且无原生 tool_calls。此前这段内容会被包装成

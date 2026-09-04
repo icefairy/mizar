@@ -65,9 +65,13 @@ func TestNetBridgeEcho(t *testing.T) {
 	defer nb.Close(connID)
 
 	var clientGot string
-	var gotOnce sync.Once
+	var gotMu sync.Mutex
+	var gotDone = make(chan struct{})
 	nb.OnRecv(connID, func(data string) {
-		gotOnce.Do(func() { clientGot = data })
+		gotMu.Lock()
+		clientGot = data
+		gotMu.Unlock()
+		close(gotDone)
 	})
 
 	// 等 accept 回调注册 server 侧 OnRecv
@@ -87,9 +91,9 @@ func TestNetBridgeEcho(t *testing.T) {
 	}
 
 	// 等客户端收到回显
-	deadline = time.Now().Add(2 * time.Second)
-	for clientGot == "" && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-gotDone:
+	case <-time.After(2 * time.Second):
 	}
 	if clientGot != "pong:hello" {
 		t.Fatalf("echo got %q, want pong:hello", clientGot)

@@ -93,7 +93,7 @@ func (r *Registry) Create(kind, prompt string, afterSecs int, atTime time.Time, 
 // List 列出所有未投递的提醒。
 func (r *Registry) List() []Reminder {
 	r.mu.RLock()
-	defer r.mu.RLock()
+	defer r.mu.RUnlock()
 	var out []Reminder
 	for _, rec := range r.reminders {
 		if !rec.Delivered {
