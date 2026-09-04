@@ -101,6 +101,7 @@ func TestAbortStopsLoop(t *testing.T) {
 		t.Fatalf("err = %v, want ErrAborted", err)
 	}
 }
+
 // TestAbortSkipsToolExecutionAfterLLM 模拟 ESC 在 LLM 请求进行中按下：
 // LLM 已返回工具调用，但回复到达时用户已按 ESC。循环必须在执行工具【前】退出，
 // 不再执行任何工具（修复点：解析回复后、工具执行前的 abort 检查点）。
