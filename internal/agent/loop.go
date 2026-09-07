@@ -473,7 +473,15 @@ func (a *Agent) Run(task string) (string, error) {
 			// 注意：将 OnLLMStream 捕获到局部变量，避免 TOCTOU 竞态条件
 			// （另一个 goroutine 可能在检查后、调用前将 OnLLMStream 设为 nil）
 			onStream := a.OnLLMStream
-			emit := func(d StreamDelta) { onStream(qc.Step, d) }
+			// 首次分片附带本步输入 token 估算（供 TUI 实时展示；复用下游 compaction 同口径 EstinateMessages）
+			var promptEstSent bool
+			emit := func(d StreamDelta) {
+				if !promptEstSent {
+					promptEstSent = true
+					d.PromptEst = EstimateMessages(msgs)
+				}
+				onStream(qc.Step, d)
+			}
 			// 优先使用支持取消的流式接口（ESC 取消可中断在途 HTTP 请求）；
 			// 不支持时回退旧接口（取消仍生效，但需等 LLM 自然返回）
 			if toolLLM, ok := a.LLM.(CancellableStreamToolCallLLM); ok {

@@ -118,6 +118,21 @@ type tuiModel struct {
 	streamLastFlush time.Time                 // 上次刷新时间戳（节流）
 	streamFlushBusy bool                      // 一次刷新进行中（防止重入）
 
+	// 流式实时统计（streamMu 保护；spinnerLoop 每 100ms 刷状态栏时由 statusBarDirect 读取）：
+	//   streamOutCJK/streamOutNonCJK — 本步已输出原始内容（Thinking+Content，含控制 JSON）
+	//   的 CJK / 非 CJK 字符计数，按 EstimateTokens 同口径换算实时输出 token 估算；
+	//   streamPromptEst — 本步输入 token 估算（来自 loop 首次 emit 附带）；
+	//   streamOutStart — 本步开始输出时间（实时 tok/s 计时起点）；streamStepStart — 请求发送时间；
+	//   streamPendingUsage — 流末尾到达的精确用量，待逐一事件循环中入账（避免耗时阻塞流回调）；
+	//   streamCountedUsage — 已随流内 usage 入账的用量（任务结束时防重复累计）。
+	streamStepStart    time.Time
+	streamPromptEst    int
+	streamOutCJK       int
+	streamOutNonCJK    int
+	streamOutStart     time.Time
+	streamPendingUsage *agent.Usage
+	streamCountedUsage *agent.Usage
+
 	// 等待进度指示（spinner 动画 + 宣传语轮换，状态栏显示）
 	spinnerOn   atomic.Bool  // spinner 循环是否运行中
 	spinnerIdx  atomic.Int32 // 当前动画帧下标
@@ -220,6 +235,14 @@ func (m *tuiModel) statusBarDirect() {
 	m.streamMu.Lock()
 	streaming := m.streamActive
 	streamText := m.extr.Text()
+	// 行内实时输出 token 估算（EstimateTokens 口径只展示变化：CJK 按字符、其他按 4 字符/token）
+	streamOutTok := 0
+	havingOut := m.streamOutCJK > 0 || m.streamOutNonCJK > 0
+	if havingOut {
+		streamOutTok = m.streamOutCJK + (m.streamOutNonCJK+3)/4
+	}
+	streamPromptEst := m.streamPromptEst
+	outStart := m.streamOutStart
 	m.streamMu.Unlock()
 	if m.loading && (!streaming || streamText == "") {
 		frame := spinnerFrames[int(m.spinnerIdx.Load())%len(spinnerFrames)]
@@ -236,6 +259,11 @@ func (m *tuiModel) statusBarDirect() {
 	sb.WriteString(sgrColor("magenta", " out:"))
 	sb.WriteString(fmt.Sprintf("%d", s.CumulativeCompletionTokens))
 	sb.WriteString(sgrColor("magenta", ")"))
+	// 流式回复中：追加本步实时（输入来自 loop 首次分片附带的估算，
+	// 输出为流式 Thinking+Content 实际内容的增量估算；服务端下发 usage 分片后排精确值）
+	if streaming && (streamPromptEst > 0 || havingOut) {
+		sb.WriteString(sgrColor("cyan", fmt.Sprintf(" 本步 in≈%d out≈%d", streamPromptEst, streamOutTok)))
+	}
 
 	if a := m.agent; a != nil && a.Compactor != nil {
 		limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
@@ -244,6 +272,9 @@ func (m *tuiModel) statusBarDirect() {
 			for i := 1; i < len(m.lines); i++ {
 				est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
 			}
+			// 流式正在输出的回复同样计入估算（与任务结束后该消息入 lines 的趋势一致），
+			// 使「上下文:」在回复过程中持续增长，不再只有整条结束才跳变。
+			est += streamOutTok
 			pct := float64(est) / float64(limit) * 100
 			color := "green"
 			if pct > 80 {
@@ -252,7 +283,7 @@ func (m *tuiModel) statusBarDirect() {
 				color = "yellow"
 			}
 			sb.WriteString(sgrColor("magenta", " | "))
-			sb.WriteString(sgrColor(color, fmt.Sprintf("压缩: %.0f%%", pct)))
+			sb.WriteString(sgrColor(color, fmt.Sprintf("上下文: %.0f%%", pct)))
 		}
 	}
 
@@ -265,7 +296,17 @@ func (m *tuiModel) statusBarDirect() {
 		sb.WriteString(sgrColor("magenta", "缓存: -"))
 	}
 
-	if s.LastCompletionTokens > 0 && s.LastResponseDuration > 0 {
+	// 流式回复中：实时速度 = 输出 token 估算 / 自首个输出分片折算；
+	// 流结束（usage 分片）后由 AddUsage 更新为精确值；否则展示上一次完整请求平均速度
+	if streaming && havingOut {
+		secs := time.Since(outStart).Seconds()
+		speed := 0.0
+		if secs > 0 {
+			speed = float64(streamOutTok) / secs
+		}
+		sb.WriteString(sgrColor("magenta", " | "))
+		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%.0f tok/s", speed)))
+	} else if s.LastCompletionTokens > 0 && s.LastResponseDuration > 0 {
 		sb.WriteString(sgrColor("magenta", " | "))
 		sb.WriteString(sgrColor("magenta", fmt.Sprintf("%.0f tok/s", s.LastSpeedTokensPerSec)))
 	} else {
@@ -293,6 +334,38 @@ func (m *tuiModel) statusBarDirect() {
 	}
 
 	m.statusBar.SetText(sb.String()).SetDynamicColors(true)
+}
+
+// sameUsage 判断两个用量是否等同（用于流内 usage 分片入账与任务结束时补账的去重）。
+// 值比较而非仅指针：同一 OpenAI 实例可能复用 lastUsage 对象指针（逐步覆盖）。
+func sameUsage(a, b *agent.Usage) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.PromptTokens == b.PromptTokens &&
+		a.CompletionTokens == b.CompletionTokens &&
+		a.TotalTokens == b.TotalTokens &&
+		a.CachedTokens == b.CachedTokens
+}
+
+// recentUserMessages 从 m.agent.Initial 收集「普通用户消息」（role=user 且非内部消息：
+// 排除 KindToolResult 工具结果（AI 执行输出）、KindSummary 压缩摘要等），并按最新在前的
+// 顺序返回，供输入区 ↑/↓ 历史浏览填充。AI 回复（role=assistant）与工具结果均不参与循环。
+func (m *tuiModel) recentUserMessages() []string {
+	out := make([]string, 0, len(m.agent.Initial)/2+1)
+	for _, msg := range m.agent.Initial {
+		if msg.Role == agent.RoleUser && msg.Kind == "" {
+			out = append(out, msg.Content)
+		}
+	}
+	// 反转：最新在前（与 histIdx=0 表示「最新一条」的语义对齐）
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 // =============================================================================
@@ -442,14 +515,25 @@ func (m *tuiModel) startTask(input string) {
 	m.evtCh = evtCh
 	m.liveMu.Unlock()
 
-	// 挂载流式回调：LLM 逐 token 增量 → 增量提取（reply 的 text 字段）→ 节流刷新聊天区。
-	// 每次任务重新挂载（闭包捕获本次提取器状态）；任务结束/被替换时由 goroutine 卸载。
+	// 每次任务开始：复位流式状态（提取器、节流、实时统计；streamCountedUsage 清空
+	// 是为了防止上个任务的 usage 指针被复用后误命中 sameUsage 去重而漏记本任务用量）
 	m.streamMu.Lock()
 	m.streamStep = -1
 	m.streamActive = false
 	m.extr.Reset()
 	m.streamLastFlush = time.Now()
 	m.streamFlushBusy = false
+	m.streamStepStart = time.Time{}
+	m.streamPromptEst = 0
+	m.streamOutCJK = 0
+	m.streamOutNonCJK = 0
+	m.streamOutStart = time.Time{}
+	m.streamPendingUsage = nil
+	m.streamCountedUsage = nil
+	m.streamMu.Unlock()
+
+	// 挂载流式回调：LLM 逐 token 增量 → 增量提取（reply 的 text 字段）→ 节流刷新聊天区。
+	// 每次任务重新挂载（闭包捕获本次提取器状态）；任务结束/被替换时由 goroutine 卸载。
 	m.agent.OnLLMStream = func(step int, d agent.StreamDelta) {
 		// 已请求中止：丢弃后续流式渲染（agent 循环将在下一个检查点退出）
 		if m.agent.Aborted() {
@@ -457,10 +541,39 @@ func (m *tuiModel) startTask(input string) {
 		}
 		m.streamMu.Lock()
 		if step != m.streamStep {
-			// 新步骤（新一轮 LLM 调用）：重置提取器
+			// 新步骤（新一轮 LLM 调用）：重置提取器与实时统计
 			m.streamStep = step
 			m.streamActive = true
 			m.extr.Reset()
+			m.streamStepStart = time.Now()
+			m.streamPromptEst = d.PromptEst
+			m.streamOutCJK = 0
+			m.streamOutNonCJK = 0
+			m.streamOutStart = time.Time{} // 待首个输出分片到时再计时
+		}
+		// 输出 token 估算累计：Thinking 与 Content 都是模型实际输出（均计费），
+		// 用与 EstimateTokens 同口径的增量计数器（CJK 按字符、其他按 4 字符/token），
+		// 避免每个分片对全量内容重新扫一遍。
+		for _, seg := range []string{d.Thinking, d.Content} {
+			if seg == "" {
+				continue
+			}
+			if m.streamOutStart.IsZero() {
+				m.streamOutStart = time.Now()
+			}
+			for _, r := range seg {
+				if r >= 0x4E00 && r <= 0x9FFF {
+					m.streamOutCJK++
+				} else {
+					m.streamOutNonCJK++
+				}
+			}
+		}
+		if d.Usage != nil {
+			// 流末尾精确用量（服务端随 usage chunk 下发）：排队待事件循环入账，
+			// 并强制立刻刷新（usage 分片可能落在 60ms 节流窗口外，必须及时展示）。
+			m.streamPendingUsage = d.Usage
+			m.streamLastFlush = time.Time{}
 		}
 		if d.Content != "" {
 			m.extr.Feed(d.Content)
@@ -528,10 +641,17 @@ func (m *tuiModel) startTask(input string) {
 		defer m.canceling.Store(false)
 		reply, err := m.agent.Run(input)
 
-		// 任务结束：卸载流式回调、停止流式渲染，并强制刷新一次补上尾部增量
+		// 任务结束：卸载流式回调、停止流式渲染，并强制刷新一次补上尾部增量；
+		// 实时统计字段一并清零（streamCountedUsage 保留——下方 AddUsage 去重时仍需比对）
 		m.streamMu.Lock()
 		m.streamActive = false
 		m.agent.OnLLMStream = nil
+		m.streamStepStart = time.Time{}
+		m.streamPromptEst = 0
+		m.streamOutCJK = 0
+		m.streamOutNonCJK = 0
+		m.streamOutStart = time.Time{}
+		m.streamPendingUsage = nil
 		m.streamMu.Unlock()
 		m.app.QueueUpdateDraw(func() {
 			m.renderAllDirect()
@@ -589,9 +709,16 @@ func (m *tuiModel) startTask(input string) {
 
 		elapsed := time.Since(m.stats.RequestStartTime)
 
+		// 精确用量入账：若最后一轮调用的 usage 已在流内分片入账（流内 usage 到达时 AddUsage），
+		// 这里跳过累计避免重复计数；其余情况（服务端不下发流内 usage）仍按旧路径补一次。
 		if ut, ok := m.agent.LLM.(interface{ LastUsage() *agent.Usage }); ok {
 			if u := ut.LastUsage(); u != nil {
-				m.stats.AddUsage(u, elapsed)
+				m.streamMu.Lock()
+				counted := m.streamCountedUsage
+				m.streamMu.Unlock()
+				if !sameUsage(counted, u) {
+					m.stats.AddUsage(u, elapsed)
+				}
 			}
 		}
 		if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
@@ -635,15 +762,36 @@ func (m *tuiModel) flushStream() {
 		m.streamMu.Lock()
 		active := m.streamActive && m.extr.Replying()
 		text := m.extr.Text()
+		usage := m.streamPendingUsage
+		m.streamPendingUsage = nil
+		outStart := m.streamOutStart
+		stepStart := m.streamStepStart
 		m.streamFlushBusy = false
 		m.streamMu.Unlock()
 
-		// 拷贝模式：不覆盖拷贝视图（否则选择高亮/滚动位置被流式重绘打乱）。
+		if usage != nil {
+			// 流内精确用量（服务端在流末尾下发）：在事件循环内入账——
+			// 累计 tokens / 缓存命中率 / 本轮速度立即变为精确值，无需等整次任务结束。
+			start := outStart
+			if start.IsZero() {
+				start = stepStart
+			}
+			var dur time.Duration
+			if !start.IsZero() {
+				dur = time.Since(start)
+			}
+			m.stats.AddUsage(usage, dur)
+		}
+
+		// 拷贝模式：不覆盖拷贝视图（否则选择高亮/拷贝位置被流式重绘打乱）。
 		// 流式内容仍在后台正常累积（text 持续写入），退出拷贝模式后一次补全。
 		if m.copyMode {
+			m.statusBarDirect() // 拷贝模式仍刷新状态栏（tokens/上下文/缓存实时可见）
 			return
 		}
 		if !active || text == "" {
+			// 思考阶段/工具决策中尚无可见文本：状态栏也要实时更新（本步 in/out 估算、tok/s）
+			m.statusBarDirect()
 			return
 		}
 		m.renderAllDirect()
@@ -850,7 +998,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			m.inputField.SetText("", true)
 			return nil
 		}
-		// 历史消息浏览：↑ 上一条，↓ 下一条
+		// 历史消息浏览：↑ 上一条，↓ 下一条（仅普通用户消息：排除工具结果/压缩摘要等内部消息）
 		if event.Key() == tcell.KeyUp && event.Modifiers()&tcell.ModAlt == 0 && !m.loading {
 			if m.histIdx == -1 {
 				// 首次按↑：保存当前输入快照，从最新历史开始
@@ -859,15 +1007,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			} else {
 				m.histIdx++
 			}
-			// m.agent.Initial 是 [user1, bot1, user2, bot2, ...]
-			// 只显示 user 消息（偶数索引）
-			userMsgs := make([]string, 0, len(m.agent.Initial)/2+1)
-			for i, msg := range m.agent.Initial {
-				if msg.Role == agent.RoleUser {
-					userMsgs = append(userMsgs, msg.Content)
-				}
-				_ = i
-			}
+			userMsgs := m.recentUserMessages()
 			if m.histIdx < len(userMsgs) {
 				m.inputField.SetText(userMsgs[m.histIdx], true)
 				m.renderAllDirect()
@@ -887,12 +1027,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 				m.histIdx = -1
 				m.inputField.SetText(m.histSnapshot, true)
 			} else {
-				userMsgs := make([]string, 0, len(m.agent.Initial)/2+1)
-				for _, msg := range m.agent.Initial {
-					if msg.Role == agent.RoleUser {
-						userMsgs = append(userMsgs, msg.Content)
-					}
-				}
+				userMsgs := m.recentUserMessages()
 				if m.histIdx < len(userMsgs) {
 					m.inputField.SetText(userMsgs[m.histIdx], true)
 				}

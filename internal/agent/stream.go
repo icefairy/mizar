@@ -11,9 +11,20 @@ import (
 // StreamDelta LLM 流式回复分片。
 // 模型在流式过程中逐步吐出内容；Thinking（思考过程）与 Content（回复内容）
 // 可能同时为空（如原生 tool_calls 的增量分片），UI 侧据此做增量渲染。
+// 附带两个统计字段供 TUI 状态栏实时展示（非逐分片生效，见字段注释）：
+//   - PromptEst：随本步 LLM 请求的【首个】分片附带一次（输入 token 估算），后续分片为 0；
+//   - Usage：服务端在流末尾下发的精确用量分片（OpenAI 兼容的 usage chunk，
+//     请求需带 stream_options.include_usage 才可能返回），仅在到达时非 nil。
 type StreamDelta struct {
-	Thinking string // 思考过程分片（如 deepseek reasoning_content），非最终回复
+	Thinking string // 思考过程分片（如原生 reasoning_content），非最终回复
 	Content  string // 回复内容分片（含控制 JSON，UI 需自行提取可显示文本）
+
+	// PromptEst 本步 LLM 请求的输入 token 估算（EstimateMessages 同口径）。
+	// 由 agent 循环在首次 emit 时填充；UI 在步骤切换（step 变化）时取用。
+	PromptEst int
+	// Usage 流内用量分片：服务端在 SSE 流末尾随 usage chunk 下发时携带，
+	// 其余分片为 nil。UI 可据此即时更新累计 tokens/缓存命中率，无需等整次任务结束。
+	Usage *Usage
 }
 
 // StreamLLM 可选接口：支持流式回复的 LLM（普通对话，无 tools 参数）。

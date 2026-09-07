@@ -94,16 +94,26 @@ type chatPartVideoURL struct {
 }
 
 type chatReq struct {
-	Model       string    `json:"model"`
-	Messages    []chatMsg `json:"messages"`
-	Tools       []toolDef `json:"tools,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Temperature float64   `json:"temperature,omitempty"`
-	Stream      bool      `json:"stream,omitempty"`
-	Thinking    *struct {
+	Model        string    `json:"model"`
+	Messages     []chatMsg `json:"messages"`
+	Tools        []toolDef `json:"tools,omitempty"`
+	MaxTokens    int       `json:"max_tokens,omitempty"`
+	Temperature  float64   `json:"temperature,omitempty"`
+	Stream       bool      `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	Thinking     *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+}
+
+// streamOptions OpenAI 流式扩展参数。
+// IncludeUsage=true 时服务端会在流末尾额外下发一个带 usage 的 chunk
+// （OpenAI 标准：usage chunk 无 choices，紧随 [DONE] 之前），
+// 使 TUI/Server 能在流内拿到精确 tokens/缓存用量，无需等整次请求结束。
+// 部分兼容网关/旧版端点不接受该字段（400），streamCoreCtx 会降级重试。
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatResp struct {
@@ -402,6 +412,16 @@ func (d streamDelta) Thinking() string {
 	return d.Reasoning
 }
 
+// isStreamOptionsReject 判断 400 响应是否由 stream_options / include_usage 参数
+// 不被服务端支持引起（用于去掉该参数后降级重试，向前兼容）。
+func isStreamOptionsReject(raw []byte) bool {
+	s := string(raw)
+	return strings.Contains(s, "stream_options") ||
+		strings.Contains(s, "include_usage") ||
+		strings.Contains(s, "unknown parameter") ||
+		strings.Contains(s, "Unsupported parameter")
+}
+
 // streamHTTPClient 流式请求专用 client：不设硬超时——长思考/长回复时
 // 单步 LLM 可能持续数分钟，120s 常规超时不够。
 var streamHTTPClient = &http.Client{Timeout: 0}
@@ -424,7 +444,7 @@ func (o *OpenAI) ChatWithToolsStreamCtx(ctx context.Context, messages []agent.Me
 }
 
 func (o *OpenAI) chatStream(ctx context.Context, messages []agent.Message, tools []plugins.Tool, onToken func(agent.StreamDelta)) (string, error) {
-	req := chatReq{Model: o.Model, Stream: true}
+	req := chatReq{Model: o.Model, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}}
 	for _, m := range messages {
 		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
 	}
@@ -443,7 +463,7 @@ func (o *OpenAI) chatStream(ctx context.Context, messages []agent.Message, tools
 // 参数与 AIChat 相同；onToken 逐分片收到 Thinking/Content。
 // 阻塞直到流结束，返回完整回复文本（不包装 agent 控制 JSON）。
 func (o *OpenAI) AIChatStream(req AIChatRequest, onToken func(agent.StreamDelta)) (string, error) {
-	r := chatReq{Model: o.Model, Stream: true}
+	r := chatReq{Model: o.Model, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}}
 	if req.Model != "" {
 		r.Model = req.Model
 	}
@@ -476,25 +496,41 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 	if err != nil {
 		return "", err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", o.BaseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if o.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
-	}
-	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := streamHTTPClient.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("http: %w", err)
+	// 发送请求：默认带 stream_options(include_usage) 以在流内获取精确用量；
+	// 个别网关/旧版端点不支持下发 usage chunk（400），自动去掉该字段重试一次，不影响兼容。
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", o.BaseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if o.APIKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
+		}
+		httpReq.Header.Set("Accept", "text/event-stream")
+
+		resp, err = streamHTTPClient.Do(httpReq)
+		if err != nil {
+			return "", fmt.Errorf("http: %w", err)
+		}
+		if resp.StatusCode != 200 {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			// 400 且因 stream_options 参数被拒：去掉后原样重发一次
+			if attempt == 0 && resp.StatusCode == 400 && req.StreamOptions != nil && isStreamOptionsReject(raw) {
+				req.StreamOptions = nil
+				if body, err = json.Marshal(req); err != nil {
+					return "", err
+				}
+				continue
+			}
+			return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
+		}
+		break
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return "", fmt.Errorf("llm status %d: %s", resp.StatusCode, truncate(string(raw), 300))
-	}
 
 	var content, thinking strings.Builder
 	toolCalls := map[int]*toolCall{} // index → 累积中的工具调用
@@ -527,6 +563,11 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 		}
 		if chunk.Usage != nil {
 			o.lastUsage = chunk.Usage
+			// 流内精确用量分片（stream_options.include_usage 启用时由服务端下发）：
+			// 透传给 UI/Server，使其能在流末尾即时更新 tokens/缓存统计。
+			if onToken != nil {
+				onToken(agent.StreamDelta{Usage: chunk.Usage})
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
