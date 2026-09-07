@@ -706,9 +706,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 				if parsed, ok := extractToolOutput(result); ok {
 					result = parsed
 				}
-				if len(result) > 300 {
-					result = result[:297] + "..."
-				}
+				result = collapseToolResult(result)
 				m.lines = append(m.lines, chatLine{role: "tool", content: "→ " + result, ts: time.Now()})
 				continue
 			}
@@ -1180,15 +1178,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			if ctx.Err != nil {
 				m.addChatLineAsync(chatLine{role: "err", content: ctx.Tool + " 失败: " + ctx.Err.Error(), ts: time.Now()})
 			} else if ctx.Result != "" {
-				// 工具结果：从 ToolResult JSON 中提取 output 字段，避免显示冗余的 JSON 包装
+				// 工具结果：从 ToolResult JSON 中提取 output 字段，并折叠为单行缩略，避免长输出喧宾夺主
 				result := builtins.StripTodoMarker(ctx.Result)
 				result = strings.TrimSpace(result)
 				if parsed, ok := extractToolOutput(result); ok {
 					result = parsed
 				}
-				if len(result) > 300 {
-					result = result[:297] + "..."
-				}
+				result = collapseToolResult(result)
 				m.addChatLineAsync(chatLine{role: "tool", content: "→ " + result, ts: time.Now()})
 			}
 			return nil
@@ -1565,6 +1561,23 @@ func extractToolOutput(s string) (string, bool) {
 		unescaped = raw
 	}
 	return unescaped, true
+}
+
+// collapseToolResult 将工具输出折叠为单行缩略：若输出含多行则仅保留首行，
+// 并标注折叠的额外行数；单行超长时按 300 字符截断。避免长输出占据整个聊天区。
+func collapseToolResult(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		extra := 1 + strings.Count(s[i+1:], "\n")
+		line := strings.TrimRight(s[:i], " \t\r")
+		if len(line) > 300 {
+			line = line[:297] + "..."
+		}
+		return fmt.Sprintf("%s …(+%d 行)", line, extra)
+	}
+	if len(s) > 300 {
+		s = s[:297] + "..."
+	}
+	return s
 }
 
 // toolCallReason 从工具调用控制 JSON（{"action":"tool",...,"reason":"..."}）中提取说明文字。
