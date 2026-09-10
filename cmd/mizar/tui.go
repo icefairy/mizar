@@ -589,7 +589,6 @@ func (m *tuiModel) startTask(input string) {
 		}
 		m.streamMu.Unlock()
 	}
-	m.streamMu.Unlock()
 
 	m.setLoading(true)
 	m.stats.RequestStartTime = time.Now()
