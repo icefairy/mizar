@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -145,6 +146,13 @@ func main() {
 		// 单次最多 4MB，大文件插件用循环分片读。
 		FSReadRange: engine.FSReadRangeFn,
 		FSWrite:     func(p, c string) error { return os.WriteFile(p, []byte(c), 0o644) },
+		// ShellExec：插件 shell_exec 直达。Agent 本身已有 bash 工具，此处
+		// 不新增能力面（插件可自举写入任意命令），仅为插件提供与 agent
+		// 对齐的执行通道。
+		ShellExec: func(cmd string) (string, error) {
+			b, err := exec.Command("bash", "-c", cmd).CombinedOutput()
+			return string(b), err
+		},
 		FSList: func(dir string) ([]string, error) {
 			es, e := os.ReadDir(dir)
 			if e != nil {
@@ -313,6 +321,14 @@ func main() {
 	})
 	lsp.Init(*lspBinary)
 	loaded, failed := pm.LoadAll()
+	// 同步插件导出的斜杠命令到注册表（NewAgent 时插件尚未加载，
+	// 与 helpers.go reloadPlugins 的 SyncFromPlugins 同一套路径）
+	pcmds := make([]agent.Command, 0, len(pm.Commands()))
+	for _, c := range pm.Commands() {
+		cc := c
+		pcmds = append(pcmds, agent.Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
+	}
+	a.Commands.SyncFromPlugins(pcmds)
 	for _, f := range loaded {
 		log.Printf("插件加载: %s", f)
 	}
