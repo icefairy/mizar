@@ -122,7 +122,12 @@ func (c *Compactor) FindCutPoint(msgs []Message) int {
 }
 
 // Compact 执行压缩：找到切点 → 对切点前消息生成摘要 → 返回新消息列表。
-// 结构: [system] + [summary(user, KindSummary)] + [cut: 保留的最近消息]
+// 结构: [system?] + [summary(user, KindSummary)] + [cut: 保留的最近消息]
+//
+// split user span（参照 pi）：当切点落在某个 user span 内部（该 span 自身就超过
+// KeepRecentTokens）时，额外为该 span 的前缀生成一份摘要，与历史摘要合并。
+// 否则摘要里只有"用户想做什么"的概述，而该轮的具体进展（改了哪些文件、遇到什么错）
+// 会因为前半段被摘要、后半段被保留而语义断裂。
 func (c *Compactor) Compact(msgs []Message) ([]Message, error) {
 	if c == nil || c.Summarize == nil {
 		return msgs, nil
@@ -138,20 +143,77 @@ func (c *Compactor) Compact(msgs []Message) ([]Message, error) {
 		return msgs, fmt.Errorf("summarize: %w", err)
 	}
 	summary = strings.TrimSpace(summary)
-	// 重建：保留 system（若有），插入摘要，再接保留消息
-	var out []Message
-	for _, m := range msgs {
-		if m.Role == RoleSystem {
-			out = append(out, m)
-			break
+
+	// split user span：切点在 span 内部，该 span 的前缀部分需要单独摘要
+	if isSplitUserSpan(msgs, cut) {
+		prefix := splitSpanPrefix(msgs, cut)
+		if len(prefix) > 0 {
+			prefixSummary, perr := c.Summarize(prefix)
+			if perr == nil && strings.TrimSpace(prefixSummary) != "" {
+				summary = summary + "\n\n## 当前用户消息的前半段（已完成部分）\n" + strings.TrimSpace(prefixSummary)
+			}
+			// 前缀摘要失败不阻断主流程：已有历史摘要仍可用
 		}
 	}
-	if len(out) == 0 {
-		out = append(out, Message{Role: RoleSystem, Content: ""})
+
+	// 重建：保留已有 system（不新增空占位），插入摘要，再接保留消息
+	var out []Message
+	if len(msgs) > 0 && msgs[0].Role == RoleSystem {
+		out = append(out, msgs[0])
 	}
 	out = append(out, Message{Role: RoleUser, Content: summary, Kind: KindSummary})
 	out = append(out, keep...)
 	return out, nil
+}
+
+// isSplitUserSpan 判断切点是否落在某个 user span 的内部。
+// user span = 从一条 user 消息开始，到下一个 user 消息之前的所有消息。
+// cut 指向 span 内部（即 cut 往前找最近的一条 user 消息之后还有内容被切走）时为 true。
+func isSplitUserSpan(msgs []Message, cut int) bool {
+	if cut <= 0 || cut >= len(msgs) {
+		return false
+	}
+	// 切点本身就是 user 消息 → 正好切在 span 边界，不是 split
+	if msgs[cut].Role == RoleUser && msgs[cut].Kind != KindToolResult {
+		return false
+	}
+	// 从 cut 往前找该 span 的起始 user 消息
+	for i := cut - 1; i >= 0; i-- {
+		if msgs[i].Role == RoleUser && msgs[i].Kind != KindToolResult {
+			return true // 找到 span 起点，且它 < cut → 该 span 被切开
+		}
+	}
+	return false
+}
+
+// splitSpanPrefix 返回被切开的 user span 中属于"前缀"的那部分消息（span 起点到 cut）。
+func splitSpanPrefix(msgs []Message, cut int) []Message {
+	start := -1
+	for i := cut - 1; i >= 0; i-- {
+		if msgs[i].Role == RoleUser && msgs[i].Kind != KindToolResult {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	return msgs[start:cut]
+}
+
+// BuildSummaryInput 构造摘要模型的输入正文：序列化对话 + 累计文件清单。
+// 由 LLM 层（llm.SummarizeMessages）调用，保证序列化与文件追踪只有一处实现。
+func BuildSummaryInput(msgs []Message) string {
+	var sb strings.Builder
+	sb.WriteString(SummaryPrompt)
+	sb.WriteString("\n\n--- conversation ---\n")
+	sb.WriteString(serializeConversation(msgs))
+	reads, modified := collectFileTracking(msgs)
+	if track := renderFileTracking(reads, modified); track != "" {
+		sb.WriteString("\n--- files touched ---\n")
+		sb.WriteString(track)
+	}
+	return sb.String()
 }
 
 // SummaryPrompt 生成摘要提示词（供 LLM 调用方使用）。
@@ -162,6 +224,10 @@ Use this EXACT format:
 
 ## Goal
 [What is the user trying to accomplish?]
+
+## Constraints & Preferences
+- [Requirements, constraints, or preferences the user stated — exact wording when it matters]
+- [Or "(none)" if the user stated none]
 
 ## Progress
 ### Done

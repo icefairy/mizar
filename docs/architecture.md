@@ -700,7 +700,68 @@ export function rpc_notify(params) {
 - 持久化：`titles.json`（每个 session store 根目录一份）
 - `/sessions` 命令展示标题列
 
-### 15.3 架构决策
+### 15.4 借鉴 pi agent v1.1.0（2026-10-09）
+
+系统性解析 pi 的 CHANGELOG（287 版本 / 6200 行 / 3048 条），排除 provider / codemode / SDK 类
+（mizar 走璇玑网关、不追求 pi 生态兼容），聚焦 agent 核心机制后选定 5 项引入。
+
+| pi 能力 | 引入 | 落地位置 |
+|---|---|---|
+| 摘要结构化格式 + 文件追踪 | ✅ | `internal/agent/summarize.go`、`compactor.go` |
+| 压缩切点规则（split user span / 无空 system） | ✅ | `internal/agent/compactor.go` |
+| 显著 cache miss 提示 | ✅ | `internal/agent/cache_notice.go`、`cmd/mizar/tui.go` |
+| bash 增量输出流式 | ✅ | `internal/builtins/bash_stream.go`、`cmd/mizar/bash_live.go` |
+| 通用工具 `terminate: true` | ✅ | `plugins.Tool.Terminate`、`loop.go` |
+| TUI fullscreen / OSC 8 / mermaid / 主题 | ❌ | mizar TUI 是 tview 自绘，迁移性价比低 |
+| codemode / classifier / virtual models / SDK | ❌ | 与「零依赖单二进制 + 走网关」定位冲突 |
+| MCP OAuth 加固 / cache warming | ❌ | 内网场景无 OAuth；按量付费下收益待评估 |
+
+#### 15.4.1 摘要保真（serializeConversation + 文件追踪）
+
+- `serializeConversation`：工具调用渲染为单行 `edit(path="/x", edits=[2 item(s)])`，
+  工具结果截断至 800 字符，普通消息保留正文（对齐 pi `serializeConversation`）
+- `collectFileTracking`：从 `read`/`files_fuzzy`/`write`/`edit` 的调用参数提取路径，
+  去重后累计成 `<read-files>` / `<modified-files>` 清单（对齐 pi Cumulative File Tracking）
+- `SummaryPrompt` 补充 `## Constraints & Preferences` 节（用户提过的约束不再压缩即丢）
+- 唯一入口 `agent.BuildSummaryInput(msgs)`，LLM 层只负责发请求
+
+> 澄清：早期分析曾以为「工具调用信息在压缩时丢失」，实测否定——`KindToolCall` 消息的
+> `Content` 本身就是 `{"action":"tool",...}` JSON。本项改的是**可读性与文件清单**，不是数据丢失。
+
+#### 15.4.2 压缩切点修复
+
+- **去掉空 system 占位**：原 `Compact` 在无 system 输入时插入 `Message{Role: RoleSystem, Content: ""}`，
+  白占 prompt 预算且干扰缓存前缀（实测输出 `[0] role="system" content=""`）。现只在首条确为 system 时保留。
+- **split user span**：当切点落在某个 user span 内部（该 span 自身超 KeepRecentTokens）时，
+  额外为该 span 前缀生成一份摘要并与历史摘要合并（对齐 pi `isSplitTurn`），
+  避免「前半段进摘要、后半段被保留」造成语义断裂。前缀摘要失败不阻断主流程。
+
+#### 15.4.3 显著 cache miss 提示
+
+`agent.CacheMissDetector`：命中率从高位下跌 ≥30 个百分点且落到 50% 以下时提示一次，
+命中率恢复后允许再次提示（避免刷屏）。约束：prompt < 5000 tokens 不判定（比率噪音大）、
+首次观测无基线不提示。TUI 在流内 usage 与任务结束补记两处统一走 `recordUsage`，
+保证每请求只观测一次。
+
+#### 15.4.4 bash 增量输出
+
+- `builtins.streamWriter`：同时充当 `io.Writer` 与节流回调（80ms），并发安全；
+  `Flush` 保证命令结束/超时后尾部输出不丢
+- 注入方式与 `ask_user_question` 一致（包级全局 `SetBashStream`，TUI 在任务开始时注册、结束时注销）
+- TUI 侧 `bash_live.go`：内存缓冲只保留尾部（上限 64KB），渲染时取末尾 12 行；
+  回调为 nil（Server/CI）时退化为纯累计，行为与改动前一致
+- 工具返回值与 50KB/2000 行截断语义、超时进程组 kill 行为均不变
+
+#### 15.4.5 通用工具 terminate
+
+`plugins.Tool.Terminate`：工具执行成功且声明该字段时，以返回值作为最终回答，
+省掉一次 follow-up LLM 调用（对齐 pi 0.69.0 `terminate: true`）。执行失败时忽略声明——
+错误需回填给模型纠正。`respond` 保持原有特判路径不变。
+
+> `exit_plan_mode` 的终止语义是动态的（approve 才终止、keep_planning 不终止），
+> 静态字段不适用，故未套用——避免引入回归。
+
+### 15.5 架构决策
 
 - **无 import cycle**：jobs 包独立于 agent/builtins，builtins 不 import agent（通过参数传递 jobs registry）
 - **最小侵入**：所有新功能以插件式工具形式注册，不修改现有工具行为

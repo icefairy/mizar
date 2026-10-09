@@ -68,14 +68,17 @@ func toolBash() plugins.Tool {
 			cmd := exec.Command("bash", "-c", p.Command)
 			// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化（平台抽象）
 			setupProcessGroup(cmd)
-			var out strings.Builder
-			cmd.Stdout = &out
-			cmd.Stderr = &out
+			// 增量输出：边跑边回调给 UI（对齐 pi 0.73.0）；回调为 nil 时退化为纯累计
+			out := newStreamWriter(bashStreamFn(), bashStreamMinInterval)
+			cmd.Stdout = out
+			cmd.Stderr = out
 			if err := cmd.Start(); err != nil {
 				return "", err
 			}
 			done := make(chan error, 1)
 			go func() { done <- cmd.Wait() }()
+			// 命令结束（无论成败/超时）后 Flush 尾部输出，保证最后一段不丢
+			defer out.Flush()
 			if p.Timeout > 0 {
 				select {
 				case err := <-done:

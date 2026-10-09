@@ -71,6 +71,16 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 	}
 }
 
+// recordUsage 入账一次用量，并在缓存命中率显著下跌时返回提示文本。
+// 两个调用点（流内 usage / 任务结束补记）共用，保证检测器每请求只观测一次。
+func (m *tuiModel) recordUsage(u *agent.Usage, dur time.Duration) string {
+	m.stats.AddUsage(u, dur)
+	if m.cacheMiss == nil {
+		m.cacheMiss = agent.NewCacheMissDetector()
+	}
+	return m.cacheMiss.Observe(u)
+}
+
 type tuiModel struct {
 	agent            *agent.Agent
 	store            *session.Store
@@ -86,6 +96,7 @@ type tuiModel struct {
 	histIdx          int      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
 	histSnapshot     string   // 浏览历史时保存的输入框快照
 	numpadState      int      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
+	cacheMiss        *agent.CacheMissDetector // 显著缓存未命中提示（懒初始化）
 	numpadWait       rune     // 小键盘状态机：存储第一个字符
 	app              *tview.Application
 	textView         *tview.TextView
@@ -132,6 +143,11 @@ type tuiModel struct {
 	streamOutStart     time.Time
 	streamPendingUsage *agent.Usage
 	streamCountedUsage *agent.Usage
+
+	// bash 增量输出（bashMu 保护）：长命令运行时在聊天区尾部实时显示末尾若干行
+	bashMu     sync.Mutex
+	bashLive   string // 当前运行中命令的累计输出（仅保留尾部）
+	bashLiveOn bool   // 是否有命令正在运行（决定是否渲染实时块）
 
 	// 等待进度指示（spinner 动画 + 宣传语轮换，状态栏显示）
 	spinnerOn   atomic.Bool  // spinner 循环是否运行中
@@ -218,6 +234,16 @@ func (m *tuiModel) renderAllDirect() {
 		sb.WriteString(sgrColor(m.aiColor, "▲ 回复中"+"\n"))
 		sb.WriteString(text)
 		sb.WriteString(sgrColor(m.aiColor, "▍\n\n"))
+	}
+
+	// bash 增量输出：命令运行中在尾部显示最近几行（对齐 pi 0.73.0）
+	m.bashMu.Lock()
+	bashLive, bashOn := m.bashLive, m.bashLiveOn
+	m.bashMu.Unlock()
+	if bashOn && bashLive != "" {
+		sb.WriteString(sgrColor("cyan", "⌛ 命令执行中（实时输出）：\n"))
+		sb.WriteString(sgrColor("cyan", tailLines(bashLive, bashLiveTailLines)))
+		sb.WriteString("\n")
 	}
 
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
@@ -613,6 +639,9 @@ func (m *tuiModel) startTask(input string) {
 
 	m.setLoading(true)
 	m.stats.RequestStartTime = time.Now()
+	// bash 增量输出：注册回调 + 清空上轮残留（任务结束会注销）
+	m.clearBashLive()
+	m.setBashLive(true)
 	m.addChatLine(chatLine{role: "user", content: input, ts: time.Now()})
 
 	// 设置 ask_user_question 回调：阻塞等待用户在聊天区回答（通过 askPending channel 传递）。
@@ -660,6 +689,8 @@ func (m *tuiModel) startTask(input string) {
 				m.textView.ScrollToEnd()
 			}
 		})
+		// 任务结束：注销 bash 增量回调（实时块不再显示）
+		m.setBashLive(false)
 
 		// 任务有效性检查：若用户已取消并发出新任务（evtCh 被替换），丢弃本次结果
 		m.liveMu.Lock()
@@ -718,7 +749,9 @@ func (m *tuiModel) startTask(input string) {
 				counted := m.streamCountedUsage
 				m.streamMu.Unlock()
 				if !sameUsage(counted, u) {
-					m.stats.AddUsage(u, elapsed)
+					if notice := m.recordUsage(u, elapsed); notice != "" {
+						m.addChatLineAsync(chatLine{role: "err", content: notice, ts: time.Now()})
+					}
 				}
 			}
 		}
@@ -781,7 +814,11 @@ func (m *tuiModel) flushStream() {
 			if !start.IsZero() {
 				dur = time.Since(start)
 			}
-			m.stats.AddUsage(usage, dur)
+			notice := m.recordUsage(usage, dur)
+			if notice != "" {
+				// 在事件循环内，可直接写入聊天区
+				m.lines = append(m.lines, chatLine{role: "err", content: notice, ts: time.Now()})
+			}
 		}
 
 		// 拷贝模式：不覆盖拷贝视图（否则选择高亮/拷贝位置被流式重绘打乱）。
