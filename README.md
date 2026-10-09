@@ -55,7 +55,7 @@
 ### 2. 内置工具（11+ 个）
 基础工具 `bash` / `grep` / `find` / `read` / `write` / `edit` / `ls` / `skill_manage`，+ dsh 复刻新增：
 - **`todo_write`**：结构化任务清单（pending / in_progress / completed），每次调用替换整个清单，单次 in_progress 约束防弱模型混乱
-- **`ask_user_question`**：向用户提问并等待回答（TUI 模式弹出输入框；Server/CLI 模式降级为提示自主决策）
+- **`ask_user_question`**：向用户提问并等待回答。问题以文本编号选项呈现，用户回复编号即完成选择（TUI / 经典 / `-task` 模式均可用，多选 `1,3`）；无交互界面时自动降级为「选项写进正文 + 用户下一条回编号」
 - **`skill`**：按名加载技能全文（渐进式披露，避免系统提示过长）
 - **`job_list` / `job_output` / `job_kill`**：后台任务管理（bash 支持 `run_in_background`，任务完成后自动注入通知）
 其他能力：文件模糊搜索（`files_fuzzy`）、大文件有界分段读取（`fs_read_range`，单次 4MB）、文档格式解析（PDF/DOCX/XLSX）、Bash 详细截断警告、原生 OpenAI function calling 工具调用。

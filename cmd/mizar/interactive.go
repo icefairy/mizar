@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/peterh/liner"
 
 	"mizar/internal/agent"
+	"mizar/internal/builtins"
 	"mizar/internal/session"
 )
 
@@ -49,6 +51,15 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	rl := liner.NewLiner()
 	defer rl.Close()
 	rl.SetCtrlCAborts(true)
+
+	// ask_user_question / 计划审批：模型提问时渲染文本选项，用户直接回编号（无需 TUI）
+	askUser := func(questionsJSON string) (string, error) {
+		return askUserText(questionsJSON, os.Stdout, func(prompt string) (string, error) {
+			return rl.Prompt(prompt)
+		})
+	}
+	builtins.SetAskUser(askUser)
+	agent.SetPlanAskUser(askUser)
 
 	// 退出提示
 	if sessionID != "" {

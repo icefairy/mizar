@@ -32,7 +32,7 @@
 - **循环卫生守卫（Loop Guard）**：复刻 deepseek-harness 的 repeat-tool-reminder，JSON deep key-sort 参数规范化后比较，同一工具+参数连续重复时在阈值 [3, 5, 8] 处渐进注入提醒（gentle → detailed，含工具名/次数/参数预览），超 8 次终止任务。比原 WeakModelTuner 直接 kill 更宽容。
 - **todo_write 工具**：结构化任务清单，支持 `pending/in_progress/completed` 状态，whole-list replacement 语义，单次调用替换整个列表。
 - **后台任务（Jobs）**：`job_start` / `job_list` / `job_output` / `job_kill` 工具 + `bash run_in_background`，进程退出后自动注入完成通知到对话上下文。
-- **ask_user_question 工具**：TUI 模式下阻塞等待用户回答（5 分钟超时），非 TUI 模式优雅降级提示"请自行完成任务"。
+- **ask_user_question 工具（文本编号选项）**：问题渲染为带编号的文本选项（`1) xxx`），用户直接回复编号即完成选择。TUI、经典 readline、`-task` 单次任务三种模式均可用（多选 `1,3`；直接回车 = 第 1 项）；无交互界面（Server/管道）时降级为「把选项写进正文，用户下一条消息回编号」，而非只说“请自行决策”。同时修复 `SetAskUser` / `SetPlanAskUser` 零调用导致 TUI 提问也走降级、`exit_plan_mode` 静默 approve 的问题。
 - **skill 按需加载工具**：通过 `skill <name>` 一次性返回 SKILL.md 全文，替代原有的索引注入 + read 文件方式。
 - **插件直连 LLM**：`ai_chat` / `ai_chat_stream` 宿主函数，插件可直接调用 LLM 而无需经过 Agent 循环（v0.3.0 引入）。
 - **流式输出**：LLM SSE → agent 流式回调 → TUI/Server 增量渲染，支持实时打字机效果。

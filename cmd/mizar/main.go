@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1369,6 +1370,18 @@ func main() {
 	}
 
 	if *task != "" {
+		// ask_user_question：stdin 是终端时提供文本选项作答；
+		// 非终端（管道/CI）保持 nil → 工具走「无交互界面，请自行决策」降级提示。
+		if isTerminal(os.Stdin) {
+			stdinReader := bufio.NewReader(os.Stdin)
+			askUser := func(questionsJSON string) (string, error) {
+				return askUserText(questionsJSON, os.Stdout, func(p string) (string, error) {
+					return readLineFromStdin(stdinReader, p)
+				})
+			}
+			builtins.SetAskUser(askUser)
+			agent.SetPlanAskUser(askUser)
+		}
 		// 实时输出：模型每步调工具前先说一句说明，再执行。让用户看到“为何执行这些命令”，便于判断是否打断。
 		if a.Hooks != nil {
 			a.Hooks.OnToolCall(func(ctx *agent.HookContext) error {

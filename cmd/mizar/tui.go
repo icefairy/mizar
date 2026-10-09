@@ -149,9 +149,14 @@ type tuiModel struct {
 	canceling atomic.Bool
 }
 
+// askPending 一次待回答的提问（可能含多个问题，逐问收集）。
+// 由 agent goroutine 创建、事件循环（submitInput）推进，字段访问统一走 askMu。
 type askPending struct {
-	questions string      // 原始 questions JSON
-	answerCh  chan string // 单发 channel，TUI 填入答案后关闭
+	questions string              // 原始 questions JSON（渲染用）
+	qs        []builtins.Question // 解析后的问题列表
+	answers   []builtins.Answer   // 已收集的答案
+	idx       int                 // 当前等待第几问（0-based）
+	answerCh  chan string         // 全部答完后单发 answers JSON
 }
 
 // sgrColor 生成 tview 动态颜色标记：[color]text[::-]
@@ -219,6 +224,22 @@ func (m *tuiModel) renderAllDirect() {
 	// 仅在首次渲染或新 bot 回复时自动滚动到底部
 	if !m.userScrolledUp {
 		m.textView.ScrollToEnd()
+	}
+
+	// 待回答的提问：把问题与编号选项渲染进聊天区（用户直接在输入框回编号）
+	m.askMu.Lock()
+	pending := m.askPending
+	m.askMu.Unlock()
+	if pending != nil {
+		sb.WriteString(sgrColor("yellow", "❓ 需要你的选择（回复编号，如 1；多选 1,3；直接回车 = 第 1 项）\n"))
+		// 多问题时只渲染当前这一问（已答过的不再重复列出）
+		if len(pending.qs) > 1 && pending.idx < len(pending.qs) {
+			sb.WriteString(sgrColor("yellow", fmt.Sprintf("（第 %d/%d 问）\n", pending.idx+1, len(pending.qs))))
+			sb.WriteString(sgrColor("yellow", strings.TrimRight(builtins.RenderPlainQuestions([]builtins.Question{pending.qs[pending.idx]}), "\n")+"\n"))
+		} else {
+			sb.WriteString(sgrColor("yellow", renderQuestions(pending.questions)+"\n"))
+		}
+		sb.WriteString("\n")
 	}
 	m.statusBarDirect()
 }
@@ -594,34 +615,15 @@ func (m *tuiModel) startTask(input string) {
 	m.stats.RequestStartTime = time.Now()
 	m.addChatLine(chatLine{role: "user", content: input, ts: time.Now()})
 
-	// 设置 ask_user_question 回调：阻塞等待用户在聊天区回答（通过 askPending channel 传递）
+	// 设置 ask_user_question 回调：阻塞等待用户在聊天区回答（通过 askPending channel 传递）。
+	// 注意必须走 builtins.SetAskUser——工具读的是 builtins 包内的回调，
+	// 只设 m.agent.AskUser 会让工具永远走「无交互界面」降级分支。
+	// 计划审批（exit_plan_mode）同形复用同一机制，否则会静默 approve。
 	m.askMu.Lock()
 	m.askPending = nil
 	m.askMu.Unlock()
-	m.agent.AskUser = func(questionsJSON string) (string, error) {
-		ch := make(chan string, 1)
-		m.askMu.Lock()
-		m.askPending = &askPending{questions: questionsJSON, answerCh: ch}
-		m.askMu.Unlock()
-		// 通知事件循环渲染问题提示（QueueUpdateDraw 安全）
-		m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
-		select {
-		case ans := <-ch:
-			m.askMu.Lock()
-			if m.askPending != nil && m.askPending.answerCh == ch {
-				m.askPending = nil
-			}
-			m.askMu.Unlock()
-			return ans, nil
-		case <-time.After(5 * time.Minute):
-			m.askMu.Lock()
-			if m.askPending != nil && m.askPending.answerCh == ch {
-				m.askPending = nil
-			}
-			m.askMu.Unlock()
-			return "", fmt.Errorf("ask_user timed out after 5 minutes")
-		}
-	}
+	builtins.SetAskUser(m.askViaChat)
+	agent.SetPlanAskUser(m.askViaChat)
 
 	// 工具交换收集：每次工具执行后记录，任务结束时持久化到会话文件 + Initial。
 	// 会话恢复后模型能看到之前试过什么（修复“工具调用过程不落盘”的黑盒问题）。
@@ -1343,21 +1345,86 @@ func (m *tuiModel) addQuitHint() {
 	m.addChatLine(chatLine{role: "system", content: hint, ts: time.Now()})
 }
 
+// askViaChat 是 TUI 侧的问答实现：把问题（带编号选项）渲染进聊天区，
+// 阻塞等待用户在输入框回复编号/文字。供 ask_user_question 与计划审批共用。
+// 从 agent goroutine 调用；答案由 submitInput 在事件循环中填入 channel。
+func (m *tuiModel) askViaChat(questionsJSON string) (string, error) {
+	var qs []builtins.Question
+	_ = json.Unmarshal([]byte(questionsJSON), &qs)
+	if len(qs) == 0 {
+		return "[]", nil
+	}
+	ch := make(chan string, 1)
+	m.askMu.Lock()
+	m.askPending = &askPending{questions: questionsJSON, qs: qs, answerCh: ch}
+	m.askMu.Unlock()
+	// 通知事件循环渲染问题提示（QueueUpdateDraw 安全）
+	m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
+
+	clearPending := func() {
+		m.askMu.Lock()
+		if m.askPending != nil && m.askPending.answerCh == ch {
+			m.askPending = nil
+		}
+		m.askMu.Unlock()
+	}
+
+	// 轮询 Aborted：用户按 ESC 取消任务时不能干等 5 分钟（工具阻塞会让
+	// canceling 一直是 true，期间所有新输入都被排队）
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(5 * time.Minute)
+	for {
+		select {
+		case ans := <-ch:
+			clearPending()
+			return ans, nil
+		case <-ticker.C:
+			if m.agent.Aborted() {
+				clearPending()
+				return "[]", nil
+			}
+		case <-deadline:
+			clearPending()
+			// 超时不报错（否则工具失败会打断任务）：返回空答案让模型自行决策
+			m.addChatLineAsync(chatLine{role: "err", content: "提问等待超时（5 分钟），已让模型自行决策", ts: time.Now()})
+			return "[]", nil
+		}
+	}
+}
+
 // submitInput 处理发送：命令派发 / 退出 / 排队 / 启动任务
 func (m *tuiModel) submitInput(s string) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return
 	}
-	// 若当前有 ask_user_question 等待回答，将输入作为答案（优先于正常任务流）
+	// 若当前有 ask_user_question 等待回答，将输入作为答案（优先于正常任务流）。
+	// 多问题时逐问收集：未答完不发 channel，只在聊天区提示进入下一问。
 	m.askMu.Lock()
 	pending := m.askPending
+	var askPayload string
+	askDone := false
+	if pending != nil && pending.idx < len(pending.qs) {
+		pending.answers = append(pending.answers, answerFor(pending.qs[pending.idx], s))
+		pending.idx++
+		if pending.idx >= len(pending.qs) {
+			b, _ := json.Marshal(pending.answers)
+			askPayload = string(b)
+			m.askPending = nil
+			askDone = true
+		}
+	}
 	m.askMu.Unlock()
 	if pending != nil {
 		m.app.QueueUpdateDraw(func() {
 			m.addChatLine(chatLine{role: "user", content: "【回答问题】" + s, ts: time.Now()})
 		})
-		pending.answerCh <- s
+		if askDone {
+			pending.answerCh <- askPayload
+		} else {
+			m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
+		}
 		return
 	}
 

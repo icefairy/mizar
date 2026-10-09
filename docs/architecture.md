@@ -631,7 +631,7 @@ export function rpc_notify(params) {
 | **repeat-tool-reminder（循环卫生守卫）** | WeakModelTuner 直接 kill | ✅ | dsh 渐进提醒 [3,5,8] + JSON 参数规范化；比直接 kill 更宽容 |
 | **todo_write 工具** | 无 | ✅ | 结构化任务清单；session-owned；UI checklist 渲染 |
 | **job_* 后台任务 + bash run_in_background** | bash 全同步 | ✅ | jobs registry + 完成通知自动注入 |
-| **ask_user_question 工具** | 无 | ✅ | TUI 模式弹出等回答；Server 降级为提示 |
+| **ask_user_question 工具** | 无 | ✅ | 文本编号选项作答（TUI/经典/单次任务）；无界面时回退为正文列选项 |
 | **skill 按需加载工具** | 索引注入 + read 读文件 | ✅ | 专用 skill 工具一次返回全文，更直接 |
 | **会话标题** | UUID 无标题 | ✅ | 首条用户消息 fallback；持久化 titles.json |
 | plan mode / goal / schedule | ✅ 已全部复刻 |
@@ -671,10 +671,21 @@ export function rpc_notify(params) {
 
 #### 15.2.4 Ask User Question
 
-- 位置：`internal/builtins/ask.go` + `cmd/mizar/tui.go`
-- TUI 模式：`Agent.AskUser` 回调阻塞等待用户在输入框提交答案（5 分钟超时）
-- Server/CLI 模式：`AskUser == nil` → 工具返回降级提示“无交互界面，请基于已有信息自主决策”
+- 位置：`internal/builtins/ask.go` + `cmd/mizar/ask.go` + `cmd/mizar/tui.go`
+- **文本编号选项**：问题渲染为「1) xxx  2) yyy」，用户直接回复编号即完成选择
+  - 经典 readline（`-tui=false`）：`interactive()` 通过 liner 逐问读取
+  - TUI：问题渲染进聊天区，输入框回编号（`tuiModel.askViaChat`）
+  - 单次任务（`-task`）：stdin 为终端时同样可用；管道/CI 下自动跳过
+  - 多选：`1,3` 或 `1 3`；直接回车 = 第 1 项；非编号输入按自由文本；越界编号不静默取错项
+- **无交互界面降级**：不再只说「请自行决策」，而是让模型把选项作为普通文本写进正文，
+  用户下一条消息回编号（`RenderPlainQuestions`）
+- 超时/EOF/ESC 均返回空答案列表而非报错——提问失败不应打断任务
 - 答案格式：`{answers: [{id, value}]}` 或 `{answers: [{id, values}]}`（multi_select）
+
+> 踩坑记录：`builtins.agentAskUser` 与 `agent.agentAskPlanUser` 是**包级全局变量**，
+> 只设置 `Agent.AskUser` 字段不会生效（工具读的是全局）。此前 `SetAskUser` / `SetPlanAskUser`
+> 全项目零调用者，导致 TUI 里 ask 也一直走降级分支、`exit_plan_mode` 静默 approve。
+> 现在 TUI / 经典 / 单次任务三条路径都显式设置这两个全局回调。
 
 #### 15.2.5 Skill 按需加载工具
 
@@ -694,7 +705,7 @@ export function rpc_notify(params) {
 - **无 import cycle**：jobs 包独立于 agent/builtins，builtins 不 import agent（通过参数传递 jobs registry）
 - **最小侵入**：所有新功能以插件式工具形式注册，不修改现有工具行为
 - **向后兼容**：WeakModelTuner 保留；Guard 默认开启（NewRepeatGuard 在 New() 中初始化）
-- **降级策略**：非 TUI 模式下 ask_user_question 优雅降级，不停止 agent
+- **降级策略**：无交互界面时 ask_user_question 退化为「正文列选项 + 用户下一条回编号」，不停止 agent
 
 #### 15.2.7 Plan Mode（计划模式）
 
