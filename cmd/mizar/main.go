@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -146,13 +145,6 @@ func main() {
 		// 单次最多 4MB，大文件插件用循环分片读。
 		FSReadRange: engine.FSReadRangeFn,
 		FSWrite:     func(p, c string) error { return os.WriteFile(p, []byte(c), 0o644) },
-		// ShellExec：插件 shell_exec 直达。Agent 本身已有 bash 工具，此处
-		// 不新增能力面（插件可自举写入任意命令），仅为插件提供与 agent
-		// 对齐的执行通道。
-		ShellExec: func(cmd string) (string, error) {
-			b, err := exec.Command("bash", "-c", cmd).CombinedOutput()
-			return string(b), err
-		},
 		FSList: func(dir string) ([]string, error) {
 			es, e := os.ReadDir(dir)
 			if e != nil {
@@ -507,6 +499,14 @@ func main() {
 	}
 	promptReg.Reload()
 	log.Printf("Prompt 模板加载 %d 个", len(promptReg.List()))
+	// 注入 /handoff 命令：快速生成交接文档（固化进程序，非插件）
+	a.Commands.Register(agent.Command{
+		Name:        "handoff",
+		Description: "生成交接文档 handoff.md（/handoff [备注/下一步]）",
+		Run: func(args string) (string, error) {
+			return writeHandoff(wd, args), nil
+		},
+	})
 	// 注入 /templates 命令
 	a.Commands.Register(agent.Command{
 		Name:        "templates",
