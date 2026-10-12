@@ -53,6 +53,10 @@ type tuiStats struct {
 	RequestStartTime           time.Time
 	ThinkingLevel              string
 	ModelName                  string
+	// 会话级累计输出 tokens 与耗时（当前模型维度），用于计算平滑平均速度。
+	ModelCumCompletionTokens int
+	ModelCumDurationSec      float64
+	ModelAvgTokPerSec        float64
 }
 
 func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
@@ -69,6 +73,30 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 	if u.CompletionTokens > 0 && dur.Seconds() > 0 {
 		s.LastSpeedTokensPerSec = float64(u.CompletionTokens) / dur.Seconds()
 	}
+	// 累计当前模型的速度统计
+	s.ModelCumCompletionTokens += u.CompletionTokens
+	s.ModelCumDurationSec += dur.Seconds()
+	if s.ModelCumDurationSec > 0 {
+		s.ModelAvgTokPerSec = float64(s.ModelCumCompletionTokens) / s.ModelCumDurationSec
+	}
+}
+
+// ResetModelStats 重置模型级累计（切换模型时调用）。
+func (s *tuiStats) ResetModelStats() {
+	s.ModelCumCompletionTokens = 0
+	s.ModelCumDurationSec = 0
+	s.ModelAvgTokPerSec = 0
+}
+
+// formatTokens 将 tokens 数字格式化为可读形式（k/M）。
+func formatTokens(v int) string {
+	if v < 1000 {
+		return fmt.Sprintf("%d", v)
+	}
+	if v < 1_000_000 {
+		return fmt.Sprintf("%.1fk", float64(v)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(v)/1_000_000)
 }
 
 // recordUsage 入账一次用量，并在缓存命中率显著下跌时返回提示文本。
@@ -289,7 +317,6 @@ func (m *tuiModel) statusBarDirect() {
 		streamOutTok = m.streamOutCJK + (m.streamOutNonCJK+3)/4
 	}
 	streamPromptEst := m.streamPromptEst
-	outStart := m.streamOutStart
 	m.streamMu.Unlock()
 	if m.loading && (!streaming || streamText == "") {
 		frame := spinnerFrames[int(m.spinnerIdx.Load())%len(spinnerFrames)]
@@ -300,11 +327,11 @@ func (m *tuiModel) statusBarDirect() {
 	}
 
 	sb.WriteString(sgrColor("magenta", "tokens: "))
-	sb.WriteString(fmt.Sprintf("%d", s.CumulativeTotalTokens))
+	sb.WriteString(formatTokens(s.CumulativeTotalTokens))
 	sb.WriteString(sgrColor("magenta", "(in:"))
-	sb.WriteString(fmt.Sprintf("%d", s.CumulativePromptTokens))
+	sb.WriteString(formatTokens(s.CumulativePromptTokens))
 	sb.WriteString(sgrColor("magenta", " out:"))
-	sb.WriteString(fmt.Sprintf("%d", s.CumulativeCompletionTokens))
+	sb.WriteString(formatTokens(s.CumulativeCompletionTokens))
 	sb.WriteString(sgrColor("magenta", ")"))
 	// 流式回复中：追加本步实时（输入来自 loop 首次分片附带的估算，
 	// 输出为流式 Thinking+Content 实际内容的增量估算；服务端下发 usage 分片后排精确值）
@@ -343,19 +370,10 @@ func (m *tuiModel) statusBarDirect() {
 		sb.WriteString(sgrColor("magenta", "缓存: -"))
 	}
 
-	// 流式回复中：实时速度 = 输出 token 估算 / 自首个输出分片折算；
-	// 流结束（usage 分片）后由 AddUsage 更新为精确值；否则展示上一次完整请求平均速度
-	if streaming && havingOut {
-		secs := time.Since(outStart).Seconds()
-		speed := 0.0
-		if secs > 0 {
-			speed = float64(streamOutTok) / secs
-		}
+	// 展示当前模型会话级平滑平均速度（累计输出 / 累计耗时），切换模型时自动清零。
+	if s.ModelAvgTokPerSec > 0 {
 		sb.WriteString(sgrColor("magenta", " | "))
-		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%.0f tok/s", speed)))
-	} else if s.LastCompletionTokens > 0 && s.LastResponseDuration > 0 {
-		sb.WriteString(sgrColor("magenta", " | "))
-		sb.WriteString(sgrColor("magenta", fmt.Sprintf("%.0f tok/s", s.LastSpeedTokensPerSec)))
+		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%.0f tok/s", s.ModelAvgTokPerSec)))
 	} else {
 		sb.WriteString(sgrColor("magenta", " | "))
 		sb.WriteString(sgrColor("magenta", ". tok/s"))
@@ -758,7 +776,11 @@ func (m *tuiModel) startTask(input string) {
 		if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 			m.stats.ThinkingLevel = ut.ThinkingEnabled()
 		}
+		prevModel := m.stats.ModelName
 		m.stats.ModelName = m.agent.Model()
+		if prevModel != "" && prevModel != m.agent.Model() {
+			m.stats.ResetModelStats()
+		}
 
 		// 无论成功与否，都追加本次 user 消息到初始历史（供下次 Run 继承）
 		m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: input})
@@ -1485,7 +1507,11 @@ func (m *tuiModel) submitInput(s string) {
 				if result.Out != "" {
 					m.addChatLine(chatLine{role: "bot", content: result.Out, ts: time.Now()})
 				}
+				prevModel := m.stats.ModelName
 				m.stats.ModelName = m.agent.Model()
+				if prevModel != "" && prevModel != m.agent.Model() {
+					m.stats.ResetModelStats()
+				}
 				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 					m.stats.ThinkingLevel = ut.ThinkingEnabled()
 				}
