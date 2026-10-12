@@ -736,6 +736,22 @@ func main() {
 			return sb.String(), nil
 		},
 	})
+	// 内置 /new 命令：直接创建新会话（= /session new 快捷方式）
+	a.Commands.Register(agent.Command{
+		Name:        "new",
+		Description: "直接创建新会话（清空上下文并换新 session id，相当于 /session new）",
+		Timeout:     10 * time.Second,
+		Run: func(args string) (string, error) {
+			*sessionID = uuid.New().String()
+			a.Initial = nil
+			short := *sessionID
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			log.Printf("切换到新会话: %s", short)
+			return fmt.Sprintf("✓ 新会话: %s", short), nil
+		},
+	})
 	// 内置 /reset 命令：清空会话上下文（参照 pi 的 /new）
 	a.Commands.Register(agent.Command{
 		Name:        "reset",
@@ -1085,7 +1101,7 @@ func main() {
   思考等级 thinking_level: %s
   模型 model: %s
   供应商 base_url: %s
-可修改项: max_steps ｜ 修改方法: /config max_steps 30`, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
+可修改项: max_steps ｜ context_window ｜ 例: /config max_steps 30 /config context_window 128000`, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
 				}
 				return fmt.Sprintf(`当前运行配置:
   最大步数 max_steps: %d
@@ -1093,7 +1109,7 @@ func main() {
   思考等级 thinking_level: %s
   模型 model: %s
   供应商 base_url: %s
-可修改项: max_steps ｜ 修改方法: /config max_steps 30`, ms, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
+可修改项: max_steps ｜ context_window ｜ 例: /config max_steps 30 /config context_window 128000`, ms, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
 			}
 			fields := strings.Fields(args)
 			if len(fields) == 2 && fields[0] == "max_steps" {
@@ -1108,13 +1124,42 @@ func main() {
 				}
 				return fmt.Sprintf("✓ 最大步数已设置为 %d，已持久化到 %s", n, config.DefaultPath()), nil
 			}
-			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps 30 或 /config max_steps -1(无限)")
+			if len(fields) == 2 && (fields[0] == "context_window" || fields[0] == "窗口") {
+				n, err := strconv.Atoi(fields[1])
+				if err != nil || n < 4096 || n > 10_000_000 {
+					return "", fmt.Errorf("context_window 必须是 4096-10000000 的整数")
+				}
+				cfg.ContextWindow = n
+				*ctxWindow = n
+				if a.Compactor != nil {
+					a.Compactor.ContextWindow = n
+					// 同步小窗口兜底（与启动逻辑一致）：reserve/keep 不超过窗口合理比例
+					if a.Compactor.ReserveTokens > n/5 {
+						a.Compactor.ReserveTokens = n / 5
+					}
+					if a.Compactor.KeepRecentTokens > n/3 {
+						a.Compactor.KeepRecentTokens = n / 3
+					}
+				}
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("持久化失败: %v", err)
+				}
+				ratio := ""
+				if a.Compactor != nil {
+					ratio = fmt.Sprintf("\n  压缩阈值: %d (窗口-reserve %d, keepRecent %d)",
+						a.Compactor.ContextWindow-a.Compactor.ReserveTokens,
+						a.Compactor.ReserveTokens, a.Compactor.KeepRecentTokens)
+				}
+				return fmt.Sprintf("✓ 上下文窗口已设置为 %d，已持久化到 %s%s", n, config.DefaultPath(), ratio), nil
+			}
+			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps 30 或 /config context_window 128000")
 		},
 	})
 	// 内置 /compact 命令：手动触发上下文压缩
 	a.Commands.Register(agent.Command{
 		Name:        "compact",
 		Description: "手动触发上下文压缩（/compact 或 /compact <摘要指引>）",
+		Timeout:     10 * time.Minute,
 		Run: func(args string) (string, error) {
 			if a.Compactor == nil {
 				return "✗ 会话压缩未启用（启动时使用了 --no-compact）", nil
