@@ -1,6 +1,9 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // 显著 prompt 缓存未命中提示（对齐 pi 0.80.4 的 showCacheMissNotices）。
 //
@@ -13,9 +16,11 @@ import "fmt"
 //   - 小 prompt 不提示：token 太少时比率噪音大（如 100 token 全 miss 无意义）
 //   - 每次下跌只提示一次，恢复后再次下跌可再次提示（避免刷屏）
 type CacheMissDetector struct {
-	lastHitRate float64 // 上一次命中率（0~1），-1 表示无基线
-	notified    bool    // 当前这轮下跌是否已提示
-	haveBase    bool
+	lastHitRate    float64       // 上一次命中率（0~1），-1 表示无基线
+	notified       bool          // 当前这轮下跌是否已提示
+	haveBase       bool
+	lastNoticeTime time.Time     // 上次提示时间
+	cooldown       time.Duration // 提示冷却时间（默认 60s），避免频繁刷屏
 }
 
 const (
@@ -29,7 +34,9 @@ const (
 
 // NewCacheMissDetector 创建检测器。
 func NewCacheMissDetector() *CacheMissDetector {
-	return &CacheMissDetector{}
+	return &CacheMissDetector{
+		cooldown: 60 * time.Second,
+	}
 }
 
 // Observe 观测一次请求用量；命中率显著下跌时返回提示文本，否则返回空串。
@@ -56,10 +63,11 @@ func (d *CacheMissDetector) Observe(u *Usage) string {
 		}
 		return ""
 	}
-	if d.notified {
+	if d.notified && time.Since(d.lastNoticeTime) < d.cooldown {
 		return ""
 	}
 	d.notified = true
+	d.lastNoticeTime = time.Now()
 	return fmt.Sprintf("⚠️ 缓存命中率从 %.0f%% 跌到 %.0f%%（本次 prompt %d tokens）——上下文前缀已失效，本轮更慢更贵",
 		prev*100, rate*100, u.PromptTokens)
 }
