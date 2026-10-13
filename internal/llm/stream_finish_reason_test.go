@@ -112,3 +112,41 @@ func TestChatWithToolsCtx_NonStopFinishReasonWrapsReply(t *testing.T) {
 		t.Fatalf("非 stop 的非流式回复应包装为 reply 控制 JSON, got %q", reply)
 	}
 }
+
+// 非流式、无 tools 的 ChatWithTools：tools 参数在实现里被忽略（现存死代码），
+// 但仍属 agent 循环路径，必须遵守同一条不变式（非 stop 也要归一化）。
+func TestChatWithTools_NonStopFinishReasonWrapsReply(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"被截断的回答"},"finish_reason":"length"}]}`)
+	}))
+	defer srv.Close()
+
+	client := NewOpenAI(srv.URL+"/v1", "", "test-model")
+	reply, err := client.ChatWithTools([]agent.Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, `"reply"`) || !strings.Contains(reply, "被截断的回答") {
+		t.Fatalf("非 stop 的 ChatWithTools 回复应包装为 reply 控制 JSON, got %q", reply)
+	}
+}
+
+// 裸 Chat（无 tools、不包装）必须保持原样返回：GoalLoop judge / BackgroundReview
+// 直接 json.Unmarshal 它，一旦被包装就会被判为格式化失败（静默不执行）。
+func TestChat_ReturnsRawTextUnwrapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"{\"done\":true}"},"finish_reason":"stop"}]}`)
+	}))
+	defer srv.Close()
+
+	client := NewOpenAI(srv.URL+"/v1", "", "test-model")
+	reply, err := client.Chat([]agent.Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != `{"done":true}` {
+		t.Fatalf("Chat 必须返回模型原始文本（不包装）, got %q", reply)
+	}
+}

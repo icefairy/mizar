@@ -278,22 +278,47 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 	if len(msg.ToolCalls) > 0 {
 		return toolCallsToText(msg.ToolCalls, msg.Content), nil
 	}
-	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
-	// 若模型已输出控制 JSON（含混合文本中嵌入的 tool/reply JSON），优先透传提取结果，
-	// 避免“解释文本 + tool JSON”被整段包成 reply 导致工具不执行、JSON 原样显示。
-	if fr == "stop" {
-		s := strings.TrimSpace(msg.Content)
-		if extracted, ok := agent.ExtractActionJSON(s); ok {
-			return extracted, nil
-		}
-		// 修复：畸形工具调用 JSON（如缺 tool 字段、内层引号未转义）不包装成 reply，
-		// 返回原始内容让 agent 循环的 parseCallJSON 走错误处理路径（注入纠正提示）
-		if agent.IsToolCallText(s) {
-			return s, nil
-		}
-		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(msg.Content)), nil
+	// 统一出口：无论 finish_reason 是 stop / length / content_filter / 缺失，
+	// 只要 agent 循环路径（本方法就是）拿到非空内容，就必须给出可被 parseCallJSON
+	// 消化的输出（详情见 wrapReplyJSON）。原先只在 fr=="stop" 时包装，其余直接返回
+	// 裸文本 → 循环解析失败白耗一轮。
+	if fr != "stop" && strings.TrimSpace(msg.Content) != "" {
+		diag.Logf("llm", "非流式 finish_reason=%q 非 stop，内容已按协议归一化", fr)
+	}
+	if wrapped := wrapReplyJSON(msg.Content); wrapped != "" {
+		return wrapped, nil
 	}
 	return msg.Content, nil
+}
+
+// wrapReplyJSON 把模型的原始输出转为 agent 循环可解析的控制协议 JSON。
+//
+// 这是【唯一】的不变式：只要走 agent 循环路径（调用方传 wrapReply=true），
+// 返回的就必须是 parseCallJSON 能消化的东西 —— XML 或含 action 字段的 JSON；
+// 否则循环会判「无法识别的控制指令」→ 注入纠正提示白耗一轮（弱模型/输出被截断时
+// 常见，表现为任务莫名停顿）。finish_reason 只是诊断信息（stop / length /
+// content_filter / 缺失），不参与该判断。
+//
+// 三种情形，按优先级：
+//  1. 模型已输出可提取的控制 JSON（含“解释文本 + tool JSON”混合形态）→ 原样透传；
+//     tool JSON 必须透传，否则包成 reply 会让工具不执行、JSON 原样显示给用户。
+//  2. 识别为【畸形】工具调用 JSON（缺 tool 字段、内层引号未转义等）→ 也原样返回，
+//     让 parseCallJSON 走错误处理路径注入针对性纠正提示，比包成 reply 更能帮助自纠。
+//  3. 其余非空内容 → 包装为 reply。
+//
+// 内容为空时返回空串，由调用方决定后续（保持各自原有的返回语义）。
+func wrapReplyJSON(content string) string {
+	s := strings.TrimSpace(content)
+	if s == "" {
+		return ""
+	}
+	if extracted, ok := agent.ExtractActionJSON(s); ok {
+		return extracted
+	}
+	if agent.IsToolCallText(s) {
+		return s
+	}
+	return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content))
 }
 
 // ChatWithToolsCtx 实现 agent.LLMWithContext 接口：发送消息 + 原生工具定义，
@@ -633,39 +658,18 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 		}
 		return toolCallsToText(tcs, content.String()), nil
 	}
-	// 按协议包装回复（仅 agent 循环路径 wrapReply=true）。
-	// 若模型输出了控制 JSON（含"解释文本 + tool JSON"混合形态），优先透传提取结果；
-	// 否则包成 reply（此时纯文本展示，工具调用已在上层处理）。
-	if wrapReply && lastFinishReason == "stop" {
-		s := strings.TrimSpace(content.String())
-		if extracted, ok := agent.ExtractActionJSON(s); ok {
-			return extracted, nil
+	// 按协议归一化（仅 agent 循环路径 wrapReply=true）：无论 finish_reason 是 stop /
+	// length / content_filter / 缺失，只要拿到非空内容，返回的就必须是 parseCallJSON
+	// 能消化的东西（详情见 wrapReplyJSON）。原先只在 stop 时包装，其余直接返回裸
+	// 文本 → 循环解析失败白耗一轮。
+	// wrapReply=false（插件直连）必须拿到原始 content，一律不包装。
+	if wrapReply {
+		if lastFinishReason != "stop" && strings.TrimSpace(content.String()) != "" {
+			diag.Logf("llm", "流 finish_reason=%q 非 stop 且无工具调用，内容已按协议归一化", lastFinishReason)
 		}
-		// 修复：模型输出为工具调用 JSON 但 ExtractActionJSON 提取失败
-		// （如缺 tool 字段、内层引号未转义等畸形 JSON），说明模型想调工具但格式错误。
-		// 此时不应包装成 reply 让用户看到原始 JSON，而是返回原始内容让 agent 循环的
-		// parseCallJSON 走错误处理路径（注入纠正提示让模型重试）。
-		if agent.IsToolCallText(s) {
-			return s, nil
+		if wrapped := wrapReplyJSON(content.String()); wrapped != "" {
+			return wrapped, nil
 		}
-		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
-	}
-	// finish_reason 不是 "stop"（length / 空 / content_filter 等）且无工具调用：
-	// 内容不会被包装成 reply JSON，而 agent 循环的 parseCallJSON 只认 reply/tool 协议，
-	// 手写 JSON 稍有不慎就会“解析失败”空转（弱模型尤其常见，最终表现为任务莫名中断）。
-	// 这里用与正常路径相同的包装方式兑底，保证任何 finish_reason 下都能被循环消化。
-	// 仅限 agent 循环路径（wrapReply=true）；插件直连路径必须拿到原始 content。
-	if wrapReply && strings.TrimSpace(content.String()) != "" {
-		s := strings.TrimSpace(content.String())
-		// 已是控制协议 JSON（上层已提取或模型直接给了工具调用）→ 原样透传，不能包成 reply
-		if extracted, ok := agent.ExtractActionJSON(s); ok {
-			return extracted, nil
-		}
-		if agent.IsToolCallText(s) {
-			return s, nil
-		}
-		diag.Logf("llm", "流 finish_reason=%q 非 stop 且无工具调用，内容已包装为 reply", lastFinishReason)
-		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
 	}
 	return content.String(), nil
 }
@@ -761,6 +765,15 @@ func buildAIChatMessages(req AIChatRequest) []chatMsg {
 }
 
 // Chat 实现 agent.LLM 接口。不发送 tools 参数，模型需从 system prompt 解析工具。
+// Chat 实现基础的 LLM 接口：纯对话，不传 tools、非流式、**不包装控制协议 JSON**。
+//
+// 它只适合【期望拿到模型原始文本】的场景：
+//   - AuxLLM 内部调用：GoalLoop judge（期望 JSON 判定结果）、BackgroundReview（期望 JSON review）
+//   - 插件 llm_chat 宿主函数
+//
+// 不适合 agent 主循环：主循环需要 reply/tool 控制协议。不过 loop.go 的接口分派会优先
+// 命中 ChatWithToolsCtx / ChatWithToolsStreamCtx 等更具体的接口，实际不会走到这里
+// （真走到了，循环会因为拿不到控制 JSON 而注入“解析失败”提示——排查时看这里）。
 func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 	req := chatReq{Model: c.Model}
 	for _, m := range messages {

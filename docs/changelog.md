@@ -15,7 +15,7 @@
   - `[panic]` agent 任务 goroutine 的 panic 全栈（此前 TUI 下 panic 会被 tview 恢复屏幕后重新抛出，终端上完全看不出发生了什么）
   排查「任务突然停住」的三步：看 RUN 开始后有无 `run end`（无则进程/gstack 卡住或崩溃）；看 `[tui ] ESC 收到`（用户/终端误发取消）；看 `[llm ] 流结束` 的 `finish_reason`（提前断开=上游/网络问题）。
 
-- **非 `stop` 结束的 LLM 回复不再让循环空转**：`finish_reason` 为 `length`/`content_filter`/缺失时，不再直接返回裸文本，而是与正常路径一样包装为控制协议 JSON（或原样透传已提取的工具调用）。此前这种回复会被 agent 循环的 `parseCallJSON` 判为「无法识别的控制指令」→ 注入纠正提示、白耗一轮（弱模型/输出被截断时常见，表现为任务莫名停顿）。流式与非流式两条路径对称修复；`wrapReply=false`（插件直连 `AIChat`/`AIChatStream`）不受影响。另补上两个漏写 `finish_reason` 的流式测试夹具字段（真实 SSE 必带，此前它们实际跑在「无 finish_reason」的异常分支上）。
+- **非 `stop` 结束的 LLM 回复不再让循环空转**：`finish_reason` 为 `length`/`content_filter`/缺失时，不再直接返回裸文本，而是与正常路径一样包装为控制协议 JSON（或原样透传已提取的工具调用）。此前这种回复会被 agent 循环的 `parseCallJSON` 判为「无法识别的控制指令」→ 注入纠正提示、白耗一轮（弱模型/输出被截断时常见，表现为任务莫名停顿）。这条不变式（`wrapReply=true` 且内容非空 → 输出必须可被 `parseCallJSON` 消化）现收敛到单一共享函数 `wrapReplyJSON`，四条路径（流式 / `ChatWithToolsCtx` / `ChatWithTools` / `ChatStream`）共用，避免再次漂移；`finish_reason` 退化为纯诊断信息写入 `[llm ]` 日志。`wrapReply=false`（插件直连 `AIChat`/`AIChatStream`）与裸 `Chat`（AuxLLM 的 GoalLoop judge / BackgroundReview 需直接 `json.Unmarshal`，插件 `llm_chat`）一律不包装，保持原样返回。另补上两个漏写 `finish_reason` 的流式测试夹具字段（真实 SSE 必带，此前它们实际跑在「无 finish_reason」的异常分支上）。
 
 ### 🐛 修复
 
