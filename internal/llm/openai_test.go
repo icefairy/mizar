@@ -26,6 +26,7 @@ func TestChatStream_Content(t *testing.T) {
 			`data: {"choices":[{"index":0,"delta":{"content":"你好"}}]}`,
 			`data: {"choices":[{"index":0,"delta":{"content":"，"}}]}`,
 			`data: {"choices":[{"index":0,"delta":{"content":"世界"}}]}`,
+			`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 			`data: [DONE]`,
 		}
 		for _, c := range chunks {
@@ -46,8 +47,11 @@ func TestChatStream_Content(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "你好，世界" {
-		t.Fatalf("expected reply '你好，世界', got %q", reply)
+	// 注意：流以 finish_reason=stop 正常收尾时，返回的是【可被 agent 循环 parseCallJSON
+	// 直接消化的控制协议 JSON】，不是裸文本（onToken 才是给人看的正文，见下面断言）。
+	want := `{"action":"reply","text":"你好，世界"}`
+	if reply != want {
+		t.Fatalf("expected reply %q, got %q", want, reply)
 	}
 	if len(got) != 3 {
 		t.Fatalf("expected 3 token callbacks, got %d", len(got))
@@ -65,6 +69,7 @@ func TestChatStream_Thinking(t *testing.T) {
 		chunks := []string{
 			`data: {"choices":[{"index":0,"delta":{"reasoning_content":"让我思考一下"}}]}`,
 			`data: {"choices":[{"index":0,"delta":{"content":"答案是42"}}]}`,
+			`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 			`data: [DONE]`,
 		}
 		for _, c := range chunks {
@@ -88,8 +93,9 @@ func TestChatStream_Thinking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "答案是42" {
-		t.Fatalf("expected '答案是42', got %q", reply)
+	// 流式返回的是控制协议 JSON（内容已转义），onToken 收到的才是原始正文
+	if !strings.Contains(reply, `"action":"reply"`) || !strings.Contains(reply, "答案是42") {
+		t.Fatalf("expected wrapped reply JSON, got %q", reply)
 	}
 	if len(thinkTokens) != 1 || thinkTokens[0] != "让我思考一下" {
 		t.Fatalf("thinking tokens wrong: %v", thinkTokens)

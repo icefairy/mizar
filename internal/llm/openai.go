@@ -352,14 +352,20 @@ func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message,
 	if len(msg.ToolCalls) > 0 {
 		return toolCallsToText(msg.ToolCalls, msg.Content), nil
 	}
-	// finish_reason="stop" 且内容为纯文本时，包装成 reply JSON。
-	if fr == "stop" {
-		s := strings.TrimSpace(msg.Content)
-		if extracted, ok := agent.ExtractActionJSON(s); ok {
-			return extracted, nil
-		}
-		if agent.IsToolCallText(s) {
-			return s, nil
+	// finish_reason 为 stop 或其它（length / 空 / content_filter）：
+	// 内容是纯文本时包装成 reply JSON，保证 agent 循环的 parseCallJSON 始终能消化。
+	// 仅 stop 时包装会留下漏洞：非 stop 且内容为普通文本时会直接返回原文，
+	// parseCallJSON 报「无法识别的控制指令」→ 循环清转（弱模型/截断场景常见）。
+	s := strings.TrimSpace(msg.Content)
+	if extracted, ok := agent.ExtractActionJSON(s); ok {
+		return extracted, nil
+	}
+	if agent.IsToolCallText(s) {
+		return s, nil
+	}
+	if s != "" {
+		if fr != "stop" {
+			diag.Logf("llm", "非流式 finish_reason=%q 非 stop 且无工具调用，内容已包装为 reply", fr)
 		}
 		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(msg.Content)), nil
 	}
@@ -642,6 +648,23 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 		if agent.IsToolCallText(s) {
 			return s, nil
 		}
+		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
+	}
+	// finish_reason 不是 "stop"（length / 空 / content_filter 等）且无工具调用：
+	// 内容不会被包装成 reply JSON，而 agent 循环的 parseCallJSON 只认 reply/tool 协议，
+	// 手写 JSON 稍有不慎就会“解析失败”空转（弱模型尤其常见，最终表现为任务莫名中断）。
+	// 这里用与正常路径相同的包装方式兑底，保证任何 finish_reason 下都能被循环消化。
+	// 仅限 agent 循环路径（wrapReply=true）；插件直连路径必须拿到原始 content。
+	if wrapReply && strings.TrimSpace(content.String()) != "" {
+		s := strings.TrimSpace(content.String())
+		// 已是控制协议 JSON（上层已提取或模型直接给了工具调用）→ 原样透传，不能包成 reply
+		if extracted, ok := agent.ExtractActionJSON(s); ok {
+			return extracted, nil
+		}
+		if agent.IsToolCallText(s) {
+			return s, nil
+		}
+		diag.Logf("llm", "流 finish_reason=%q 非 stop 且无工具调用，内容已包装为 reply", lastFinishReason)
 		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content.String())), nil
 	}
 	return content.String(), nil
