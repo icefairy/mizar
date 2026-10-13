@@ -125,9 +125,27 @@ func TestChatStream_ToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := `{"action":"tool","tool":"bash","args":"{\"command\":\"hostname\"}"}`
-	if reply != expected {
-		t.Fatalf("expected tool call JSON:\n  %s\ngot:\n  %s", expected, reply)
+	// 多调用协议：calls 数组携带全部调用，tool/args 冗余携带首个（兼容旧读取方）
+	var got struct {
+		Action string `json:"action"`
+		Calls  []struct {
+			Tool string `json:"tool"`
+			Args string `json:"args"`
+		} `json:"calls"`
+		Tool string `json:"tool"`
+		Args string `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(reply), &got); err != nil {
+		t.Fatalf("输出应是合法 JSON: %v (out=%q)", err, reply)
+	}
+	if got.Action != "tool" || len(got.Calls) != 1 {
+		t.Fatalf("应有 1 个调用: %+v (out=%q)", got, reply)
+	}
+	if got.Calls[0].Tool != "bash" || got.Calls[0].Args != `{"command":"hostname"}` {
+		t.Fatalf("流式分片未正确合并: %+v", got.Calls[0])
+	}
+	if got.Tool != "bash" || got.Args != got.Calls[0].Args {
+		t.Fatalf("单数字段应冗余携带首个调用: tool=%q args=%q", got.Tool, got.Args)
 	}
 }
 

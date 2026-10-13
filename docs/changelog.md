@@ -23,11 +23,18 @@
 
 ### 🐛 修复
 
+- **模型一轮发的多个工具调用被静默丢弃**：`toolCallsToText` 只取 `tcs[0]`（`callRequest` 是单数结构），其余工具调用直接丢弃且无任何痕迹——**模型的写操作会凭空消失**。OpenAI 原生 `tool_calls` 本就是数组，模型一轮并行发多个调用是合法行为。现已端到端支持按出现顺序依次执行：
+  - **解析层**：新增 `ExtractAllActionJSON`（提取文本里全部控制 JSON，保序）与 `parseCallJSONs`（批量解析）；`ExtractActionJSON`/`parseCallJSON` 保留为「取首个」的兼容入口。
+  - **LLM 层**：`toolCallsToText` 输出 `calls` 数组携带全部调用（按顺序），并**冗余保留** `tool`/`args` 单数字段携带首个——只认旧字段的读取方（如 subagent）不受影响。
+  - **循环层**：`Run` 把工具执行段抽为 `runOneToolCall`，按序执行 `calls`；`respond` 与终止型工具出现时立即收尾并**跳过后继调用**，参数校验失败/guard 提醒则中断本批进入下一轮。单数字段（旧协议 / XML / bare）仍走兼容路径。
+
+- **`ChatWithToolsCtx` 漏用 `wrapReplyJSON`**：上一轮收敛时漏了这一处，它仍手写包装（且注释引用已改名的 `parseCallJSON`）。现统一走 `wrapReplyJSON`。
+
 - **模型“只宣布不执行”导致任务停滞**：实测连续三轮（会话记录 idx 116/118/122）模型只输出“我重写为纯注册表清理方式”这类预告就结束本轮——`action=reply` 在循环里就是“任务完成”，于是用户只能反复发“继续”，长任务实际停滞。根因是系统提示把“汇报进展”和“宣布任务完成”归到了同一个 `respond` 出口。现提示词明确区分：① 要动手就先把工具调用发出去；② `respond` 只用于回答提问或真正完成时交付；③ 明确反例。
 
 - **`reason`（边做边说）从未被提示词告知**：mizar 的协议其实早就支持“文本 + 工具调用同一轮”——`toolCallsToText` 把模型同一轮的 `content` 写入协议 JSON 的 `reason` 字段，TUI 也会展示（`ToolIntro()` / `ctx.Reason`），但系统提示从未提及，模型无从知晓。现补上说明，并明确“只有说明文字、没有工具调用的那一轮会被当成任务结束”。
 
-- **多工具调用被静默丢弃、`reason` 无长度上限**：`toolCallsToText` 只取 `tcs[0]`（`callRequest` 是单数结构），其余工具调用直接丢弃且无任何痕迹；`reason` 接收模型整轮文本且不限长。现丢弃时写一行 `[llm ]` 诊断日志（列出被丢弃的工具名），`reason` 截断到 500 字符（按 rune，不切汉字）。完整并行工具调用需改协议，见下方“已知限制”。
+- **`reason` 无长度上限**：`reason` 接收模型整轮文本且不限长，既浪费 token，又让弱模型更容易在这个转义字符串里写畸形 JSON。现按 rune 截断到 500 字符（不切汉字）。
 
 - **Windows 上「没按键却突然任务已取消」+ 输入框乱码**：根因是 `EnableMouse(true)` 在 Windows 上要求 conhost 向宿主终端请求鼠标上报，而 ConPTY 的 win32-input-mode 存在双重编码缺陷（microsoft/terminal#15083、#16343），鼠标移动/滚轮被还原成字符流灌进控制台输入缓冲；tcell 的 ConsoleScreen（`ReadConsoleInputW`，无 VT 序列解析）把它们当普通按键交给 tview → 输入框出现 `[<35;66;61M...` 乱码，且序列以 ESC 开头，被误判为用户按下 ESC → 无辜触发「任务已取消（当前步骤结束后停止）」。现 Windows 下默认不启用鼠标上报，整条链路断开；复制粘贴改用终端原生能力（拖选 + `Ctrl+Shift+C/V`、右键菜单），键盘侧 `Alt+L` / `Alt+C` 拷贝模式不受影响，聊天区滚动仍可用 `PgUp`/`PgDn`。需要鼠标的用户可设 `MIZAR_MOUSE=1` 强制开启。
 - **Windows 粘贴多行文本被逐行提交**：tcell 在 Windows 上 `EnablePaste` 是空实现（无 bracketed paste），粘贴多行时换行符变成裸 Enter，导致半截内容被发送。现增加粘贴换行防护：毫秒级连发的 Enter 判定为粘贴换行（插入换行而非提交），人手打字间隔（≥8ms）仍正常提交；`MIZAR_PASTE_GUARD=0` 可关闭。

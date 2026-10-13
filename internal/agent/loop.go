@@ -180,6 +180,11 @@ type callRequest struct {
 	Args   string `json:"args,omitempty"`
 	Text   string `json:"text,omitempty"`
 	Reason string `json:"reason,omitempty"` // 模型在调用工具前说的一句说明文字
+
+	// Calls 本步要执行的工具调用列表（按出现顺序）。
+	// 模型一轮可以合法地并行发多个工具调用（OpenAI 原生 tool_calls 本就是数组），
+	// 由 LLM 层把它们全部展开到此字段；为空时回退到单数字段 Tool/Args。
+	Calls []callRequest `json:"calls,omitempty"`
 }
 
 // New 创建 Agent。
@@ -621,102 +626,42 @@ func (a *Agent) Run(task string) (string, error) {
 			return req.Text, nil
 		}
 
-		// 工具调用
-		q.BeginOperation("tool:" + req.Tool)
-		a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Reason: req.Reason}, a.logf)
-
-		// 空工具名兜底（规避 `tool "" not found`）：模型在某些形态下丢了 tool 字段，
-		// 但 args 里带了 bash 的 command 参数——此时猜为 bash 工具。
-		if req.Tool == "" && req.Action == "tool" {
-			if trimmed := strings.TrimSpace(req.Args); strings.Contains(trimmed, "\"command\":") {
-				req.Tool = "bash"
+		// 工具调用（本步可能是模型一轮发起的**多个**调用，按出现顺序依次执行）
+		calls := req.Calls
+		if len(calls) == 0 {
+			// 单数形态（旧协议 / XML / bare）：归一为一个调用
+			calls = []callRequest{{Action: "tool", Tool: req.Tool, Args: req.Args}}
+		}
+		var terminated bool
+		for i, c := range calls {
+			c.Reason = req.Reason // reason（模型同一轮的开场说明）归给所有调用
+			fin, isTerminate, err := a.runOneToolCall(&c, i, len(calls), reply, msgs, q, qc, task)
+			if err != nil {
+				return "", err
+			}
+			msgs = fin.Msgs
+			if fin.Control == controlReturn {
+				return fin.Reply, nil
+			}
+			if fin.Control == controlNextStep {
+				// 该调用已自行收尾（参数校验/guard 提醒）；剩余调用不再执行
+				break
+			}
+			if isTerminate {
+				// 终止型工具已给出最终回答：剩余调用必须跳过，否则会被执行（错误的副作用）
+				terminated = true
+				break
 			}
 		}
-
-		// respond 工具：直接回答出口。不执行不回填，text 参数作为最终回答返回。
-		// 给 tool_choice=required 模式下的模型一条正规的"回答"路径，
-		// 避免模型被迫硬调无关工具或手写畸形 JSON。
-		if req.Tool == "respond" {
-			q.EndOperation("tool:" + req.Tool)
-			text := respondText(req.Args)
-			if text == "" {
-				msg := "⚠️ respond 工具调用缺少 text 参数。请重新调用 respond，并在 text 参数中填入你要说的内容。"
-				msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-				msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
-				step++
-				continue
-			}
-			// 更新 forcedToolCalls 计数器：模型调了 respond 也算调工具（重置计数器）
-			if tllm, ok := a.LLM.(interface{ updateForcedToolCalls(v bool) }); ok {
-				tllm.updateForcedToolCalls(true)
-			}
-			q.Complete(nil)
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text, Messages: msgs}, a.logf)
-			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text}, a.logf)
-			return text, nil
-		}
-
-		// 空参数兑底：不执行工具，把错误发回模型让它修正（防止"args {command} required"空转）
-		trimmedArgs := strings.TrimSpace(req.Args)
-		if trimmedArgs == "" || trimmedArgs == "{}" {
-			q.EndOperation("tool:" + req.Tool)
-			msg := fmt.Sprintf("⚠️ 工具 %s 调用缺少参数（args 为空）。请重新调用，并在 args 中传入正确的 JSON 参数。", req.Tool)
-			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-			msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+		if terminated {
+			// 终止型工具已给出最终回答，跳过后续 judge/review
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			return lastToolOutput(msgs), nil
+		}
+		if len(calls) == 0 {
+			// 理论不可达（calls 至少有一个）；保险起见推进步数避免死循环
 			step++
 			continue
-		}
-		// 先执行工具（dsh 的 repeat-tool-reminder 也是 post-execute 观察语义）
-		out, err := a.Plugins.Call(req.Tool, req.Args)
-		q.EndOperation("tool:" + req.Tool)
-		// 工具交换回调：供调用方持久化（会话记录工具调用过程/结果）
-		if a.OnToolExchange != nil {
-			a.OnToolExchange(req.Tool, req.Args, req.Reason, out, err)
-		}
-		tr := ToolResult{ToolName: req.Tool, Args: req.Args, Output: out}
-		if err != nil {
-			tr.Error = err.Error()
-			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Err: err}, a.logf)
-		}
-		b, _ := json.Marshal(tr)
-
-		// Guard 观察：记录此次调用后触发渐进提醒或终止（dsh semantics：observe-and-enrich, never veto, kill on max threshold exceed）
-		if a.Guard != nil {
-			if reminder, terminate := a.Guard.Observe(req.Tool, req.Args); terminate {
-				msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-				msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
-				msgs = append(msgs, Message{Role: RoleUser, Content: reminder + "\n⚠️ 任务因重复工具调用已终止。"})
-				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
-				return "", fmt.Errorf("%w: tool=%s 连续重复 %d 次，任务终止", errors.New("loop guard terminated"), req.Tool, a.Guard.MaxObserved())
-			} else if reminder != "" {
-				// 渐进提醒，注入为追加用户消息（紧接工具结果之后，模型可据此改参数或停手）
-				msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-				msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
-				msgs = append(msgs, Message{Role: RoleUser, Content: reminder})
-				a.log("%s", q.FormatLog("guard_reminder", "step=", fmt.Sprintf("%d", qc.Step), "tool=", req.Tool, "cnt=", fmt.Sprintf("%d", a.Guard.Count())))
-				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
-				step++
-				continue
-			}
-		}
-		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-		msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult})
-		a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
-
-		// 终止型工具（对齐 pi 0.69.0 `terminate: true`）：执行成功且工具声明 Terminate 时，
-		// 直接以工具输出作为最终回答，省掉一次 follow-up LLM 调用（延迟 + 成本）。
-		// 执行失败时忽略声明：错误要回填给模型，给它纠正的机会。
-		if err == nil && a.isTerminatingTool(req.Tool) {
-			final := strings.TrimSpace(out)
-			if final != "" {
-				a.log("%s", q.FormatLog("tool_terminate", "step=", fmt.Sprintf("%d", qc.Step), "tool=", req.Tool))
-				q.Complete(nil)
-				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: final, Messages: msgs}, a.logf)
-				a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: final}, a.logf)
-				return final, nil
-			}
 		}
 
 		// GoalLoop judge：每轮后判断目标是否完成，自动续跑（🟡 ImpactModerate）
@@ -748,6 +693,150 @@ func (a *Agent) Run(task string) (string, error) {
 	return "", stepExceededErr
 }
 
+// callControl 单次工具调用执行后的控制流指示。
+type callControl int
+
+const (
+	// controlContinue 正常：继续执行本批的下一个调用，或进入下一轮 LLM。
+	controlContinue callControl = iota
+	// controlReturn 本调用已给出最终回答（respond / 终止型工具），Run 应立即返回。
+	controlReturn
+	// controlNextStep 本调用已自行收尾（参数校验失败 / guard 提醒），
+	// 剩余调用不再执行，直接进入下一轮。
+	controlNextStep
+)
+
+// callDirective 单次工具调用的执行结果（供批量循环汇总）。
+type callDirective struct {
+	Msgs    []Message // 更新后的消息列表
+	Reply   string    // Control==controlReturn 时的最终回答
+	Control callControl
+}
+
+// runOneToolCall 执行单个工具调用，返回（更新后的本批消息、控制流、错误）。
+//
+// 从原 Run 内联块提取而来，供批量执行循环复用。所有分支语义（respond 直接回答、
+// 空参数回填纠错、guard 观察与终止、终止型工具）逐条保持一致，只是把原来的
+// `continue`（推进步数、进入下一轮）换成 controlNextStep 返回。
+//
+// idx/total 仅用于日志与回复文本（标明这是第几个调用，便于诊断多调用场景）。
+func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msgs []Message,
+	q *lifecycle.QueryLifecycle, qc lifecycle.QueryContext, task string) (callDirective, bool, error) {
+
+	q.BeginOperation("tool:" + c.Tool)
+	a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}, a.logf)
+
+	// 空工具名兜底（规避 `tool "" not found`）：模型在某些形态下丢了 tool 字段，
+	// 但 args 里带了 bash 的 command 参数——此时猜为 bash 工具。
+	if c.Tool == "" {
+		if trimmed := strings.TrimSpace(c.Args); strings.Contains(trimmed, "\"command\":") {
+			c.Tool = "bash"
+		}
+	}
+
+	// respond 工具：直接回答出口。不执行不回填，text 参数作为最终回答返回。
+	// 给 tool_choice=required 模式下的模型一条正规的"回答"路径，
+	// 避免模型被迫硬调无关工具或手写畸形 JSON。
+	if c.Tool == "respond" {
+		q.EndOperation("tool:" + c.Tool)
+		text := respondText(c.Args)
+		if text == "" {
+			msg := "⚠️ respond 工具调用缺少 text 参数。请重新调用 respond，并在 text 参数中填入你要说的内容。"
+			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+			msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
+		}
+		// 更新 forcedToolCalls 计数器：模型调了 respond 也算调工具（重置计数器）
+		if tllm, ok := a.LLM.(interface{ updateForcedToolCalls(v bool) }); ok {
+			tllm.updateForcedToolCalls(true)
+		}
+		q.Complete(nil)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text, Messages: msgs}, a.logf)
+		a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text}, a.logf)
+		return callDirective{Msgs: msgs, Reply: text, Control: controlReturn}, false, nil
+	}
+
+	// 空参数兑底：不执行工具，把错误发回模型让它修正（防止"args {command} required"空转）
+	trimmedArgs := strings.TrimSpace(c.Args)
+	if trimmedArgs == "" || trimmedArgs == "{}" {
+		q.EndOperation("tool:" + c.Tool)
+		msg := fmt.Sprintf("⚠️ 工具 %s 调用缺少参数（args 为空）。请重新调用，并在 args 中传入正确的 JSON 参数。", c.Tool)
+		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
+	}
+
+	// 先执行工具（dsh 的 repeat-tool-reminder 也是 post-execute 观察语义）
+	out, err := a.Plugins.Call(c.Tool, c.Args)
+	q.EndOperation("tool:" + c.Tool)
+	// 工具交换回调：供调用方持久化（会话记录工具调用过程/结果）
+	if a.OnToolExchange != nil {
+		a.OnToolExchange(c.Tool, c.Args, c.Reason, out, err)
+	}
+	tr := ToolResult{ToolName: c.Tool, Args: c.Args, Output: out}
+	if err != nil {
+		tr.Error = err.Error()
+		a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Err: err}, a.logf)
+	}
+	b, _ := json.Marshal(tr)
+
+	// Guard 观察：记录此次调用后触发渐进提醒或终止（dsh semantics：observe-and-enrich, never veto, kill on max threshold exceed）
+	if a.Guard != nil {
+		if reminder, terminate := a.Guard.Observe(c.Tool, c.Args); terminate {
+			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
+			msgs = append(msgs, Message{Role: RoleUser, Content: reminder + "\n⚠️ 任务因重复工具调用已终止。"})
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			return callDirective{}, false, fmt.Errorf("%w: tool=%s 连续重复 %d 次，任务终止", errors.New("loop guard terminated"), c.Tool, a.Guard.MaxObserved())
+		} else if reminder != "" {
+			// 渐进提醒，注入为追加用户消息（紧接工具结果之后，模型可据此改参数或停手）
+			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
+			msgs = append(msgs, Message{Role: RoleUser, Content: reminder})
+			a.log("%s", q.FormatLog("guard_reminder", "step=", fmt.Sprintf("%d", qc.Step), "tool=", c.Tool, "cnt=", fmt.Sprintf("%d", a.Guard.Count())))
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
+		}
+	}
+	msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+	msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult})
+	a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
+
+	// 终止型工具（对齐 pi 0.69.0 `terminate: true`）：执行成功且工具声明 Terminate 时，
+	// 直接以工具输出作为最终回答，省掉一次 follow-up LLM 调用（延迟 + 成本）。
+	// 执行失败时忽略声明：错误要回填给模型，给它纠正的机会。
+	if err == nil && a.isTerminatingTool(c.Tool) {
+		if final := strings.TrimSpace(out); final != "" {
+			a.log("%s", q.FormatLog("tool_terminate", "step=", fmt.Sprintf("%d", qc.Step), "tool=", c.Tool))
+			// 标记本轮终止：由调用方返回 lastToolOutput 作为最终回答
+			return callDirective{Msgs: msgs}, true, nil
+		}
+	}
+	return callDirective{Msgs: msgs, Control: controlContinue}, false, nil
+}
+
+// lastToolOutput 取消息流末尾的最后一个工具结果内容（终止型工具已写入）。
+func lastToolOutput(msgs []Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Kind != KindToolResult {
+			continue
+		}
+		content := msgs[i].Content
+		const prefix = "工具结果: "
+		if !strings.HasPrefix(content, prefix) {
+			continue
+		}
+		var tr ToolResult
+		if err := json.Unmarshal([]byte(content[len(prefix):]), &tr); err != nil {
+			continue
+		}
+		return strings.TrimSpace(tr.Output)
+	}
+	return ""
+}
+
 // summaryOf 提取消息流中的摘要（供 CompactionAfter 查看），无则返回空。
 func summaryOf(msgs []Message) string {
 	for _, m := range msgs {
@@ -770,20 +859,37 @@ func (a *Agent) log(format string, args ...any) {
 }
 
 // parseCallJSON 从模型回复中提取 action 控制指令。
-// 支持三种格式：
-// 1. 纯 JSON: {"action":"tool","tool":"bash","args":"{}"}
-// 2. XML 包裹: <tool name="bash">{"command": "ls"}</tool>
-// 3. 混合文本: 先解释...\n<tool name="ls">{"path": "."}</tool>
-// 当格式不规范时，尝试自动修复并提供详细错误。
+// 返回首个调用（保持原有单数 API，供旧调用方与测试用）；
+// 需要拿到模型一轮发出的**全部**工具调用时请用 parseCallJSONs。
 func parseCallJSON(text string) (*callRequest, error) {
-	// 优先尝试 XML 格式解析
-	req, ok := extractActionXML(text)
-	if ok {
-		return req, nil
+	reqs, err := parseCallJSONs(text)
+	if err != nil {
+		return nil, err
 	}
-	// 回退到 JSON 格式解析
-	extracted, ok := ExtractActionJSON(text)
-	if !ok {
+	if len(reqs) == 0 {
+		return nil, fmt.Errorf("空的控制指令")
+	}
+	return &reqs[0], nil
+}
+
+// parseCallJSONs 从模型回复中提取**全部**控制指令（保持出现顺序）。
+//
+// 支持格式：
+//  1. 纯 JSON: {"action":"tool","tool":"bash","args":"{}"}
+//  2. XML 包裹: <tool name="bash">{"command": "ls"}</tool>
+//  3. 混合文本: 先解释...\n<tool name="ls">{"path": "."}</tool>
+//  4. 并行多调用: 一轮发多个工具调用（原生 tool_calls 或文本里多个 JSON 对象）
+//
+// 多调用支持修复的问题：模型合法地并行发多个工具调用时，旧实现只取首个，
+// 其余被静默丢弃——模型的写操作会凭空消失。现按出现顺序全部返回，由循环依次执行。
+func parseCallJSONs(text string) ([]callRequest, error) {
+	// 优先尝试 XML 格式解析（单数；XML 多工具形态罕见）
+	if req, ok := extractActionXML(text); ok {
+		return []callRequest{*req}, nil
+	}
+	// JSON 格式：可能命中多个
+	extracted := ExtractAllActionJSON(text)
+	if len(extracted) == 0 {
 		// 检测到「想调工具但 JSON 畸形」：缺 tool 字段 / args 内层引号未转义等。
 		// 给出针对性纠错提示（比通用提示更能帮助弱模型快速自纠，避免反复失败）。
 		if IsToolCallText(text) {
@@ -791,6 +897,19 @@ func parseCallJSON(text string) (*callRequest, error) {
 		}
 		return nil, fmt.Errorf("无法识别的控制指令：未找到含 action 字段的合法 JSON 对象\n请输出格式如：<tool name=\"工具名\">参数 JSON</tool> 或 <reply>回答内容</reply>")
 	}
+	reqs := make([]callRequest, 0, len(extracted))
+	for _, one := range extracted {
+		req, err := parseOneCallJSON(one)
+		if err != nil {
+			return nil, err
+		}
+		reqs = append(reqs, *req)
+	}
+	return reqs, nil
+}
+
+// parseOneCallJSON 解析单个已提取的 JSON 对象（含自动修复与 bare 归一化）。
+func parseOneCallJSON(extracted string) (*callRequest, error) {
 	var reqJSON callRequest
 	if err := json.Unmarshal([]byte(extracted), &reqJSON); err != nil {
 		fixed := tryFixJSON(extracted)
@@ -986,9 +1105,25 @@ func isValidJSON(s string) bool {
 // 返回提取到的原始 JSON 文本。文本内嵌的转义 tool JSON（reply.text 里的 \"action\"）
 // 不会被误提取——非转义的 { 开头才会进入解码尝试，转义形态解码必然失败。
 func ExtractActionJSON(text string) (string, bool) {
+	objs := ExtractAllActionJSON(text)
+	if len(objs) == 0 {
+		return "", false
+	}
+	return objs[0], true
+}
+
+// ExtractAllActionJSON 从任意文本中提取【所有】控制协议 JSON 对象（保持出现顺序）。
+//
+// 模型一轮可以合法地并行发出多个工具调用（OpenAI 原生 tool_calls 就是数组），
+// 旧实现只取首个，其余被**静默丢弃**——模型的写操作会凭空消失。
+// 这里返回全部，由调用方决定执行策略；顺序敏感（模型可能先读后写）。
+//
+// 阻塞排除：若文本里存在 action=tool，则不再返回 action=reply 对象
+// （反之亦然）——两种意图互斥，混着执行语义不明。原三态优先级保持不变。
+func ExtractAllActionJSON(text string) []string {
 	s := strings.TrimSpace(text)
 	if s == "" {
-		return "", false
+		return nil
 	}
 	// 剥 ```json 围栏
 	if strings.HasPrefix(s, "```") {
@@ -997,8 +1132,10 @@ func ExtractActionJSON(text string) (string, bool) {
 			s = strings.TrimSpace(strings.TrimSuffix(lines[1], "```"))
 		}
 	}
-	// 三轮扫描：第一轮只要 action=tool，第二轮接受 action=reply，第三轮接受缺 action 的 bare 工具调用
+	// 三轮扫描：第一轮只要 action=tool，第二轮接受 action=reply，第三轮接受缺 action 的 bare 工具调用。
+	// 某一轮只要有命中就结束——保持与原 ExtractActionJSON 完全一致的优先级。
 	for _, want := range []string{"tool", "reply", "native"} {
+		var found []string
 		for i := 0; i < len(s); i++ {
 			if s[i] != '{' {
 				continue
@@ -1027,7 +1164,13 @@ func ExtractActionJSON(text string) (string, bool) {
 			}
 			end := i + int(dec.InputOffset())
 			// 解码器可能吃掉对象后的空白，截取到 '}' 为止更精确，但多余空白不影响 Unmarshal
-			return strings.TrimSpace(s[i:min(end, len(s))]), true
+			raw := strings.TrimSpace(s[i:min(end, len(s))])
+			found = append(found, raw)
+			// 从该对象之后继续扫描（避免嵌套对象被重复提取）
+			i = end - 1
+		}
+		if len(found) > 0 {
+			return found
 		}
 	}
 	// 严格三态扫描全部失败后，宽容兜底：文本以 { 开头、无 action，且逐字符扫描能命中
@@ -1039,7 +1182,7 @@ func ExtractActionJSON(text string) (string, bool) {
 		if tool != "" && args != "" {
 			// 形状A：{"tool":...,"args":...}
 			if rebuilt, err := json.Marshal(map[string]any{"action": "tool", "tool": tool, "args": args}); err == nil {
-				return string(rebuilt), true
+				return []string{string(rebuilt)}
 			}
 		}
 		// 形状B：只剩 bash 参数对象 {"command":...,"timeout":...}（弱模型丢掉外层 tool/args），
@@ -1054,12 +1197,12 @@ func ExtractActionJSON(text string) (string, bool) {
 				}
 				argsJSON, _ := json.Marshal(params)
 				if rebuilt, err := json.Marshal(map[string]any{"action": "tool", "tool": "bash", "args": string(argsJSON)}); err == nil {
-					return string(rebuilt), true
+					return []string{string(rebuilt)}
 				}
 			}
 		}
 	}
-	return "", false
+	return nil
 }
 
 // respondText 从 respond 工具调用参数中提取回答文本。

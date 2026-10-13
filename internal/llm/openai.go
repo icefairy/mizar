@@ -154,54 +154,59 @@ func pluginsToolToDef(t plugins.Tool) toolDef {
 	}
 }
 
-// toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
-// 新 schema 中 arguments 直接是原始参数（如 {"command":"hostname"}），
-// 用 json.Marshal 转成转义后的 JSON 字符串填入 args 字段。
-// 期望输出：{"action":"tool","tool":"bash","args":"{...}","reason":"..."}
-//
-// reason 为模型在发起工具调用前说的一句说明文字（content 字段）；
-// 若非空则并入返回 JSON 的 reason 字段，使 agent 循环能把它存入历史并在 UI 展示。
-// 空 arguments 仍生成工具调用（args=""），由 agent 循环做空参数兜底。
 // reasonMaxLen reason 字段的上限（字符）。超出时截断：
 // reason 会进入协议 JSON 与会话历史，模型写一大段分析时既浪费 token、
 // 又让弱模型更容易在这个转义字符串里写畸形 JSON。
 const reasonMaxLen = 500
 
+// callSpec 控制协议里的单个工具调用（文本协议形态）。
+// Args 是**原始参数字符串**（如 `{"command":"ls"}`），不是解析后的对象——
+// agent 循环把它原样交给工具实现自行 Unmarshal，与单数形态的历史行为一致。
+type callSpec struct {
+	Tool string `json:"tool"`
+	Args string `json:"args"`
+}
+
+// callRequestWire 控制协议 JSON 的传输形态。
+//
+// calls 是权威的多调用列表（按顺序执行）；tool/args 冗余携带首个调用，
+// 让只认旧单数字段的读取方（如 subagent）继续工作。
+type callRequestWire struct {
+	Action string     `json:"action"`
+	Calls  []callSpec `json:"calls,omitempty"`
+	Tool   string     `json:"tool,omitempty"`
+	Args   string     `json:"args,omitempty"`
+	Reason string     `json:"reason,omitempty"`
+}
+
 // toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
 // 新 schema 中 arguments 直接是原始参数（如 {"command":"hostname"}），
-// 用 json.Marshal 转成转义后的 JSON 字符串填入 args 字段。
+// 用 json.Marshal 转成转义后的 JSON 字符串填入 calls[].args。
 //
-// 局限：mizar 的 callRequest 是单数结构，循环每步只处理一个工具调用，
-// **这里的 tcs[1:] 会被丢弃**。丢弃时写一行诊断日志（这是静默丢失，
-// 只靠行为观察不到）。要支持并行工具调用需改协议，见 docs/changelog。
+// 多调用：模型一轮可以合法地并行发多个工具调用（原生 tool_calls 本就是数组）。
+// 这里全部输出到 calls 数组，由 agent 循环**按顺序执行**；同时把首个同时填入
+// 单数字段（tool/args），让只认旧字段的读取方（如 subagent 的解析）仍能工作。
 //
 // reason 为模型同一轮的 content（不是 tools schema 里的参数），非空则并入
-// 返回 JSON 的 reason 字段，使 agent 循环能把它存入历史并在 UI 展示。
-// 空 arguments 仍生成工具调用（args=""），由 agent 循环做空参数兜底。
+// 顶层 reason 字段，使 agent 循环能把它存入历史并在 UI 展示。
 func toolCallsToText(tcs []toolCall, reason string) string {
 	if len(tcs) == 0 {
 		return ""
 	}
-	if len(tcs) > 1 {
-		names := make([]string, 0, len(tcs)-1)
-		for _, tc := range tcs[1:] {
-			names = append(names, tc.Function.Name)
-		}
-		diag.Logf("llm", "模型一轮返回 %d 个工具调用，仅首个(%s)被执行，丢弃: %s",
-			len(tcs), tcs[0].Function.Name, strings.Join(names, ", "))
+	calls := make([]callSpec, 0, len(tcs))
+	for _, tc := range tcs {
+		calls = append(calls, callSpec{Tool: tc.Function.Name, Args: tc.Function.Arguments})
 	}
-	tc := tcs[0]
-	argsRaw := tc.Function.Arguments
-	argsEscaped, _ := json.Marshal(argsRaw)
-	r := ""
-	if reason != "" {
-		reason = strings.TrimSpace(reason)
+	out := callRequestWire{Action: "tool", Calls: calls, Tool: calls[0].Tool, Args: calls[0].Args}
+	if r := strings.TrimSpace(reason); r != "" {
 		// truncate 按 rune 截断（不会切断多字节汉字）并自带省略号
-		reason = truncate(reason, reasonMaxLen)
-		res, _ := json.Marshal(reason)
-		r = "," + `"reason":` + string(res)
+		out.Reason = truncate(r, reasonMaxLen)
 	}
-	return fmt.Sprintf(`{"action":"tool","tool":"%s","args":%s%s}`, tc.Function.Name, argsEscaped, r)
+	b, err := json.Marshal(out)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // setThinking 根据 ThinkingLevel 设置思考参数
@@ -404,22 +409,14 @@ func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message,
 	if len(msg.ToolCalls) > 0 {
 		return toolCallsToText(msg.ToolCalls, msg.Content), nil
 	}
-	// finish_reason 为 stop 或其它（length / 空 / content_filter）：
-	// 内容是纯文本时包装成 reply JSON，保证 agent 循环的 parseCallJSON 始终能消化。
-	// 仅 stop 时包装会留下漏洞：非 stop 且内容为普通文本时会直接返回原文，
-	// parseCallJSON 报「无法识别的控制指令」→ 循环清转（弱模型/截断场景常见）。
-	s := strings.TrimSpace(msg.Content)
-	if extracted, ok := agent.ExtractActionJSON(s); ok {
-		return extracted, nil
+	// 统一出口：无论 finish_reason 是 stop / length / content_filter / 缺失，
+	// 只要 agent 循环路径（本方法就是）拿到非空内容，就必须给出可被
+	// parseCallJSONs 消化的输出（详情见 wrapReplyJSON）。
+	if fr != "stop" && strings.TrimSpace(msg.Content) != "" {
+		diag.Logf("llm", "非流式 finish_reason=%q 非 stop 且无工具调用，内容已按协议归一化", fr)
 	}
-	if agent.IsToolCallText(s) {
-		return s, nil
-	}
-	if s != "" {
-		if fr != "stop" {
-			diag.Logf("llm", "非流式 finish_reason=%q 非 stop 且无工具调用，内容已包装为 reply", fr)
-		}
-		return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(msg.Content)), nil
+	if wrapped := wrapReplyJSON(msg.Content); wrapped != "" {
+		return wrapped, nil
 	}
 	return msg.Content, nil
 }
