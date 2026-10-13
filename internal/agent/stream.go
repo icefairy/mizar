@@ -182,17 +182,31 @@ func (e *StreamTextExtractor) Text() string { return e.text.String() }
 func (e *StreamTextExtractor) Replying() bool { return e.rep }
 
 // IsToolCallText 判断文本是否指向工具调用。
-// 识别两类形态：
+// 识别三类形态：
 //  1. 标准控制协议：顶层 action 字段值为 "tool"（容忍空白与畸形 JSON，逐字符扫描）。
 //  2. 原生 bare 形态：合法 JSON 但缺 action 字段，同时含 tool 与 args 字段
 //     （模型搞丢 action 时常见，例如 {"args":"{...}","tool":"bash"}）。
+//  3. XML 形态：<tool name="x">…</tool>（含带引号变体与 arg_key/arg_value）。
 //
-// 若不识别，tool JSON 会被包装成 reply 导致用户看到原始 JSON、任务提前结束。
+// 若不识别，tool JSON **或 XML** 会被包装成 reply 导致用户看到原始控制文本、
+// 任务提前结束（实测：模型输出 XML 工具调用时，LLM 层把它包成 reply，
+// 循环当成最终回答，一条回复就结束）。
+//
+// XML 判定**复用 extractActionXML**，不另写一套正则——两套判定必然会漂移
+// （旧 bug 的根因）。
 func IsToolCallText(s string) bool {
 	if jsonValueOf(s, "action") == "tool" {
 		return true
 	}
-	return isNativeBareToolCall(s)
+	if isNativeBareToolCall(s) {
+		return true
+	}
+	// XML 形态：extractActionXML 只返回控制指令（tool/reply），
+	// 因此首个是 tool 即说明文本里含工具调用。
+	if reqs := extractActionXML(s); len(reqs) > 0 && reqs[0].Action == "tool" {
+		return true
+	}
+	return false
 }
 
 // isNativeBareToolCall 判断 JSON 文本是否为「缺 action 的原生 bare 工具调用」：

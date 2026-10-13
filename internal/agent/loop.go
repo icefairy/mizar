@@ -1115,7 +1115,21 @@ func isValidJSON(s string) bool {
 // 最后找缺 action 的原生 bare 工具调用（{"tool":...,"args":...}，模型搞丢 action 时常见）。
 // 返回提取到的原始 JSON 文本。文本内嵌的转义 tool JSON（reply.text 里的 \"action\"）
 // 不会被误提取——非转义的 { 开头才会进入解码尝试，转义形态解码必然失败。
+// ExtractActionJSON 从任意文本中提取第一个控制指令（返回协议 JSON 文本）。
+//
+// 同时支持 JSON 与 XML 两种形态：JSON 路径返回原 JSON 对象文本；
+// XML 路径（<tool name="x">…</tool> 或 <reply>…</reply>）**归一化为等价协议 JSON**，
+// 让调用方（wrapReplyJSON / 循环）能用同一套解析逻辑处理。
+//
+// 为何必须处理 XML：wrapReplyJSON 原先只尝试 JSON，模型输出 XML 时会被
+// 包成 reply → 循环当成最终回答，任务提前结束且 XML 标签原样显示给用户。
 func ExtractActionJSON(text string) (string, bool) {
+	// XML 优先：extractActionXML 只识别真正的控制标签（伪标签如 <toolbox> 会落空）
+	if reqs := extractActionXML(text); len(reqs) > 0 {
+		if b, err := json.Marshal(reqs[0]); err == nil {
+			return string(b), true
+		}
+	}
 	objs := ExtractAllActionJSON(text)
 	if len(objs) == 0 {
 		return "", false

@@ -23,6 +23,11 @@
 
 ### 🐛 修复
 
+- **模型输出 XML 工具调用时任务提前结束（一条回复就停）**：`IsToolCallText` / `ExtractActionJSON` 只认 JSON，完全不知道 XML 的存在，于是 LLM 层的 `wrapReplyJSON` 把 `<tool name="read">…</tool>` **包成了 `reply`** → 循环当成「任务完成」→ 立即返回，用户看到 XML 标签原文、工具根本没执行。实测于 Windows 会话（模型原生 tool_calls 与 XML 文本协议混用时会触发）。
+  - `IsToolCallText` 增加 XML 形态识别，**复用 `extractActionXML` 而非另写正则**（两套判定必然漂移，正是本 bug 的根因）
+  - `ExtractActionJSON` 增加 XML 分支，把 `<tool>` / `<reply>` **归一化为等价协议 JSON**，使 `wrapReplyJSON` 与循环共用同一套解析
+  - 顺带修：`<reply>答案</reply>` 此前会被包成 `{text:"<reply>答案</reply>"}`，标签原样显示给用户
+
 - **模型一轮发的多个工具调用被静默丢弃**：`toolCallsToText` 只取 `tcs[0]`（`callRequest` 是单数结构），其余工具调用直接丢弃且无任何痕迹——**模型的写操作会凭空消失**。OpenAI 原生 `tool_calls` 本就是数组，模型一轮并行发多个调用是合法行为。现已端到端支持按出现顺序依次执行：
   - **解析层**：新增 `ExtractAllActionJSON`（提取文本里全部控制 JSON，保序）与 `parseCallJSONs`（批量解析）；`ExtractActionJSON`/`parseCallJSON` 保留为「取首个」的兼容入口。
   - **LLM 层**：`toolCallsToText` 输出 `calls` 数组携带全部调用（按顺序），并**冗余保留** `tool`/`args` 单数字段携带首个——只认旧字段的读取方（如 subagent）不受影响。
