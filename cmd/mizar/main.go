@@ -23,6 +23,7 @@ import (
 	"mizar/internal/builtins"
 	"mizar/internal/config"
 	"mizar/internal/context"
+	"mizar/internal/diag"
 	"mizar/internal/engine"
 	"mizar/internal/jobs"
 	"mizar/internal/llm"
@@ -82,6 +83,17 @@ func main() {
 		fmt.Println("mizar", version)
 		return
 	}
+
+	// 诊断日志：落盘到 ~/.mizar/logs/，用于排查「任务莫名中止/卡死」类问题。
+	// 默认开启（TUI 下 stderr 即终端，诊断信息不能写那儿）；MIZAR_DIAG=0 或
+	// config.json 的 diag_log=false 可关闭。
+	diagOn := os.Getenv("MIZAR_DIAG") != "0"
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.DiagLog != nil {
+		diagOn = *cfg.DiagLog
+	}
+	diag.Init(diagOn)
+	defer diag.Close()
+	diag.Logf("tui", "mizar %s 启动: args=%v", version, os.Args[1:])
 
 	// LSP server 模式：通过 stdio 提供 LSP 能力
 	if *lspServer {
@@ -490,7 +502,6 @@ func main() {
 - 避免空转：同一方向最多探索 2 次；连续 2 次工具调用未获得新信息立即换更直接的方案。strings/find/grep 换花样搜同一目标属于空转。
 - 分步交付：任务无法在几步内完成时，先完成核心部分并及时给出阶段性回复。`
 	a.VerboseLog = func(msg string) { log.Print(msg) }
-
 	// Prompt Templates：~/.mizar/prompts/*.md + 项目 .mizar/prompts/*.md
 	promptReg := prompts.NewRegistry()
 	promptReg.AddDir(filepath.Join(config.ConfigDir(), "prompts"))
@@ -1645,7 +1656,9 @@ func main() {
 		}
 	}
 	if *tui {
+		diag.Logf("tui", "runTUI 会话=%s logs=%s", *sessionID, diag.Path())
 		runTUI(a, st, *sessionID, titleCache)
+		diag.Logf("tui", "runTUI 返回，进程结束")
 	} else {
 		interactive(a, st, *sessionID)
 	}

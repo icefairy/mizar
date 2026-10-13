@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"mizar/internal/context"
+	"mizar/internal/diag"
 	"mizar/internal/engine"
 	"mizar/internal/jobs"
 	"mizar/internal/lifecycle"
@@ -378,6 +379,7 @@ func (a *Agent) Run(task string) (string, error) {
 	// 创建 Run 级取消上下文：Abort()（ESC 取消）时立即中断在途 LLM 请求，
 	// 任务 goroutine 不再阻塞到流自然结束（否则 TUI 的 canceling 状态无法解除，
 	// 新消息只能排队等待）。Run 结束自动清理。
+	diag.Logf("agent", "Run 开始: task=%q initial=%d maxSteps=%d", truncate(task, 80), len(a.Initial), a.MaxSteps)
 	abortCtx, abortCancel := stdctx.WithCancel(stdctx.Background())
 	a.setRunCancel(abortCtx, abortCancel)
 	defer a.setRunCancel(nil, nil)
@@ -438,6 +440,7 @@ func (a *Agent) Run(task string) (string, error) {
 			}
 		}
 		if a.Aborted() {
+			diag.Logf("agent", "abort 检查点命中（循环头）step=%d", qc.Step)
 			q.Complete(errors.New("aborted by user"))
 			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
 			return "", ErrAborted
@@ -513,6 +516,7 @@ func (a *Agent) Run(task string) (string, error) {
 		}
 		q.EndOperation("llm")
 		if llmErr != nil {
+			diag.Logf("llm", "请求失败 step=%d aborted=%v err=%v", qc.Step, a.Aborted(), llmErr)
 			// 用户已请求中止（ESC 取消中断了在途 LLM 请求）：立即退出，
 			// 不走重试/压缩/弱模型宽容（否则 abort 后可能因重试继续空转）。
 			if a.Aborted() {
@@ -592,6 +596,7 @@ func (a *Agent) Run(task string) (string, error) {
 		// 中止检查点：ESC 中止发生在 LLM 请求进行中时，请求返回后立即退出，
 		// 不再执行随后的工具调用（否则用户看到的「已取消」之后还会多出一串工具步骤）。
 		if a.Aborted() {
+			diag.Logf("agent", "abort 检查点命中（解析后）step=%d", qc.Step)
 			q.Complete(errors.New("aborted by user"))
 			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
 			return "", ErrAborted

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"mizar/internal/agent"
+	"mizar/internal/diag"
 	"mizar/internal/plugins"
 )
 
@@ -538,12 +539,14 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 	var lastFinishReason string
 
 	br := bufio.NewReader(resp.Body)
+	var chunks int
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil && line == "" {
 			if err == io.EOF {
 				break
 			}
+			diag.Logf("llm", "流读取中断: chunks=%d err=%v", chunks, err)
 			return "", fmt.Errorf("stream read: %w", err)
 		}
 		line = strings.TrimSpace(line)
@@ -554,6 +557,7 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 		if data == "[DONE]" {
 			break
 		}
+		chunks++
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue // 容忍非标准行
@@ -608,6 +612,12 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 			merged.Function.Arguments += tc.Function.Arguments
 		}
 	}
+
+	// 日志：流结束状态（chunks/finish_reason）——排查「流突然结束/被截断」的关健证据。
+	// 正常应为 chunks>0 且 finish_reason=stop/tool_calls；若 chunks 少且无 finish_reason，
+	// 说明上游/网络提前断开（典型症状：任务看起来“自己停了”）。
+	diag.Logf("llm", "流结束: chunks=%d finish=%q content=%d thinking=%d toolCalls=%d",
+		chunks, lastFinishReason, content.Len(), thinking.Len(), len(toolOrder))
 
 	// 原生工具调用优先：合并后的分片转成 agent 循环可解析的 JSON 控制文本（附带说明文字作为 reason）
 	if len(toolOrder) > 0 {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"mizar/internal/agent"
 	"mizar/internal/builtins"
 	"mizar/internal/config"
+	"mizar/internal/diag"
 	"mizar/internal/session"
 )
 
@@ -213,6 +215,15 @@ type askPending struct {
 // sgrColor 生成 tview 动态颜色标记：[color]text[::-]
 func sgrColor(name, text string) string {
 	return "[" + name + "]" + text + "[::-]"
+}
+
+// truncateInput 截断输入用于日志（避免把整段粘贴内容写进诊断日志）。
+func truncateInput(s string, n int) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\n", "\\n"), "\r", "")
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // =============================================================================
@@ -694,6 +705,15 @@ func (m *tuiModel) startTask(input string) {
 	go func() {
 		// 任务 goroutine 退出时解除“取消中”状态（新任务可安全启动，不会再干扰本任务）
 		defer m.canceling.Store(false)
+		// panic 兜底：TUI 里 panic 会先让 tview 恢复屏幕再抛出，终端上看不出发生了什么
+		// （表现为“任务突然中止”）。这里落盘完整堆栈，便于事后定位。
+		defer func() {
+			if p := recover(); p != nil {
+				diag.Logf("panic", "agent 任务 goroutine panic: %v\n%s", p, debug.Stack())
+				panic(p)
+			}
+		}()
+		diag.Logf("agent", "run start: %q (input=%d chars)", truncateInput(input, 80), len(input))
 		reply, err := m.agent.Run(input)
 
 		// 任务结束：卸载流式回调、停止流式渲染，并强制刷新一次补上尾部增量；
@@ -801,10 +821,13 @@ func (m *tuiModel) startTask(input string) {
 			if errors.Is(err, agent.ErrAborted) {
 				// 用户已通过 ESC 主动取消：不重复报错（ESC 时已提示过），只做收尾
 				log.Printf("任务已被用户取消")
+				diag.Logf("agent", "run end: aborted by user")
 			} else {
+				diag.Logf("agent", "run end: err=%v", err)
 				m.addChatLineAsync(chatLine{role: "err", content: err.Error(), ts: time.Now()})
 			}
 		} else {
+			diag.Logf("agent", "run end: ok (reply=%d chars)", len(reply))
 			m.addChatLineAsync(chatLine{role: "bot", content: reply, ts: time.Now()})
 			if m.store != nil && m.sessionID != "" {
 				m.store.Append(m.sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
@@ -1068,6 +1091,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return nil
 		}
 		if event.Key() == tcell.KeyEsc && m.loading {
+			diag.Logf("tui", "ESC 收到（loading=true）→ 取消任务")
 			// 真正请求中止 agent 循环：循环在下一个检查点停止并返回 ErrAborted。
 			// 此前这里只做了 setLoading(false) + 打印提示，从未调用 Abort()，
 			// 导致 agent 在后台继续跑，工具调用/流式输出继续刷屏（任务实际未取消）。
@@ -1594,9 +1618,14 @@ func (m *tuiModel) Run() error {
 	sb.WriteString(banner() + "\n")
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
 
+	// 诊断日志：记录 TUI 生命周期与初始化参数，定位“启动后莫名退出”类问题
+	diag.Logf("tui", "start: model=%s session=%s logs=%s", m.agent.Model(), m.sessionID, diag.Path())
+
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)
-	return m.app.Run()
+	err := m.app.Run()
+	diag.Logf("tui", "exit: err=%v", err)
+	return err
 }
 
 // =============================================================================

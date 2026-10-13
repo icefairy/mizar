@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### ✨ 新增
+
+- **诊断日志（排查「任务莫名中止/卡死/退出」）**：新增 `internal/diag` 包，把关键事件落盘到 `~/.mizar/logs/mizar-YYYYMMDD.log`（单文件超 8MB 自动停写）。默认开启（TUI 下 stderr 就是终端，诊断信息不能写那儿）；`MIZAR_DIAG=0` 或 `config.json` 的 `"diag_log": false` 可关闭。日志标签与埋点：
+  - `[tui ]` 启动参数/日志路径、TUI 进入与退出（含 `app.Run()` 的 error）、**ESC 取消的按键到达**
+  - `[agent]` 每次 `Run` 的开始与结束（ok / aborted / err）、循环内两处 abort 检查点命中
+  - `[llm ]` 请求失败（含 `aborted=` 标志）、流结束状态（`chunks` / `finish_reason` / content 长度）
+  - `[panic]` agent 任务 goroutine 的 panic 全栈（此前 TUI 下 panic 会被 tview 恢复屏幕后重新抛出，终端上完全看不出发生了什么）
+  排查「任务突然停住」的三步：看 RUN 开始后有无 `run end`（无则进程/gstack 卡住或崩溃）；看 `[tui ] ESC 收到`（用户/终端误发取消）；看 `[llm ] 流结束` 的 `finish_reason`（提前断开=上游/网络问题）。
+
 ### 🐛 修复
 
 - **Windows 上「没按键却突然任务已取消」+ 输入框乱码**：根因是 `EnableMouse(true)` 在 Windows 上要求 conhost 向宿主终端请求鼠标上报，而 ConPTY 的 win32-input-mode 存在双重编码缺陷（microsoft/terminal#15083、#16343），鼠标移动/滚轮被还原成字符流灌进控制台输入缓冲；tcell 的 ConsoleScreen（`ReadConsoleInputW`，无 VT 序列解析）把它们当普通按键交给 tview → 输入框出现 `[<35;66;61M...` 乱码，且序列以 ESC 开头，被误判为用户按下 ESC → 无辜触发「任务已取消（当前步骤结束后停止）」。现 Windows 下默认不启用鼠标上报，整条链路断开；复制粘贴改用终端原生能力（拖选 + `Ctrl+Shift+C/V`、右键菜单），键盘侧 `Alt+L` / `Alt+C` 拷贝模式不受影响，聊天区滚动仍可用 `PgUp`/`PgDn`。需要鼠标的用户可设 `MIZAR_MOUSE=1` 强制开启。
