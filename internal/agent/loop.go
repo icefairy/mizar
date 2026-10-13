@@ -893,9 +893,9 @@ func parseCallJSONs(text string) ([]callRequest, error) {
 		// 检测到「想调工具但 JSON 畸形」：缺 tool 字段 / args 内层引号未转义等。
 		// 给出针对性纠错提示（比通用提示更能帮助弱模型快速自纠，避免反复失败）。
 		if IsToolCallText(text) {
-			return nil, fmt.Errorf("检测到工具调用 JSON 但格式错误（args 值内部的引号需转义为 \\\"，或缺少 tool 字段）。\n正确示例：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{\\\"command\\\": \\\"ls\\\"}\"}，或用 XML：<tool name=\"bash\">{\"command\": \"ls\"}</tool>")
+			return nil, fmt.Errorf("检测到工具调用但格式错误（args 值内部的引号需转义为 \\\"，或缺少 tool 字段）。\n正确格式：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{\\\"command\\\": \\\"ls\\\"}\"}\n注意：args 是一个 **JSON 字符串**（不是嵌套对象），内部引号必须转义。")
 		}
-		return nil, fmt.Errorf("无法识别的控制指令：未找到含 action 字段的合法 JSON 对象\n请输出格式如：<tool name=\"工具名\">参数 JSON</tool> 或 <reply>回答内容</reply>")
+		return nil, fmt.Errorf("无法识别的控制指令：未找到含 action 字段的合法 JSON 对象\n请输出 JSON：{\"action\":\"tool\",\"tool\":\"工具名\",\"args\":\"{...}\"}，或完成任务时：{\"action\":\"reply\",\"text\":\"最终回答\"}")
 	}
 	reqs := make([]callRequest, 0, len(extracted))
 	for _, one := range extracted {
@@ -918,7 +918,7 @@ func parseOneCallJSON(extracted string) (*callRequest, error) {
 				return &reqJSON, nil
 			}
 		}
-		return nil, fmt.Errorf("JSON 格式错误：%v\n原始输出片段：%s\n请使用 XML 格式或确保 JSON 完整闭合", err, truncate(extracted, 80))
+		return nil, fmt.Errorf("JSON 格式错误：%v\n原始输出片段：%s\n请确保 JSON 完整闭合；args 必须是转义后的 JSON 字符串", err, truncate(extracted, 80))
 	}
 	if reqJSON.Action == "" {
 		// 原生 bare 工具调用（缺 action 字段）：{"tool":...,"args":...}
@@ -927,7 +927,7 @@ func parseOneCallJSON(extracted string) (*callRequest, error) {
 			reqJSON.Action = "tool"
 			return &reqJSON, nil
 		}
-		return nil, fmt.Errorf("缺少 action 字段：提取到的 JSON 没有 action 字段\n请使用 XML 格式：<tool name=\"工具名\">参数 JSON</tool> 或 <reply>回答内容</reply>")
+		return nil, fmt.Errorf("缺少 action 字段：提取到的 JSON 没有 action 字段\n请输出：{\"action\":\"tool\",\"tool\":\"工具名\",\"args\":\"{...}\"} 或 {\"action\":\"reply\",\"text\":\"回答\"}")
 	}
 	return &reqJSON, nil
 }
