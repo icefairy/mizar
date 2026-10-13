@@ -23,6 +23,9 @@
 
 ### 🐛 修复
 
+- **模型输出「未闭合 XML 工具调用」时任务提前结束**（实测于 Windows 会话 idx134/136）：模型的真实输出是 `<tool name="bash">{"command":"…"}` —— **只写开标签、没有 `</tool>`**，JSON 参数本身完整，尾部甚至串出 `</system>`。旧模式1 正则 `<tool\s+name="([^"]+)">([^<]+)</tool>` 有两个硬条件不满足：① 必须出现 `</tool>`；② args 内**不能含 `<`**（`[^<]+`）。而真实 args 是 bash 命令，必含 `<<'EOF'` / `<#` 等。结果解析 0 个 → XML 被当纯文本 → 循环视为「任务完成」→ 一条回复就结束。
+  现改为**逐候选提取 + JSON 完备性校验**：从头找 `<tool name="x">`，用 `json.Decoder` 吃下第一个完整 JSON 对象（`InputOffset` 即边界），成功即成调用——无需 `</tool>`，也不受 args 内 `<` 影响。同时保留 arg_key/arg_value 与 reply 分支。
+
 - **模型输出 XML 工具调用时任务提前结束（一条回复就停）**：`IsToolCallText` / `ExtractActionJSON` 只认 JSON，完全不知道 XML 的存在，于是 LLM 层的 `wrapReplyJSON` 把 `<tool name="read">…</tool>` **包成了 `reply`** → 循环当成「任务完成」→ 立即返回，用户看到 XML 标签原文、工具根本没执行。实测于 Windows 会话（模型原生 tool_calls 与 XML 文本协议混用时会触发）。
   - `IsToolCallText` 增加 XML 形态识别，**复用 `extractActionXML` 而非另写正则**（两套判定必然漂移，正是本 bug 的根因）
   - `ExtractActionJSON` 增加 XML 分支，把 `<tool>` / `<reply>` **归一化为等价协议 JSON**，使 `wrapReplyJSON` 与循环共用同一套解析

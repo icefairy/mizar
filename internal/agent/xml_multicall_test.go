@@ -102,3 +102,60 @@ func parseCallJSONsOrFail(t *testing.T, text string) []callRequest {
 	}
 	return reqs
 }
+
+// 未闭合 XML：模型只写开标签 <tool name="x">{"..."}，没有 </tool>。
+//
+// 实测于 Windows 会话（idx134/136）：模型把 XML 开标签与 JSON 混写，
+// JSON 完整但缺闭合标签，尾部甚至串出 </system>。旧模式1 要求 `</tool>`
+// 且禁用 `<`（`[^<]+`），两个条件都不满足 → 解析 0 个 → XML 被当纯文本
+// → 循环视为「任务完成」→ 一条回复就结束。
+func TestExtractActionXMLUnclosedTag(t *testing.T) {
+	text := `<tool name="bash">{"command":"echo hi"}` // 故意不闭合
+	reqs := parseCallJSONsOrFail(t, text)
+	if len(reqs) != 1 || reqs[0].Tool != "bash" {
+		t.Fatalf("未闭合的 XML 工具调用应能解析, got %+v", reqs)
+	}
+	if reqs[0].Args != `{"command":"echo hi"}` {
+		t.Fatalf("args 应为完整 JSON, got %q", reqs[0].Args)
+	}
+}
+
+// args 内含 `<` 的 bash 命令（<# 注释、<<'EOF' heredoc、重定向）。
+// 旧模式1 的 `[^<]+` 遇到任何 < 就断，导致整条命令无法解析。
+func TestExtractActionXMLArgsContainAngleBrackets(t *testing.T) {
+	text := `<tool name="bash">{"command":"python3 - <<'EOF'\n# <# 注释\nprint(1)\nEOF"}</tool>`
+	reqs := parseCallJSONsOrFail(t, text)
+	if len(reqs) != 1 || reqs[0].Tool != "bash" {
+		t.Fatalf("args 含 < 的命令应能解析, got %+v", reqs)
+	}
+	if !strings.Contains(reqs[0].Args, "<<'EOF'") {
+		t.Fatalf("args 应保留 heredoc 内容, got %q", truncate(reqs[0].Args, 80))
+	}
+}
+
+// 尾部串出其它标签（</system>）时，仍应取到那一个完整 JSON 调用。
+func TestExtractActionXMLTrailingGarbage(t *testing.T) {
+	text := `<tool name="read">{"path":"x"}</system></system>`
+	reqs := parseCallJSONsOrFail(t, text)
+	if len(reqs) != 1 || reqs[0].Tool != "read" {
+		t.Fatalf("尾部有杂标签时应仍能解析, got %+v", reqs)
+	}
+	if strings.Contains(reqs[0].Args, "</system>") {
+		t.Fatalf("args 不应吞入尾部杂标签: %q", reqs[0].Args)
+	}
+}
+
+// 一行里多个未闭合调用：必须全部提取（JSON 边界即调用边界）。
+func TestExtractActionXMLMultipleUnclosed(t *testing.T) {
+	text := `<tool name="a">{"p":1}` + "\n" + `<tool name="b">{"q":2}`
+	reqs := parseCallJSONsOrFail(t, text)
+	if len(reqs) != 2 {
+		t.Fatalf("应提取 2 个未闭合调用, got %d: %+v", len(reqs), reqs)
+	}
+	if reqs[0].Tool != "a" || reqs[1].Tool != "b" {
+		t.Fatalf("工具名/顺序不对: %+v", reqs)
+	}
+	if reqs[0].Args != `{"p":1}` || reqs[1].Args != `{"q":2}` {
+		t.Fatalf("args 应各自独立, got %q / %q", reqs[0].Args, reqs[1].Args)
+	}
+}

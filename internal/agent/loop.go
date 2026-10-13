@@ -950,14 +950,35 @@ func extractActionXML(text string) []callRequest {
 		s = s[1:]
 	}
 
-	// 模式1: <tool name="x">JSON</tool>（args 直接是 JSON 体，不含嵌套标签）
-	reTool := regexp.MustCompile(`<tool\s+name="([^"]+)">([^<]+)</tool>`)
-	if ms := reTool.FindAllStringSubmatch(s, -1); len(ms) > 0 {
-		reqs := make([]callRequest, 0, len(ms))
-		for _, m := range ms {
-			reqs = append(reqs, callRequest{Action: "tool", Tool: m[1], Args: strings.TrimSpace(m[2])})
+	// 模式1: <tool name="x">JSON</tool>（args 直接是 JSON 体）
+	//
+	// 正则用 `([\s\S]*?)</tool>` 而非 `([^<]+)</tool>`，且**闭合标签可缺失**：
+	// 实测模型会把 XML 开标签与 JSON 混写，并出现两种畸形：
+	//   ① args 内是 bash 命令，含 <# 与 <<'EOF' 等字符（`[^<]+` 会直接断掉）
+	//   ② 只写开标签不写 </tool>（JSON 完整但未闭合，甚至尾部串出 </system>）
+	// 因此这里改为**逐候选提取 + JSON 完备性校验**：从头找 `<tool name="x">`，
+	// 用 json.Decoder 吃下第一个完整 JSON 对象，成功即成调用（无需 </tool>）。
+	reOpen := regexp.MustCompile(`<tool\s+name="([^"]+)">`)
+	if locs := reOpen.FindAllStringSubmatchIndex(s, -1); len(locs) > 0 {
+		var reqs []callRequest
+		for _, loc := range locs {
+			name := s[loc[2]:loc[3]]
+			body := s[loc[1]:] // 开标签之后的内容
+			// 先试 JSON（多数情况 args 就是 JSON 体）；失败则交由模式2 处理 arg_key 形态
+			dec := json.NewDecoder(strings.NewReader(body))
+			var obj map[string]any
+			if err := dec.Decode(&obj); err != nil {
+				continue
+			}
+			args := strings.TrimSpace(body[:dec.InputOffset()])
+			if args == "" {
+				continue
+			}
+			reqs = append(reqs, callRequest{Action: "tool", Tool: name, Args: args})
 		}
-		return reqs
+		if len(reqs) > 0 {
+			return reqs
+		}
 	}
 
 	// 模式2: <tool name="x" ...><arg_key>k</arg_key><arg_value>v</arg_value>…</tool>
