@@ -510,12 +510,14 @@ func main() {
 	}
 	promptReg.Reload()
 	log.Printf("Prompt 模板加载 %d 个", len(promptReg.List()))
-	// 注入 /handoff 命令：快速生成交接文档（固化进程序，非插件）
+	// 注入 /handoff 命令：快速生成交接文档（固化进程序，非插件）。
+	// 传入 a 以纳入会话上下文（当前任务/历史/工具轨迹/todo/目标）——
+	// 仅 git 信息无法回答「刚才在干什么、下一步做什么」。
 	a.Commands.Register(agent.Command{
 		Name:        "handoff",
-		Description: "生成交接文档 handoff.md（/handoff [备注/下一步]）",
+		Description: "生成交接文档 handoff.md（含当前任务、最近对话与工具轨迹；/handoff [备注/下一步]）",
 		Run: func(args string) (string, error) {
-			return writeHandoff(wd, args), nil
+			return writeHandoff(wd, args, a), nil
 		},
 	})
 	// 注入 /templates 命令

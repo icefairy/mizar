@@ -127,6 +127,13 @@ type Agent struct {
 	BgReview     *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
 	StatsData    *StatsDataRef     // 会话统计（nil = 不启用）
 
+	// CurrentTask 最近/正在执行的任务（Run 开始时记录）。
+	// 为何需要：a.Initial 只在 Run 结束后才追加本次对话，因此运行中执行
+	// /handoff 时无从得知「当前在做什么」——而交接文档最该写的恰恰是这个。
+	// 历史与最终回复可直接读 a.Initial（调用方在 Run 结束后已追加）。
+	currentTask string
+	runStateMu  sync.Mutex
+
 	// AuxLLM 辅助模型（judge / background review 用；nil = 使用主 LLM）
 	AuxLLM AuxiliaryLLM
 
@@ -198,6 +205,20 @@ var toolCallSeq atomic.Uint64
 // 仅用于文本协议/弱模型场景（模型没给原生 id），格式对齐 OpenAI 风格。
 func nextToolCallID() string {
 	return fmt.Sprintf("call_%d", toolCallSeq.Add(1))
+}
+
+// SetCurrentTask 记录正在执行的任务（Run 开始时调用）。线程安全。
+func (a *Agent) SetCurrentTask(task string) {
+	a.runStateMu.Lock()
+	defer a.runStateMu.Unlock()
+	a.currentTask = task
+}
+
+// CurrentTask 返回正在执行/最近执行的任务（无记录时为空串）。线程安全。
+func (a *Agent) CurrentTask() string {
+	a.runStateMu.Lock()
+	defer a.runStateMu.Unlock()
+	return a.currentTask
 }
 
 // New 创建 Agent。
@@ -410,6 +431,9 @@ func (a *Agent) Run(task string) (string, error) {
 	// 任务 goroutine 不再阻塞到流自然结束（否则 TUI 的 canceling 状态无法解除，
 	// 新消息只能排队等待）。Run 结束自动清理。
 	diag.Logf("agent", "Run 开始: task=%q initial=%d maxSteps=%d", truncate(task, 80), len(a.Initial), a.MaxSteps)
+	// 记录当前任务（开始时写，使运行中执行 /handoff 也能看到「在做什么」）。
+	// 历史与最终回复从 a.Initial 读（调用方在 Run 结束后追加），无需在此重复记录。
+	a.SetCurrentTask(task)
 	abortCtx, abortCancel := stdctx.WithCancel(stdctx.Background())
 	a.setRunCancel(abortCtx, abortCancel)
 	defer a.setRunCancel(nil, nil)
