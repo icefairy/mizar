@@ -883,9 +883,9 @@ func parseCallJSON(text string) (*callRequest, error) {
 // 多调用支持修复的问题：模型合法地并行发多个工具调用时，旧实现只取首个，
 // 其余被静默丢弃——模型的写操作会凭空消失。现按出现顺序全部返回，由循环依次执行。
 func parseCallJSONs(text string) ([]callRequest, error) {
-	// 优先尝试 XML 格式解析（单数；XML 多工具形态罕见）
-	if req, ok := extractActionXML(text); ok {
-		return []callRequest{*req}, nil
+	// 优先尝试 XML 格式解析（可能命中多个 <tool> 标签）
+	if reqs := extractActionXML(text); len(reqs) > 0 {
+		return reqs, nil
 	}
 	// JSON 格式：可能命中多个
 	extracted := ExtractAllActionJSON(text)
@@ -932,82 +932,93 @@ func parseOneCallJSON(extracted string) (*callRequest, error) {
 	return &reqJSON, nil
 }
 
-// extractActionXML 从 XML 标签格式中提取控制指令
-func extractActionXML(text string) (*callRequest, bool) {
+// extractActionXML 从 XML 标签格式中提取控制指令（返回**全部**，保序）。
+//
+// 模型一轮可以合法地发多个 <tool> 标签（与原生 tool_calls 数组等价）。
+// 旧实现用 FindStringSubmatch 只取首个，其余被**静默丢弃**——模型的操作凭空消失。
+// 现改为 FindAllStringSubmatch 逐段解析，并把 arg_key/arg_value 与
+// 直接 body 两种形态的分隔符从贪婪改为**非贪婪**（否则多个标签会互相吞并）。
+//
+// 返回 nil 表示未识别到 XML 控制指令（调用方回退 JSON 解析）。
+func extractActionXML(text string) []callRequest {
 	s := strings.TrimSpace(text)
 	if s == "" {
-		return nil, false
+		return nil
 	}
 	// 移除开头的 { (模型有时会输出 )
 	if strings.HasPrefix(s, "{") {
 		s = s[1:]
 	}
 
-	// 模式1: 标准 XML <tool name="xxx">JSON</tool>
+	// 模式1: <tool name="x">JSON</tool>（args 直接是 JSON 体，不含嵌套标签）
 	reTool := regexp.MustCompile(`<tool\s+name="([^"]+)">([^<]+)</tool>`)
-	if matches := reTool.FindStringSubmatch(s); matches != nil {
-		req := &callRequest{
-			Action: "tool",
-			Tool:   matches[1],
-			Args:   strings.TrimSpace(matches[2]),
+	if ms := reTool.FindAllStringSubmatch(s, -1); len(ms) > 0 {
+		reqs := make([]callRequest, 0, len(ms))
+		for _, m := range ms {
+			reqs = append(reqs, callRequest{Action: "tool", Tool: m[1], Args: strings.TrimSpace(m[2])})
 		}
-		return req, true
+		return reqs
 	}
 
-	// 模式2: 混合格式 <tool name="xxx">\n<arg_key>key</arg_key>\n<arg_value>value</arg_value>\n</tool>
-	reMixed := regexp.MustCompile(`<tool\s+name="([^"]+)"[^>]*>([\s\S]*)</tool>`)
-	if matches := reMixed.FindStringSubmatch(s); matches != nil {
-		toolName := matches[1]
-		body := matches[2]
-
-		// 解析 arg_key/arg_value 对
-		argsMap := make(map[string]string)
-		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([\s\S]*)</arg_value>`)
-		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
-			argsMap[m[1]] = m[2]
+	// 模式2: <tool name="x" ...><arg_key>k</arg_key><arg_value>v</arg_value>…</tool>
+	// 注意 `([\s\S]*?)` 必须非贪婪：贪婪会跨过第一个 </tool> 吞并后续标签。
+	reMixed := regexp.MustCompile(`<tool\s+name="([^"]+)"[^>]*>([\s\S]*?)</tool>`)
+	reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([\s\S]*?)</arg_value>`)
+	if ms := reMixed.FindAllStringSubmatch(s, -1); len(ms) > 0 {
+		reqs := make([]callRequest, 0, len(ms))
+		for _, m := range ms {
+			toolName, body := m[1], m[2]
+			argsMap := map[string]string{}
+			for _, am := range reArg.FindAllStringSubmatch(body, -1) {
+				argsMap[am[1]] = am[2]
+			}
+			if len(argsMap) > 0 {
+				argsJSON, err := json.Marshal(argsMap)
+				if err != nil {
+					continue // map[string]string 不会失败；防御性跳过
+				}
+				reqs = append(reqs, callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)})
+			} else if b := strings.TrimSpace(body); b != "" {
+				reqs = append(reqs, callRequest{Action: "tool", Tool: toolName, Args: b})
+			}
 		}
-
-		// 构建 args JSON
-		if len(argsMap) > 0 {
-			argsJSON, _ := json.Marshal(argsMap)
-			return &callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)}, true
+		if len(reqs) > 0 {
+			return reqs
 		}
 	}
 
-	// 模式2b: 带引号的 "tool 格式 (模型有时输出 "tool 而不是 <tool)
-	reMixed2 := regexp.MustCompile(`"tool\s+name="([^"]+)"[^>]*>([\s\S]*)</tool>`)
-	if matches := reMixed2.FindStringSubmatch(s); matches != nil {
-		toolName := matches[1]
-		body := matches[2]
-
-		// 解析 arg_key/arg_value 对
-		argsMap := make(map[string]string)
-		reArg := regexp.MustCompile(`<arg_key>([^<]+)</arg_key>\s*<arg_value>([\s\S]*)</arg_value>`)
-		for _, m := range reArg.FindAllStringSubmatch(body, -1) {
-			argsMap[m[1]] = m[2]
+	// 模式2b: 带引号的 "tool 格式（模型有时输出 "tool 而不是 <tool）
+	reMixed2 := regexp.MustCompile(`"tool\s+name="([^"]+)"[^>]*>([\s\S]*?)</tool>`)
+	if ms := reMixed2.FindAllStringSubmatch(s, -1); len(ms) > 0 {
+		reqs := make([]callRequest, 0, len(ms))
+		for _, m := range ms {
+			toolName, body := m[1], m[2]
+			argsMap := map[string]string{}
+			for _, am := range reArg.FindAllStringSubmatch(body, -1) {
+				argsMap[am[1]] = am[2]
+			}
+			if len(argsMap) == 0 {
+				reqs = append(reqs, callRequest{Action: "tool", Tool: toolName, Args: strings.TrimSpace(body)})
+				continue
+			}
+			argsJSON, err := json.Marshal(argsMap)
+			if err != nil {
+				continue
+			}
+			reqs = append(reqs, callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)})
 		}
-
-		// 如果没有 arg_key/arg_value，直接使用 body 作为 args
-		if len(argsMap) == 0 {
-			return &callRequest{Action: "tool", Tool: toolName, Args: strings.TrimSpace(body)}, true
+		if len(reqs) > 0 {
+			return reqs
 		}
-
-		// 构建 args JSON
-		argsJSON, _ := json.Marshal(argsMap)
-		return &callRequest{Action: "tool", Tool: toolName, Args: string(argsJSON)}, true
 	}
 
 	// 模式3: 标准 reply
 	reReply := regexp.MustCompile(`<reply>([\s\S]+)</reply>`)
-	if matches := reReply.FindStringSubmatch(s); matches != nil {
-		req := &callRequest{
-			Action: "reply",
-			Text:   strings.TrimSpace(matches[1]),
-		}
-		return req, true
+	if m := reReply.FindStringSubmatch(s); m != nil {
+		return []callRequest{{Action: "reply", Text: strings.TrimSpace(m[1])}}
 	}
 
-	return nil, false
+	return nil
 }
 
 // tryFixJSON 尝试修复常见的 JSON 格式错误。

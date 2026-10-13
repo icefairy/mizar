@@ -4,6 +4,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,11 +124,15 @@ func (sm *SubagentManager) runSubagent(handle *SubagentHandle, req SubagentLaunc
 		{Role: RoleSystem, Content: childSystem},
 		{Role: RoleUser, Content: req.Goal},
 	}
+	// lastText 记录最近一轮模型给出的文字（含 reply.text / 开场说明），
+	// 供“跑满步数 / LLM 出错”时作为兑底结果，避免产出全丢。
+	lastText := ""
 
 	for step := 0; step < req.MaxSteps; step++ {
 		reply, err := sm.parentLLM.ChatWithTools(msgs, nil)
 		if err != nil {
 			handle.Error = err.Error()
+			handle.Result = lastText // 出错也要交出此前轮次的产出
 			return
 		}
 		handle.StepsUsed = step + 1
@@ -137,6 +142,14 @@ func (sm *SubagentManager) runSubagent(handle *SubagentHandle, req SubagentLaunc
 			Text   string `json:"text,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(reply), &parsed); err != nil || parsed.Action != "reply" {
+			// 子 agent 本轮没给最终回答（工具调用轮 / 畸形 JSON / 多调用轮 / 纯文字）：
+			// 记录本轮文本作为**候选结果**，再要求它直接回结果。
+			// 关键：若它最终跑满步数或 LLM 出错，候选结果会在收尾处兑底成为 handle.Result——
+			// 旧实现只在成功分支赋值 handle.Result，导致所有轮次的产出全部丢失，
+			// 调用方只能拿到“step limit exceeded”而拿不到任何内容。
+			if t := extractAssistantText(reply); t != "" {
+				lastText = t
+			}
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: "Subagent mode: please reply directly with your result."})
 			continue
@@ -145,6 +158,34 @@ func (sm *SubagentManager) runSubagent(handle *SubagentHandle, req SubagentLaunc
 		return
 	}
 	handle.Error = "subagent: step limit exceeded"
+	handle.Result = lastText // 步数耗尽：交回最后一轮产出，而不是空结果
+}
+
+// extractAssistantText 从模型一轮输出里取出“可当结果用”的文字。
+//   - {"action":"reply","text":"..."} → text
+//   - 混合文本（先说话再调工具）      → 去掉控制 JSON 后的说明文字
+//   - 其它畸形/空                     → ""
+//
+// 抽为独立函数是为了让 subagent 的兑底逻辑可测，且不依赖 agent 包内的流式提取器。
+func extractAssistantText(reply string) string {
+	var parsed struct {
+		Action  string `json:"action"`
+		Text    string `json:"text,omitempty"`
+		Reason  string `json:"reason,omitempty"`
+		Tool    string `json:"tool,omitempty"`
+		Command string `json:"command,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(reply)), &parsed); err == nil {
+		if parsed.Action == "reply" && parsed.Text != "" {
+			return parsed.Text
+		}
+		return parsed.Reason
+	}
+	// 非 JSON（或畸形）：若不像工具控制文本，就当作模型直说的话
+	if IsToolCallText(reply) {
+		return ""
+	}
+	return strings.TrimSpace(reply)
 }
 
 func (sm *SubagentManager) Get(id string) (*SubagentHandle, bool) {

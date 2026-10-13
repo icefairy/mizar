@@ -243,7 +243,13 @@ func toolGetScreenInfo(args string) (string, error) {
 // toolListWindows 获取窗口列表。
 func toolListWindows(args string) (string, error) {
 	var p struct{ Title string }
-	json.Unmarshal([]byte(args), &p)
+	// args 可省（空 = 列出全部窗口）；但非空时必须是合法 JSON，
+	// 否则旧行为会静默把 Title 当空串处理——用户以为筛了标题，实际拿到全量列表。
+	if a := strings.TrimSpace(args); a != "" && a != "{}" {
+		if err := json.Unmarshal([]byte(a), &p); err != nil {
+			return "", fmt.Errorf("list_windows: args must be JSON {title?: string}: %w", err)
+		}
+	}
 
 	var results []string
 	// 使用回调函数枚举窗口
