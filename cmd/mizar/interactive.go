@@ -106,9 +106,10 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	}
 
 	// 补全器：支持 @cmd: / @tool: / @file: / @路径 四种模式
+	// 仅在 @ 处于 token 边界时触发（否则粘贴 p@ssw0rd 这类文本也会弹候选）
 	rl.SetCompleter(func(line string) (res []string) {
-		if idx := strings.LastIndex(line, "@"); idx >= 0 {
-			after := strings.TrimSpace(line[idx+1:])
+		if idx := lastAtMentionIndex(line); idx >= 0 {
+			after := atAfterToken(line, idx)
 			res = completeAtRaw(after, cmdNames, toolNames)
 			return
 		}

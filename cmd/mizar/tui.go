@@ -1233,8 +1233,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return
 		}
 		// @ 路径/工具/命令补全
-		if atIdx := strings.LastIndex(current, "@"); atIdx >= 0 {
-			after := strings.TrimSpace(current[atIdx+1:])
+		if atIdx := lastAtMentionIndex(current); atIdx >= 0 {
 			// 收集工具名列表
 			var toolNames []string
 			for _, t := range m.agent.Plugins.Tools() {
@@ -1244,12 +1243,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			for _, c := range m.agent.Commands.List() {
 				cmdNames = append(cmdNames, "/"+c.Name)
 			}
-			candidates := completeAtRaw(after, cmdNames, toolNames)
-			if len(candidates) == 0 {
-				m.autoComplete.SetText("")
-				m.autoCompleteList = nil
-				return
-			}
+			candidates := completeAtRaw(atAfterToken(current, atIdx), cmdNames, toolNames)
 			if len(candidates) == 1 {
 				// 唯一匹配：填入候选
 				// 如果候选是纯路径（不含 @cmd:/@tool:/@file: 等分类前缀），保留 @ 后内容不变
@@ -1311,9 +1305,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			} else {
 				m.autoComplete.SetText("")
 			}
-		} else if idx := strings.LastIndex(current, "@"); idx >= 0 {
-			// @ 补全：检测 @ 后面的内容
-			after := strings.TrimSpace(current[idx+1:])
+		} else if idx := lastAtMentionIndex(current); idx >= 0 {
+			// @ 补全：仅在 @ 处于 token 边界时触发（否则粘贴密码也会弹候选）
+			after := atAfterToken(current, idx)
 			var toolNames []string
 			for _, t := range m.agent.Plugins.Tools() {
 				toolNames = append(toolNames, t.Name)
