@@ -8,6 +8,8 @@
 
 ### 🐛 修复
 
+- **Windows 上「没按键却突然任务已取消」+ 输入框乱码**：根因是 `EnableMouse(true)` 在 Windows 上要求 conhost 向宿主终端请求鼠标上报，而 ConPTY 的 win32-input-mode 存在双重编码缺陷（microsoft/terminal#15083、#16343），鼠标移动/滚轮被还原成字符流灌进控制台输入缓冲；tcell 的 ConsoleScreen（`ReadConsoleInputW`，无 VT 序列解析）把它们当普通按键交给 tview → 输入框出现 `[<35;66;61M...` 乱码，且序列以 ESC 开头，被误判为用户按下 ESC → 无辜触发「任务已取消（当前步骤结束后停止）」。现 Windows 下默认不启用鼠标上报，整条链路断开；复制粘贴改用终端原生能力（拖选 + `Ctrl+Shift+C/V`、右键菜单），键盘侧 `Alt+L` / `Alt+C` 拷贝模式不受影响，聊天区滚动仍可用 `PgUp`/`PgDn`。需要鼠标的用户可设 `MIZAR_MOUSE=1` 强制开启。
+- **Windows 粘贴多行文本被逐行提交**：tcell 在 Windows 上 `EnablePaste` 是空实现（无 bracketed paste），粘贴多行时换行符变成裸 Enter，导致半截内容被发送。现增加粘贴换行防护：毫秒级连发的 Enter 判定为粘贴换行（插入换行而非提交），人手打字间隔（≥8ms）仍正常提交；`MIZAR_PASTE_GUARD=0` 可关闭。
 - **粘贴带 `@` 的文本被误解析成文件引用**：`resolveAtRef` 原先取行内最后一个 `@` 并把其后整段文字当路径，粘贴密码（`p@ssw0rd`）、邮箱（`user@example.com`）会被改写成「读取文件 xxx」。现对齐 pi 的边界规则：① `@` 必须处于 token 边界（行首或前一字符是空白/标点），词内 `@` 一律不解析；② 裸路径需真实存在或带路径形态（含 `/`、`./` `../` `~/` 开头）才解析；③ 显式前缀 `@cmd:` `@tool:` `@file:` `@read:` `@dir:` 表达明确意图，照旧解析；④ 带空格路径用 `@"my file.txt"` 引号形式；⑤ 引用后的自然语言不再被吞掉。补全侧同步只在边界处触发，粘贴密码不再弹候选。
 
 ---

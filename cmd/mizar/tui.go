@@ -191,6 +191,13 @@ type tuiModel struct {
 	// 期间新输入一律排队，防止新任务的 Run→resetAbort() 清掉旧任务的
 	// abort 标志（否则旧任务“复活”继续跑）及两个 Run 并发争用 Agent 状态。
 	canceling atomic.Bool
+
+	// 粘贴换行防护（见 platform_input.go）：Windows 无 bracketed paste，
+	// 粘贴多行文本时换行会变成裸 Enter。记录最近一次按键时间，毫秒级
+	// 连发的 Enter 判定为粘贴换行（插入换行而非提交）。
+	pasteGuard    bool
+	lastKeyAt     time.Time
+	lastNewlineAt time.Time
 }
 
 // askPending 一次待回答的提问（可能含多个问题，逐问收集）。
@@ -875,9 +882,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		lines: []chatLine{
 			{role: "system", content: banner(), ts: time.Now()},
 		},
-		stats:    tuiStats{ModelName: a.Model()},
-		clip:     newClipboard(),
-		copyMode: false,
+		stats:      tuiStats{ModelName: a.Model()},
+		clip:       newClipboard(),
+		copyMode:   false,
+		pasteGuard: pasteGuardEnabledFor(os.Getenv),
 		renderer: func() *glamour.TermRenderer {
 			r, _ := glamour.NewTermRenderer(
 				glamour.WithAutoStyle(),
@@ -972,8 +980,11 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 
 	// 应用
 	m.app = tview.NewApplication()
-	m.app.EnableMouse(true)
-	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理
+	// Windows（ConPTY/Windows Terminal）下默认不启用鼠标上报：conhost 的
+	// win32-input-mode 双重编码缺陷会把鼠标事件还原成字符泄漏进输入框，
+	// 既产生乱码又会被误判成 ESC → 无辜「任务已取消」。详见 platform_input.go。
+	m.app.EnableMouse(shouldEnableMouse())
+	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理（Unix 生效；Windows 由 pasteGuard 兜底）
 
 	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
 	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
@@ -1002,6 +1013,21 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 
 	// 全局按键捕获：Enter 发送、Alt+Enter 换行
 	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// 粘贴换行防护：Windows 无 bracketed paste，粘贴多行文本的换行会变成裸 Enter。
+		// 记录按键时间，毫秒级连发的 Enter 视为粘贴换行 → 插入换行而非提交。
+		// 注意：本函数返回 nil 表示事件被吞掉（InputCapture 语义），与 MouseCapture 相反。
+		now := time.Now()
+		defer func() { m.lastKeyAt = now }()
+		if m.pasteGuard && event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModAlt == 0 {
+			if isPasteNewline(now, m.lastKeyAt) || isPasteNewline(now, m.lastNewlineAt) {
+				m.lastNewlineAt = now
+				m.numpadState = 0 // 小键盘序列不会含 Enter，顺带复位避免状态卡住
+				cur := m.inputField.GetText()
+				m.inputField.SetText(cur+"\n", true)
+				return nil
+			}
+		}
+
 		// 小键盘数字键状态机：\x1bOx → 数字
 		// tcell 把 \x1bOx 拆成 Alt+O 事件 + 普通字母事件
 		// 我们需要组合它们并映射为数字
