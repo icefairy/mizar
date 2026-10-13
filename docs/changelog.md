@@ -23,6 +23,20 @@
 
 ### 🐛 修复
 
+- **模型在长会话后退化为纯文本（发「继续」一条就结束）**：这是根因最深的一处。mizar 把工具交换历史一律压成 **普通文本** 发给 LLM：
+  ```text
+  assistant content={"action":"tool",...}     ← 文本，不是原生 tool_calls
+  user      content=工具结果: {...}              ← 文本，不是 role:"tool"
+  ```
+  模型看到的历史是「有人一直在念 JSON」，它会**模仿这种模式**——用文字描述而不真的发 tool_call（实测：长会话后 `finish="stop"`、`toolCalls=0`、内容里写 `<tool name=...>` 或「我用 bash 直接写入」）。
+  现对齐 pi agent（其 `convertToLlm` 原样透传 `toolResult`，provider 层再转成 `role:"tool"` + `tool_call_id`）：新增 `llm.encodeMessages`，**全程用 OpenAI 原生字段**：
+  - assistant + `KindToolCall` → `content`(仅前导说明文字) + `tool_calls[]`(id/type/function)
+  - `KindToolResult` → `role:"tool"` + `tool_call_id` + 结果正文（剥掉 `工具结果: {...}` 包装）
+  - **孤儿结果保护**：历史被 `-history N` 截断时开头可能落在一条工具结果上，而 OpenAI 严格要求 `role:"tool"` 必须回应前面的 `tool_calls`（否则 400）。这类孤儿（含旧会话缺 `ToolCallID` 的）**降级为普通 user 文本**——保留信息又不违反协议。实测截断后的真实会话，修复前会发出 11 条 `role=tool`（全部孤儿，必然 400），修复后为 0。
+  - 旧会话兼容：缺 `ToolCalls` 字段时从 `ToolName`/`ToolArgs` 或 `Content` 里的 JSON 回退，并分配稳定的合成 ID。
+
+- **`-session` 恢复会话时历史不显示（要发一条消息才出现）**：`newTuiModel` 已把 `a.Initial` 的历史填进 `m.lines`（恢复逻辑本身正确），但 `Run()` 的初始渲染只 `SetText(banner())`，把 `m.lines` 抹掉了。于是用户必须发一条消息、触发 `renderAllDirect` 后才看到历史。现 `Run()` 改为调用 `renderAllDirect()`（它不访问 `m.app`，在事件循环启动前调用是安全的）。
+
 - **模型输出「未闭合 XML 工具调用」时任务提前结束**（实测于 Windows 会话 idx134/136）：模型的真实输出是 `<tool name="bash">{"command":"…"}` —— **只写开标签、没有 `</tool>`**，JSON 参数本身完整，尾部甚至串出 `</system>`。旧模式1 正则 `<tool\s+name="([^"]+)">([^<]+)</tool>` 有两个硬条件不满足：① 必须出现 `</tool>`；② args 内**不能含 `<`**（`[^<]+`）。而真实 args 是 bash 命令，必含 `<<'EOF'` / `<#` 等。结果解析 0 个 → XML 被当纯文本 → 循环视为「任务完成」→ 一条回复就结束。
   现改为**逐候选提取 + JSON 完备性校验**：从头找 `<tool name="x">`，用 `json.Decoder` 吃下第一个完整 JSON 对象（`InputOffset` 即边界），成功即成调用——无需 `</tool>`，也不受 args 内 `<` 影响。同时保留 arg_key/arg_value 与 reply 分支。
 

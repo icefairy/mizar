@@ -1613,13 +1613,17 @@ func (m *tuiModel) submitInput(s string) {
 }
 
 func (m *tuiModel) Run() error {
-	// 初始渲染 banner（直接 SetText，因事件循环尚未启动）
-	var sb strings.Builder
-	sb.WriteString(banner() + "\n")
-	m.textView.SetText(sb.String()).SetDynamicColors(true)
+	// 初始渲染：直接 SetText（因事件循环尚未启动，不能用 QueueUpdateDraw）。
+	//
+	// 必须走 renderAllDirect 而不是只写 banner：newTuiModel 已把会话历史
+	// （a.Initial）填进 m.lines，只写 banner 会让历史不显示——
+	// 用户发一条消息后 renderAllDirect 才首次运行，历史才“突然出现”。
+	// renderAllDirect 不访问 m.app，在事件循环前调用是安全的。
+	m.renderAllDirect()
 
 	// 诊断日志：记录 TUI 生命周期与初始化参数，定位“启动后莫名退出”类问题
-	diag.Logf("tui", "start: model=%s session=%s logs=%s", m.agent.Model(), m.sessionID, diag.Path())
+	diag.Logf("tui", "start: model=%s session=%s logs=%s msgs=%d",
+		m.agent.Model(), m.sessionID, diag.Path(), len(m.lines))
 
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)

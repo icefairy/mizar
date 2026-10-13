@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"strings"
@@ -73,9 +74,26 @@ type toolCall struct {
 }
 
 // chatMsg 对话消息。Content 为 string（纯文本）或 []chatContentPart（多模态）。
+//
+// 工具交换走**原生字段**（对齐 pi agent 与 OpenAI 协议）：
+//   - assistant 发起调用 → ToolCalls（tool_calls 数组，含 id/function.name/arguments）
+//   - 工具结果 → Role="tool" + ToolCallID（配对的 tool_call_id）
+// 这层编码见 encodeMessages。
 type chatMsg struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role       string    `json:"role"`
+	Content    any       `json:"content"`
+	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string    `json:"tool_call_id,omitempty"`
+}
+
+// wireToolCall OpenAI 原生 tool_calls 元素。
+type wireToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"` // 固定 "function"
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"` // JSON 字符串
+	} `json:"function"`
 }
 
 // chatContentPart 多模态内容分片（OpenAI 兼容 content 数组）。
@@ -162,9 +180,11 @@ const reasonMaxLen = 500
 // callSpec 控制协议里的单个工具调用（文本协议形态）。
 // Args 是**原始参数字符串**（如 `{"command":"ls"}`），不是解析后的对象——
 // agent 循环把它原样交给工具实现自行 Unmarshal，与单数形态的历史行为一致。
+// ID 为原生 tool_call id（有则透传，用于回填 tool_call_id；无则由循环合成）。
 type callSpec struct {
 	Tool string `json:"tool"`
 	Args string `json:"args"`
+	ID   string `json:"id,omitempty"`
 }
 
 // callRequestWire 控制协议 JSON 的传输形态。
@@ -177,6 +197,7 @@ type callRequestWire struct {
 	Tool   string     `json:"tool,omitempty"`
 	Args   string     `json:"args,omitempty"`
 	Reason string     `json:"reason,omitempty"`
+	CallID string     `json:"callId,omitempty"`
 }
 
 // toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
@@ -195,9 +216,9 @@ func toolCallsToText(tcs []toolCall, reason string) string {
 	}
 	calls := make([]callSpec, 0, len(tcs))
 	for _, tc := range tcs {
-		calls = append(calls, callSpec{Tool: tc.Function.Name, Args: tc.Function.Arguments})
+		calls = append(calls, callSpec{Tool: tc.Function.Name, Args: tc.Function.Arguments, ID: tc.ID})
 	}
-	out := callRequestWire{Action: "tool", Calls: calls, Tool: calls[0].Tool, Args: calls[0].Args}
+	out := callRequestWire{Action: "tool", Calls: calls, Tool: calls[0].Tool, Args: calls[0].Args, CallID: calls[0].ID}
 	if r := strings.TrimSpace(reason); r != "" {
 		// truncate 按 rune 截断（不会切断多字节汉字）并自带省略号
 		out.Reason = truncate(r, reasonMaxLen)
@@ -263,9 +284,7 @@ func (c *OpenAI) reasoningEffort(level string) string {
 // 消息在请求中保持文本格式（不改历史格式），仅额外发送 tools 参数。
 func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (string, error) {
 	req := chatReq{Model: c.Model}
-	for _, m := range messages {
-		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
-	}
+	req.Messages = encodeMessages(messages)
 	c.setThinking(&req)
 
 	body, err := json.Marshal(req)
@@ -353,13 +372,150 @@ func wrapReplyJSON(content string) string {
 	return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content))
 }
 
+// encodeMessages 把 agent.Message 列表编码为 OpenAI 兼容的 chatMsg 列表。
+//
+// 这是修复「模型退化为纯文本」的关键：旧实现把所有消息一律压成
+// chatMsg{Role: m.Role, Content: m.Content}，于是工具调用变成 assistant 的
+// 文本 {"action":"tool",...}、工具结果变成 user 的文本 "工具结果: {...}"。
+// 模型看到的历史是「有人一直在念 JSON」，它会**模仿这种模式**——用文字描述
+// 而不是真的发 tool_call（实测：长会话后 finish="stop" toolCalls=0、
+// 内容里写 <tool name=...>）。
+//
+// pi agent 的做法是全程用原生字段（convertToLlm 原样透传 toolResult，
+// provider 层再转成 role:"tool" + tool_call_id），本函数与之对齐：
+//   - assistant + KindToolCall → content(前导文本) + tool_calls[]
+//   - KindToolResult            → role:"tool" + tool_call_id + 结果正文
+func encodeMessages(msgs []agent.Message) []chatMsg {
+	out := make([]chatMsg, 0, len(msgs))
+	// openCalls 记录尚未配对的 tool_call id（来自前面的 assistant tool_calls）。
+	// OpenAI 严格要求 role:"tool" 必须回应前面的 tool_calls，否则报 400
+	// （“messages with role 'tool' must be a response to a preceding message
+	// with 'tool_calls'”）。
+	// 两种会产生孤儿的情形：
+	//   ① 历史被截断（-history N）开头正好落在一条工具结果上
+	//   ② 旧会话缺 ToolCallID 字段
+	// 这时代码把孤儿结果**降级为普通 user 文本**而不是丢弃——保留信息，又不会让 API 报错。
+	openCalls := map[string]bool{}
+	for _, m := range msgs {
+		switch m.Kind {
+		case agent.KindToolCall:
+			encoded := encodeToolCallMsg(m)
+			for _, tc := range encoded.ToolCalls {
+				openCalls[tc.ID] = true
+			}
+			out = append(out, encoded)
+		case agent.KindToolResult:
+			if m.ToolCallID != "" && openCalls[m.ToolCallID] {
+				delete(openCalls, m.ToolCallID)
+				out = append(out, chatMsg{
+					Role:       "tool",
+					Content:    toolResultBody(m.Content),
+					ToolCallID: m.ToolCallID,
+				})
+				continue
+			}
+			// 孤儿结果：降级为普通 user 消息（保留信息，避免 API 拒绝）
+			out = append(out, chatMsg{Role: agent.RoleUser, Content: toolResultBody(m.Content)})
+		default:
+			out = append(out, chatMsg{Role: m.Role, Content: m.Content})
+		}
+	}
+	return out
+}
+
+// encodeToolCallMsg 把工具调用消息编码为 assistant + tool_calls。
+// Content 只放模型的前导说明文字（没有则为空），不再塞整个控制 JSON。
+func encodeToolCallMsg(m agent.Message) chatMsg {
+	calls := m.ToolCalls
+	if len(calls) == 0 {
+		// 旧会话无 ToolCalls 字段：从 ToolName/ToolArgs（或 Content 里的 JSON）回退
+		name, args := m.ToolName, m.ToolArgs
+		if name == "" {
+			var req struct {
+				Tool string `json:"tool"`
+				Args string `json:"args"`
+			}
+			if json.Unmarshal([]byte(m.Content), &req) == nil {
+				name, args = req.Tool, req.Args
+			}
+		}
+		if name == "" {
+			// 实在无法还原：降级为普通文本（保证不丢上下文）
+			return chatMsg{Role: agent.RoleAssistant, Content: m.Content}
+		}
+		calls = []agent.ToolCallRef{{ID: fallbackCallID(m), Name: name, Args: args}}
+	}
+	wires := make([]wireToolCall, 0, len(calls))
+	for _, c := range calls {
+		var w wireToolCall
+		w.ID = c.ID
+		w.Type = "function"
+		w.Function.Name = c.Name
+		w.Function.Arguments = c.Args
+		wires = append(wires, w)
+	}
+	body := m.Content
+	if isControlJSON(body) {
+		body = "" // 控制 JSON 不是给人/模型看的说明文字，不必回灌
+	}
+	return chatMsg{Role: agent.RoleAssistant, Content: body, ToolCalls: wires}
+}
+
+// fallbackCallID 为旧会话里缺 ID 的调用生成稳定 ID（同一会话重复启动保持一致）。
+func fallbackCallID(m agent.Message) string {
+	h := fnv.New32a()
+	h.Write([]byte(m.ToolName))
+	h.Write([]byte{0})
+	h.Write([]byte(m.ToolArgs))
+	return fmt.Sprintf("call_%08x", h.Sum32())
+}
+
+// isControlJSON 判断文本是否为 agent 控制协议 JSON（含 action 字段）。
+// 这类文本不应作为 assistant 的 content 回灌给模型（它是协议不是语言）。
+func isControlJSON(s string) bool {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "{") {
+		return false
+	}
+	var probe struct {
+		Action string `json:"action"`
+		Tool   string `json:"tool"`
+	}
+	if json.Unmarshal([]byte(t), &probe) != nil {
+		return false
+	}
+	return probe.Action != "" || probe.Tool != ""
+}
+
+// toolResultBody 从会话里的「工具结果: {...}」文本中取出真正的结果正文。
+// 原生 tool 消息的 content 应只有结果本身，不含协议包装。
+func toolResultBody(content string) string {
+	const prefix = "工具结果: "
+	s := content
+	if strings.HasPrefix(s, prefix) {
+		s = s[len(prefix):]
+	}
+	t := strings.TrimSpace(s)
+	if strings.HasPrefix(t, "{") {
+		var tr struct {
+			Output string `json:"output"`
+			Error  string `json:"error"`
+		}
+		if json.Unmarshal([]byte(t), &tr) == nil {
+			if tr.Error != "" {
+				return tr.Output + "\n[error] " + tr.Error
+			}
+			return tr.Output
+		}
+	}
+	return s
+}
+
 // ChatWithToolsCtx 实现 agent.LLMWithContext 接口：发送消息 + 原生工具定义，
 // 支持通过 context 取消（ESC 中止时立即中断在途请求，无需等待 LLM 自然返回）。
 func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message, tools []plugins.Tool) (string, error) {
 	req := chatReq{Model: c.Model}
-	for _, m := range messages {
-		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
-	}
+	req.Messages = encodeMessages(messages)
 	// 工具定义
 	for _, t := range tools {
 		req.Tools = append(req.Tools, pluginsToolToDef(t))
@@ -501,9 +657,7 @@ func (o *OpenAI) ChatWithToolsStreamCtx(ctx context.Context, messages []agent.Me
 
 func (o *OpenAI) chatStream(ctx context.Context, messages []agent.Message, tools []plugins.Tool, onToken func(agent.StreamDelta)) (string, error) {
 	req := chatReq{Model: o.Model, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}}
-	for _, m := range messages {
-		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
-	}
+	req.Messages = encodeMessages(messages)
 	for _, t := range tools {
 		req.Tools = append(req.Tools, pluginsToolToDef(t))
 	}
@@ -800,9 +954,7 @@ func buildAIChatMessages(req AIChatRequest) []chatMsg {
 // （真走到了，循环会因为拿不到控制 JSON 而注入“解析失败”提示——排查时看这里）。
 func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 	req := chatReq{Model: c.Model}
-	for _, m := range messages {
-		req.Messages = append(req.Messages, chatMsg{Role: m.Role, Content: m.Content})
-	}
+	req.Messages = encodeMessages(messages)
 	c.setThinking(&req)
 
 	body, err := json.Marshal(req)

@@ -185,6 +185,19 @@ type callRequest struct {
 	// 模型一轮可以合法地并行发多个工具调用（OpenAI 原生 tool_calls 本就是数组），
 	// 由 LLM 层把它们全部展开到此字段；为空时回退到单数字段 Tool/Args。
 	Calls []callRequest `json:"calls,omitempty"`
+
+	// CallID 原生 tool_call id（来自 OpenAI tool_calls[].id）。
+	// 回填结果时用作 tool_call_id；为空则分配一个合成 ID。
+	CallID string `json:"callId,omitempty"`
+}
+
+// toolCallSeq 合成 tool_call id 的序号（进程内单调递增，保证唯一）。
+var toolCallSeq atomic.Uint64
+
+// nextToolCallID 生成一个合成的 tool_call id。
+// 仅用于文本协议/弱模型场景（模型没给原生 id），格式对齐 OpenAI 风格。
+func nextToolCallID() string {
+	return fmt.Sprintf("call_%d", toolCallSeq.Add(1))
 }
 
 // New 创建 Agent。
@@ -630,7 +643,7 @@ func (a *Agent) Run(task string) (string, error) {
 		calls := req.Calls
 		if len(calls) == 0 {
 			// 单数形态（旧协议 / XML / bare）：归一为一个调用
-			calls = []callRequest{{Action: "tool", Tool: req.Tool, Args: req.Args}}
+			calls = []callRequest{{Action: "tool", Tool: req.Tool, Args: req.Args, CallID: req.CallID}}
 		}
 		var terminated bool
 		for i, c := range calls {
@@ -723,6 +736,13 @@ type callDirective struct {
 func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msgs []Message,
 	q *lifecycle.QueryLifecycle, qc lifecycle.QueryContext, task string) (callDirective, bool, error) {
 
+	// 为本次调用分配原生 tool_call id：后续回填的 tool 结果用它配对
+	// （OpenAI 要求 role:"tool" 消息必须带对应的 tool_call_id）。
+	callID := c.CallID
+	if callID == "" {
+		callID = nextToolCallID()
+	}
+
 	q.BeginOperation("tool:" + c.Tool)
 	a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}, a.logf)
 
@@ -785,23 +805,38 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 	// Guard 观察：记录此次调用后触发渐进提醒或终止（dsh semantics：observe-and-enrich, never veto, kill on max threshold exceed）
 	if a.Guard != nil {
 		if reminder, terminate := a.Guard.Observe(c.Tool, c.Args); terminate {
-			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
+			msgs = append(msgs, Message{
+				Role: RoleAssistant, Content: reply, Kind: KindToolCall,
+				ToolName: c.Tool, ToolArgs: c.Args,
+				ToolCalls: []ToolCallRef{{ID: callID, Name: c.Tool, Args: c.Args}},
+			})
+			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
 			msgs = append(msgs, Message{Role: RoleUser, Content: reminder + "\n⚠️ 任务因重复工具调用已终止。"})
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			return callDirective{}, false, fmt.Errorf("%w: tool=%s 连续重复 %d 次，任务终止", errors.New("loop guard terminated"), c.Tool, a.Guard.MaxObserved())
 		} else if reminder != "" {
 			// 渐进提醒，注入为追加用户消息（紧接工具结果之后，模型可据此改参数或停手）
-			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b)})
+			msgs = append(msgs, Message{
+				Role: RoleAssistant, Content: reply, Kind: KindToolCall,
+				ToolName: c.Tool, ToolArgs: c.Args,
+				ToolCalls: []ToolCallRef{{ID: callID, Name: c.Tool, Args: c.Args}},
+			})
+			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
 			msgs = append(msgs, Message{Role: RoleUser, Content: reminder})
 			a.log("%s", q.FormatLog("guard_reminder", "step=", fmt.Sprintf("%d", qc.Step), "tool=", c.Tool, "cnt=", fmt.Sprintf("%d", a.Guard.Count())))
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 		}
 	}
-	msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
-	msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult})
+	msgs = append(msgs, Message{
+		Role: RoleAssistant, Content: reply, Kind: KindToolCall,
+		ToolName: c.Tool, ToolArgs: c.Args,
+		ToolCalls: []ToolCallRef{{ID: callID, Name: c.Tool, Args: c.Args}},
+	})
+	msgs = append(msgs, Message{
+		Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult,
+		ToolCallID: callID,
+	})
 	a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
 
 	// 终止型工具（对齐 pi 0.69.0 `terminate: true`）：执行成功且工具声明 Terminate 时，
@@ -1288,9 +1323,16 @@ func ToolExchangeMessages(tool, args, reason, out string, err error) []Message {
 	if err != nil {
 		tr, _ = json.Marshal(ToolResult{ToolName: tool, Args: args, Output: out, Error: err.Error()})
 	}
+	// 同时写原生字段（ToolCalls/ToolCallID）：会话恢复后按 OpenAI 协议回灌，
+	// 模型才能看到“真的工具调用”，而不是一串 JSON 文本（见 llm.encodeMessages）。
+	callID := nextToolCallID()
 	return []Message{
-		{Role: RoleAssistant, Kind: KindToolCall, ToolName: tool, ToolArgs: args, Content: string(callJSON)},
-		{Role: RoleUser, Kind: KindToolResult, Content: "工具结果: " + string(tr)},
+		{
+			Role: RoleAssistant, Kind: KindToolCall, ToolName: tool, ToolArgs: args,
+			Content:   string(callJSON),
+			ToolCalls: []ToolCallRef{{ID: callID, Name: tool, Args: args}},
+		},
+		{Role: RoleUser, Kind: KindToolResult, Content: "工具结果: " + string(tr), ToolCallID: callID},
 	}
 }
 
