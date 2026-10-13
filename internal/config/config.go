@@ -19,22 +19,22 @@ const DefaultContextWindow = 128000
 
 // Config Mizar 运行配置。
 type Config struct {
-	BaseURL           string `json:"base_url"`                 // OpenAI 兼容端点，如 http://127.0.0.1:3002/v1
-	APIKey            string `json:"api_key"`                  // Bearer token（可选）
-	Model             string `json:"model"`                    // 模型名
-	Thinking          bool   `json:"thinking,omitempty"`       // (deprecated) 旧版思考模式开关，由 ThinkingLevel 替代
-	ThinkingLevel     string `json:"thinking_level,omitempty"` // 思考等级：auto/off/low/medium/high（空=auto）
-	ContextWindow     int    `json:"context_window"`           // 上下文窗口（token）
-	MaxSteps          int    `json:"max_steps,omitempty"`       // 最大循环步数（0=默认 60）
+	BaseURL       string `json:"base_url"`                 // OpenAI 兼容端点，如 http://127.0.0.1:3002/v1
+	APIKey        string `json:"api_key"`                  // Bearer token（可选）
+	Model         string `json:"model"`                    // 模型名
+	Thinking      bool   `json:"thinking,omitempty"`       // (deprecated) 旧版思考模式开关，由 ThinkingLevel 替代
+	ThinkingLevel string `json:"thinking_level,omitempty"` // 思考等级：auto/off/low/medium/high（空=auto）
+	ContextWindow int    `json:"context_window"`           // 上下文窗口（token）
+	MaxSteps      int    `json:"max_steps,omitempty"`      // 最大循环步数（0=默认 60）
 	// Retry 重试策略（nil = 使用默认值：maxRetries=2, baseDelayMs=1000）
-	RetryMaxRetries   int    `json:"retry_max_retries,omitempty"` // LLM 失败最大重试次数（0=不重试）
+	RetryMaxRetries   int    `json:"retry_max_retries,omitempty"`   // LLM 失败最大重试次数（0=不重试）
 	RetryBaseDelayMs  int    `json:"retry_base_delay_ms,omitempty"` // LLM 重试初始退避毫秒（默认 1000）
-	SkillEvolution    *bool  `json:"skill_evolution"`          // 技能自动沉淀（nil=默认开启）
-	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`      // 技能使用统计+周报（nil=默认开启）
-	SkillStatsTopN    int    `json:"skill_stats_top_n"`        // 周报建议禁用数（0=默认10）
-	SkillInjectMode   string `json:"skill_inject_mode"`        // 技能注入: index(默认,缓存友好)|full(全量正文)
-	UserColor         string `json:"user_color,omitempty"`     // TUI 用户消息颜色（默认 white）
-	AiColor           string `json:"ai_color,omitempty"`       // TUI AI 回复颜色（默认 green）
+	SkillEvolution    *bool  `json:"skill_evolution"`               // 技能自动沉淀（nil=默认开启）
+	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`           // 技能使用统计+周报（nil=默认开启）
+	SkillStatsTopN    int    `json:"skill_stats_top_n"`             // 周报建议禁用数（0=默认10）
+	SkillInjectMode   string `json:"skill_inject_mode"`             // 技能注入: index(默认,缓存友好)|full(全量正文)
+	UserColor         string `json:"user_color,omitempty"`          // TUI 用户消息颜色（默认 white）
+	AiColor           string `json:"ai_color,omitempty"`            // TUI AI 回复颜色（默认 green）
 	// DiagLog 诊断日志开关（落盘到 ~/.mizar/logs/，默认 nil = 开启）。
 	// 用于排查「任务莫名中止/卡死/退出」类无法复现的问题；设 0 可关闭。
 	DiagLog *bool `json:"diag_log,omitempty"`

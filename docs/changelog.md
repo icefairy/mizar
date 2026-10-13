@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### 💥 破坏性变更
+
+- **移除 `todo_write`，保留 pi 式 `todo`**：两者此前**同时注册**（`todo, todo_write`），语义不同（整表替换 vs 动作式 API）、状态各自独立、`/todos` 只读后者——模型随机选一个，造成待办状态与实际展示不一致。现只保留 `todo`（list/add/toggle/clear，状态随会话持久化并回放重建）。依赖 `todo_write` 整表替换语义的场景请改用逐项 `add`/`toggle`。
+
 ### ✨ 新增
 
 - **诊断日志（排查「任务莫名中止/卡死/退出」）**：新增 `internal/diag` 包，把关键事件落盘到 `~/.mizar/logs/mizar-YYYYMMDD.log`（单文件超 8MB 自动停写）。默认开启（TUI 下 stderr 就是终端，诊断信息不能写那儿）；`MIZAR_DIAG=0` 或 `config.json` 的 `"diag_log": false` 可关闭。日志标签与埋点：
@@ -18,6 +22,12 @@
 - **非 `stop` 结束的 LLM 回复不再让循环空转**：`finish_reason` 为 `length`/`content_filter`/缺失时，不再直接返回裸文本，而是与正常路径一样包装为控制协议 JSON（或原样透传已提取的工具调用）。此前这种回复会被 agent 循环的 `parseCallJSON` 判为「无法识别的控制指令」→ 注入纠正提示、白耗一轮（弱模型/输出被截断时常见，表现为任务莫名停顿）。这条不变式（`wrapReply=true` 且内容非空 → 输出必须可被 `parseCallJSON` 消化）现收敛到单一共享函数 `wrapReplyJSON`，四条路径（流式 / `ChatWithToolsCtx` / `ChatWithTools` / `ChatStream`）共用，避免再次漂移；`finish_reason` 退化为纯诊断信息写入 `[llm ]` 日志。`wrapReply=false`（插件直连 `AIChat`/`AIChatStream`）与裸 `Chat`（AuxLLM 的 GoalLoop judge / BackgroundReview 需直接 `json.Unmarshal`，插件 `llm_chat`）一律不包装，保持原样返回。另补上两个漏写 `finish_reason` 的流式测试夹具字段（真实 SSE 必带，此前它们实际跑在「无 finish_reason」的异常分支上）。
 
 ### 🐛 修复
+
+- **模型“只宣布不执行”导致任务停滞**：实测连续三轮（会话记录 idx 116/118/122）模型只输出“我重写为纯注册表清理方式”这类预告就结束本轮——`action=reply` 在循环里就是“任务完成”，于是用户只能反复发“继续”，长任务实际停滞。根因是系统提示把“汇报进展”和“宣布任务完成”归到了同一个 `respond` 出口。现提示词明确区分：① 要动手就先把工具调用发出去；② `respond` 只用于回答提问或真正完成时交付；③ 明确反例。
+
+- **`reason`（边做边说）从未被提示词告知**：mizar 的协议其实早就支持“文本 + 工具调用同一轮”——`toolCallsToText` 把模型同一轮的 `content` 写入协议 JSON 的 `reason` 字段，TUI 也会展示（`ToolIntro()` / `ctx.Reason`），但系统提示从未提及，模型无从知晓。现补上说明，并明确“只有说明文字、没有工具调用的那一轮会被当成任务结束”。
+
+- **多工具调用被静默丢弃、`reason` 无长度上限**：`toolCallsToText` 只取 `tcs[0]`（`callRequest` 是单数结构），其余工具调用直接丢弃且无任何痕迹；`reason` 接收模型整轮文本且不限长。现丢弃时写一行 `[llm ]` 诊断日志（列出被丢弃的工具名），`reason` 截断到 500 字符（按 rune，不切汉字）。完整并行工具调用需改协议，见下方“已知限制”。
 
 - **Windows 上「没按键却突然任务已取消」+ 输入框乱码**：根因是 `EnableMouse(true)` 在 Windows 上要求 conhost 向宿主终端请求鼠标上报，而 ConPTY 的 win32-input-mode 存在双重编码缺陷（microsoft/terminal#15083、#16343），鼠标移动/滚轮被还原成字符流灌进控制台输入缓冲；tcell 的 ConsoleScreen（`ReadConsoleInputW`，无 VT 序列解析）把它们当普通按键交给 tview → 输入框出现 `[<35;66;61M...` 乱码，且序列以 ESC 开头，被误判为用户按下 ESC → 无辜触发「任务已取消（当前步骤结束后停止）」。现 Windows 下默认不启用鼠标上报，整条链路断开；复制粘贴改用终端原生能力（拖选 + `Ctrl+Shift+C/V`、右键菜单），键盘侧 `Alt+L` / `Alt+C` 拷贝模式不受影响，聊天区滚动仍可用 `PgUp`/`PgDn`。需要鼠标的用户可设 `MIZAR_MOUSE=1` 强制开启。
 - **Windows 粘贴多行文本被逐行提交**：tcell 在 Windows 上 `EnablePaste` 是空实现（无 bracketed paste），粘贴多行时换行符变成裸 Enter，导致半截内容被发送。现增加粘贴换行防护：毫秒级连发的 Enter 判定为粘贴换行（插入换行而非提交），人手打字间隔（≥8ms）仍正常提交；`MIZAR_PASTE_GUARD=0` 可关闭。

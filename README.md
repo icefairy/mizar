@@ -54,7 +54,7 @@
 
 ### 2. 内置工具（11+ 个）
 基础工具 `bash` / `grep` / `find` / `read` / `write` / `edit` / `ls` / `skill_manage`，+ dsh 复刻新增：
-- **`todo_write`**：结构化任务清单（pending / in_progress / completed），每次调用替换整个清单，单次 in_progress 约束防弱模型混乱
+- **`todo`**：会话待办清单（动作式 API：list / add / toggle / clear）。状态随会话持久化——内嵌在工具返回文本的标记段中，会话恢复/分支时按历史回放重建（对齐 pi 的 `examples/extensions/todo.ts`）；用 `/todos` 查看
 - **`ask_user_question`**：向用户提问并等待回答。问题以文本编号选项呈现，用户回复编号即完成选择（TUI / 经典 / `-task` 模式均可用，多选 `1,3`）；无交互界面时自动降级为「选项写进正文 + 用户下一条回编号」
 - **`skill`**：按名加载技能全文（渐进式披露，避免系统提示过长）
 - **`job_list` / `job_output` / `job_kill`**：后台任务管理（bash 支持 `run_in_background`，任务完成后自动注入通知）
@@ -254,7 +254,7 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 | 会话标题 | 自动推导 | 首条用户消息 fallback |
 | ask_user | — | TUI 模式支持暂停等回答 |
 | 后台任务 | — | job_list/job_output/job_kill |
-| todo_write | — | 结构化任务清单 |
+| todo | — | 会话待办清单（动作式 API，状态随会话持久化） |
 | 计划模式 | /plan + exit_plan_mode | /plan + exit_plan_mode（TUI 审批） |
 | 会话目标 | create/get/update_goal | get_goal/create_goal/update_goal（权限约束） |
 | 定时提醒 | schedule_create/list/delete | schedule_create/list/delete（after/at/every） |

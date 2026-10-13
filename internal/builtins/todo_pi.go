@@ -28,7 +28,7 @@ type PiTodo struct {
 	Done bool   `json:"done"`
 }
 
-// piTodoState 全局待办状态（与现有 todoReg 相同生命周期：单进程单会话）。
+// piTodoState 全局待办状态（单进程单会话生命周期）。
 type piTodoState struct {
 	mu    sync.Mutex
 	todos []PiTodo

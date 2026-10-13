@@ -121,13 +121,13 @@ type tuiModel struct {
 	aiColor          string                // AI 回复颜色（默认 green）
 	renderer         *glamour.TermRenderer // Markdown 渲染器
 	loading          bool
-	queue            []string // 排队的待发送消息（LIFO）
-	queueVisible     bool     // queueView 当前是否在 flex 中可见
-	histIdx          int      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
-	histSnapshot     string   // 浏览历史时保存的输入框快照
-	numpadState      int      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
+	queue            []string                 // 排队的待发送消息（LIFO）
+	queueVisible     bool                     // queueView 当前是否在 flex 中可见
+	histIdx          int                      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
+	histSnapshot     string                   // 浏览历史时保存的输入框快照
+	numpadState      int                      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
 	cacheMiss        *agent.CacheMissDetector // 显著缓存未命中提示（懒初始化）
-	numpadWait       rune     // 小键盘状态机：存储第一个字符
+	numpadWait       rune                     // 小键盘状态机：存储第一个字符
 	app              *tview.Application
 	textView         *tview.TextView
 	queueView        *tview.TextView // 排队消息列表（显示在输入框上方）

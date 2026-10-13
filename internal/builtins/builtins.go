@@ -39,7 +39,6 @@ func All(skillsDir string, onPluginFileChanged func(path string) string) []plugi
 		toolLS(),
 		toolRepoMap(),
 		skillManage(skillsDir),
-		toolTodoWrite(),
 		toolTodo(),
 		toolAskUser(),
 		toolSkill(skillsDir),

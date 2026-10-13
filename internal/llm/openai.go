@@ -162,16 +162,43 @@ func pluginsToolToDef(t plugins.Tool) toolDef {
 // reason 为模型在发起工具调用前说的一句说明文字（content 字段）；
 // 若非空则并入返回 JSON 的 reason 字段，使 agent 循环能把它存入历史并在 UI 展示。
 // 空 arguments 仍生成工具调用（args=""），由 agent 循环做空参数兜底。
+// reasonMaxLen reason 字段的上限（字符）。超出时截断：
+// reason 会进入协议 JSON 与会话历史，模型写一大段分析时既浪费 token、
+// 又让弱模型更容易在这个转义字符串里写畸形 JSON。
+const reasonMaxLen = 500
+
+// toolCallsToText 将原生 tool_calls 转为 agent 循环可解析的 JSON 文本。
+// 新 schema 中 arguments 直接是原始参数（如 {"command":"hostname"}），
+// 用 json.Marshal 转成转义后的 JSON 字符串填入 args 字段。
+//
+// 局限：mizar 的 callRequest 是单数结构，循环每步只处理一个工具调用，
+// **这里的 tcs[1:] 会被丢弃**。丢弃时写一行诊断日志（这是静默丢失，
+// 只靠行为观察不到）。要支持并行工具调用需改协议，见 docs/changelog。
+//
+// reason 为模型同一轮的 content（不是 tools schema 里的参数），非空则并入
+// 返回 JSON 的 reason 字段，使 agent 循环能把它存入历史并在 UI 展示。
+// 空 arguments 仍生成工具调用（args=""），由 agent 循环做空参数兜底。
 func toolCallsToText(tcs []toolCall, reason string) string {
 	if len(tcs) == 0 {
 		return ""
+	}
+	if len(tcs) > 1 {
+		names := make([]string, 0, len(tcs)-1)
+		for _, tc := range tcs[1:] {
+			names = append(names, tc.Function.Name)
+		}
+		diag.Logf("llm", "模型一轮返回 %d 个工具调用，仅首个(%s)被执行，丢弃: %s",
+			len(tcs), tcs[0].Function.Name, strings.Join(names, ", "))
 	}
 	tc := tcs[0]
 	argsRaw := tc.Function.Arguments
 	argsEscaped, _ := json.Marshal(argsRaw)
 	r := ""
 	if reason != "" {
-		res, _ := json.Marshal(strings.TrimSpace(reason))
+		reason = strings.TrimSpace(reason)
+		// truncate 按 rune 截断（不会切断多字节汉字）并自带省略号
+		reason = truncate(reason, reasonMaxLen)
+		res, _ := json.Marshal(reason)
 		r = "," + `"reason":` + string(res)
 	}
 	return fmt.Sprintf(`{"action":"tool","tool":"%s","args":%s%s}`, tc.Function.Name, argsEscaped, r)

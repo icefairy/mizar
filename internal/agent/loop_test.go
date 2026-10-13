@@ -430,3 +430,19 @@ func TestSystemPromptNoXMLFormat(t *testing.T) {
 		t.Fatal("system prompt should mention respond tool")
 	}
 }
+
+// 「说了就要做」：系统提示必须明确区分「预告/汇报」与「交付」，
+// 否则模型会用 respond 说一句“我重写为 X 方式”就收尾（实测三次连续发生，
+// 用户只能反复发「继续」）。
+func TestSystemPromptForbidsAnnounceOnly(t *testing.T) {
+	a, _, _ := newTestAgent()
+	prompt := a.SystemPrompt()
+	if !strings.Contains(prompt, "不要只") {
+		t.Fatal("system prompt 应明确禁止「只宣布不执行」")
+	}
+	for _, kw := range []string{"工具调用", "任务真的已完成"} {
+		if !strings.Contains(prompt, kw) {
+			t.Fatalf("system prompt 应包含约束关键词 %q", kw)
+		}
+	}
+}

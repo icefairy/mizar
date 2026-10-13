@@ -629,7 +629,7 @@ export function rpc_notify(params) {
 | Cordis 一切皆插件 / profile / bundle | 三层扩展（技能/插件/MCP） | ❌ | 架构哲学不同；mizar 定位极简单二进制 |
 | Web UI / SDK / ACP | 无 | ❌ | 超出范围 |
 | **repeat-tool-reminder（循环卫生守卫）** | WeakModelTuner 直接 kill | ✅ | dsh 渐进提醒 [3,5,8] + JSON 参数规范化；比直接 kill 更宽容 |
-| **todo_write 工具** | 无 | ✅ | 结构化任务清单；session-owned；UI checklist 渲染 |
+| **todo 工具** | 无 | ✅ | 会话待办清单（动作式 API：list/add/toggle/clear）；状态内嵌工具返回随会话持久化、恢复时回放重建（对齐 pi examples/extensions/todo.ts）；`/todos` 查看 |
 | **job_* 后台任务 + bash run_in_background** | bash 全同步 | ✅ | jobs registry + 完成通知自动注入 |
 | **ask_user_question 工具** | 无 | ✅ | 文本编号选项作答（TUI/经典/单次任务）；无界面时回退为正文列选项 |
 | **skill 按需加载工具** | 索引注入 + read 读文件 | ✅ | 专用 skill 工具一次返回全文，更直接 |
