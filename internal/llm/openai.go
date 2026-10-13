@@ -831,19 +831,15 @@ func (o *OpenAI) AIChat(req AIChatRequest) (string, error) {
 // ============================================================================
 
 // SummarizeMessages 生成会话摘要（供 Compactor 使用）。
-// 使用随机 system 头防止自身反复命中缓存（摘要每次内容不同，缓存无复用价值）。
+// 输入由 agent.BuildSummaryInput 构造：工具调用序列化成单行 + 累计文件清单
+// （对齐 pi serializeConversation + Cumulative File Tracking），而不是直接拼原始 Content。
 func (o *OpenAI) SummarizeMessages(msgs []agent.Message, maxTokens int) (string, error) {
-	var sb bytes.Buffer
-	sb.WriteString(agent.SummaryPrompt)
-	sb.WriteString("\n\n--- conversation ---\n")
-	for _, m := range msgs {
-		sb.WriteString("[" + m.Role + "]\n" + m.Content + "\n")
-	}
+	sb := agent.BuildSummaryInput(msgs)
 	req := chatReq{
 		Model: o.Model,
 		Messages: []chatMsg{
 			{Role: "system", Content: "You are a conversation summarizer. Produce the structured summary exactly as instructed."},
-			{Role: "user", Content: sb.String()},
+			{Role: "user", Content: sb},
 		},
 		MaxTokens: maxTokens,
 	}

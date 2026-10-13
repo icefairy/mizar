@@ -688,6 +688,20 @@ func (a *Agent) Run(task string) (string, error) {
 		msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult})
 		a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: req.Tool, Args: req.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
 
+		// 终止型工具（对齐 pi 0.69.0 `terminate: true`）：执行成功且工具声明 Terminate 时，
+		// 直接以工具输出作为最终回答，省掉一次 follow-up LLM 调用（延迟 + 成本）。
+		// 执行失败时忽略声明：错误要回填给模型，给它纠正的机会。
+		if err == nil && a.isTerminatingTool(req.Tool) {
+			final := strings.TrimSpace(out)
+			if final != "" {
+				a.log("%s", q.FormatLog("tool_terminate", "step=", fmt.Sprintf("%d", qc.Step), "tool=", req.Tool))
+				q.Complete(nil)
+				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: final, Messages: msgs}, a.logf)
+				a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: final}, a.logf)
+				return final, nil
+			}
+		}
+
 		// GoalLoop judge：每轮后判断目标是否完成，自动续跑（🟡 ImpactModerate）
 		if a.GoalLoop != nil {
 			shouldContinue, continuationPrompt, judgeErr := a.GoalLoop.EvaluateAfterTurn(reply)
@@ -1072,6 +1086,16 @@ func ToolExchangeMessages(tool, args, reason, out string, err error) []Message {
 		{Role: RoleAssistant, Kind: KindToolCall, ToolName: tool, ToolArgs: args, Content: string(callJSON)},
 		{Role: RoleUser, Kind: KindToolResult, Content: "工具结果: " + string(tr)},
 	}
+}
+
+// isTerminatingTool 判断工具是否声明了终止语义（Terminate 字段）。
+// 工具不存在时返回 false（由 Call 负责报错，这里不重复处理）。
+func (a *Agent) isTerminatingTool(name string) bool {
+	if a.Plugins == nil || name == "" {
+		return false
+	}
+	t, ok := a.Plugins.Get(name)
+	return ok && t.Terminate
 }
 
 func min(a, b int) int {

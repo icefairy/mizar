@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/peterh/liner"
 
 	"mizar/internal/agent"
+	"mizar/internal/builtins"
 	"mizar/internal/session"
 )
 
@@ -49,6 +51,15 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	rl := liner.NewLiner()
 	defer rl.Close()
 	rl.SetCtrlCAborts(true)
+
+	// ask_user_question / 计划审批：模型提问时渲染文本选项，用户直接回编号（无需 TUI）
+	askUser := func(questionsJSON string) (string, error) {
+		return askUserText(questionsJSON, os.Stdout, func(prompt string) (string, error) {
+			return rl.Prompt(prompt)
+		})
+	}
+	builtins.SetAskUser(askUser)
+	agent.SetPlanAskUser(askUser)
 
 	// 退出提示
 	if sessionID != "" {
@@ -95,9 +106,10 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	}
 
 	// 补全器：支持 @cmd: / @tool: / @file: / @路径 四种模式
+	// 仅在 @ 处于 token 边界时触发（否则粘贴 p@ssw0rd 这类文本也会弹候选）
 	rl.SetCompleter(func(line string) (res []string) {
-		if idx := strings.LastIndex(line, "@"); idx >= 0 {
-			after := strings.TrimSpace(line[idx+1:])
+		if idx := lastAtMentionIndex(line); idx >= 0 {
+			after := atAfterToken(line, idx)
 			res = completeAtRaw(after, cmdNames, toolNames)
 			return
 		}

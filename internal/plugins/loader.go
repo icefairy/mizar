@@ -27,6 +27,11 @@ type Tool struct {
 	PluginFile  string // 来源插件文件
 	// Run 在引擎内执行；args 是字符串参数。
 	Run func(args string) (string, error)
+	// Terminate 声明：工具执行成功后以返回值作为最终回答，不再发起 follow-up LLM 调用
+	// （对齐 pi 0.69.0 的 `terminate: true`）。适合“任务到此结束”类工具（如 exit_plan_mode、
+	// 自定义 finish 工具）。执行失败时忽略此声明——错误需回填给模型让它纠正。
+	// 注意：respond 工具由循环特判处理，不依赖本字段。
+	Terminate bool
 }
 
 // 插件生命周期钩子：插件导出 plugin_init() 在加载成功后调用（初始化），

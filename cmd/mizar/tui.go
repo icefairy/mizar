@@ -53,6 +53,10 @@ type tuiStats struct {
 	RequestStartTime           time.Time
 	ThinkingLevel              string
 	ModelName                  string
+	// 会话级累计输出 tokens 与耗时（当前模型维度），用于计算平滑平均速度。
+	ModelCumCompletionTokens int
+	ModelCumDurationSec      float64
+	ModelAvgTokPerSec        float64
 }
 
 func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
@@ -69,6 +73,40 @@ func (s *tuiStats) AddUsage(u *agent.Usage, dur time.Duration) {
 	if u.CompletionTokens > 0 && dur.Seconds() > 0 {
 		s.LastSpeedTokensPerSec = float64(u.CompletionTokens) / dur.Seconds()
 	}
+	// 累计当前模型的速度统计
+	s.ModelCumCompletionTokens += u.CompletionTokens
+	s.ModelCumDurationSec += dur.Seconds()
+	if s.ModelCumDurationSec > 0 {
+		s.ModelAvgTokPerSec = float64(s.ModelCumCompletionTokens) / s.ModelCumDurationSec
+	}
+}
+
+// ResetModelStats 重置模型级累计（切换模型时调用）。
+func (s *tuiStats) ResetModelStats() {
+	s.ModelCumCompletionTokens = 0
+	s.ModelCumDurationSec = 0
+	s.ModelAvgTokPerSec = 0
+}
+
+// formatTokens 将 tokens 数字格式化为可读形式（k/M）。
+func formatTokens(v int) string {
+	if v < 1000 {
+		return fmt.Sprintf("%d", v)
+	}
+	if v < 1_000_000 {
+		return fmt.Sprintf("%.1fk", float64(v)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(v)/1_000_000)
+}
+
+// recordUsage 入账一次用量，并在缓存命中率显著下跌时返回提示文本。
+// 两个调用点（流内 usage / 任务结束补记）共用，保证检测器每请求只观测一次。
+func (m *tuiModel) recordUsage(u *agent.Usage, dur time.Duration) string {
+	m.stats.AddUsage(u, dur)
+	if m.cacheMiss == nil {
+		m.cacheMiss = agent.NewCacheMissDetector()
+	}
+	return m.cacheMiss.Observe(u)
 }
 
 type tuiModel struct {
@@ -86,6 +124,7 @@ type tuiModel struct {
 	histIdx          int      // 历史消息浏览索引（-1=不浏览，0=最新，1=上一条…）
 	histSnapshot     string   // 浏览历史时保存的输入框快照
 	numpadState      int      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
+	cacheMiss        *agent.CacheMissDetector // 显著缓存未命中提示（懒初始化）
 	numpadWait       rune     // 小键盘状态机：存储第一个字符
 	app              *tview.Application
 	textView         *tview.TextView
@@ -133,6 +172,11 @@ type tuiModel struct {
 	streamPendingUsage *agent.Usage
 	streamCountedUsage *agent.Usage
 
+	// bash 增量输出（bashMu 保护）：长命令运行时在聊天区尾部实时显示末尾若干行
+	bashMu     sync.Mutex
+	bashLive   string // 当前运行中命令的累计输出（仅保留尾部）
+	bashLiveOn bool   // 是否有命令正在运行（决定是否渲染实时块）
+
 	// 等待进度指示（spinner 动画 + 宣传语轮换，状态栏显示）
 	spinnerOn   atomic.Bool  // spinner 循环是否运行中
 	spinnerIdx  atomic.Int32 // 当前动画帧下标
@@ -147,11 +191,23 @@ type tuiModel struct {
 	// 期间新输入一律排队，防止新任务的 Run→resetAbort() 清掉旧任务的
 	// abort 标志（否则旧任务“复活”继续跑）及两个 Run 并发争用 Agent 状态。
 	canceling atomic.Bool
+
+	// 粘贴换行防护（见 platform_input.go）：Windows 无 bracketed paste，
+	// 粘贴多行文本时换行会变成裸 Enter。记录最近一次按键时间，毫秒级
+	// 连发的 Enter 判定为粘贴换行（插入换行而非提交）。
+	pasteGuard    bool
+	lastKeyAt     time.Time
+	lastNewlineAt time.Time
 }
 
+// askPending 一次待回答的提问（可能含多个问题，逐问收集）。
+// 由 agent goroutine 创建、事件循环（submitInput）推进，字段访问统一走 askMu。
 type askPending struct {
-	questions string      // 原始 questions JSON
-	answerCh  chan string // 单发 channel，TUI 填入答案后关闭
+	questions string              // 原始 questions JSON（渲染用）
+	qs        []builtins.Question // 解析后的问题列表
+	answers   []builtins.Answer   // 已收集的答案
+	idx       int                 // 当前等待第几问（0-based）
+	answerCh  chan string         // 全部答完后单发 answers JSON
 }
 
 // sgrColor 生成 tview 动态颜色标记：[color]text[::-]
@@ -215,10 +271,36 @@ func (m *tuiModel) renderAllDirect() {
 		sb.WriteString(sgrColor(m.aiColor, "▍\n\n"))
 	}
 
+	// bash 增量输出：命令运行中在尾部显示最近几行（对齐 pi 0.73.0）
+	m.bashMu.Lock()
+	bashLive, bashOn := m.bashLive, m.bashLiveOn
+	m.bashMu.Unlock()
+	if bashOn && bashLive != "" {
+		sb.WriteString(sgrColor("cyan", "⌛ 命令执行中（实时输出）：\n"))
+		sb.WriteString(sgrColor("cyan", tailLines(bashLive, bashLiveTailLines)))
+		sb.WriteString("\n")
+	}
+
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
 	// 仅在首次渲染或新 bot 回复时自动滚动到底部
 	if !m.userScrolledUp {
 		m.textView.ScrollToEnd()
+	}
+
+	// 待回答的提问：把问题与编号选项渲染进聊天区（用户直接在输入框回编号）
+	m.askMu.Lock()
+	pending := m.askPending
+	m.askMu.Unlock()
+	if pending != nil {
+		sb.WriteString(sgrColor("yellow", "❓ 需要你的选择（回复编号，如 1；多选 1,3；直接回车 = 第 1 项）\n"))
+		// 多问题时只渲染当前这一问（已答过的不再重复列出）
+		if len(pending.qs) > 1 && pending.idx < len(pending.qs) {
+			sb.WriteString(sgrColor("yellow", fmt.Sprintf("（第 %d/%d 问）\n", pending.idx+1, len(pending.qs))))
+			sb.WriteString(sgrColor("yellow", strings.TrimRight(builtins.RenderPlainQuestions([]builtins.Question{pending.qs[pending.idx]}), "\n")+"\n"))
+		} else {
+			sb.WriteString(sgrColor("yellow", renderQuestions(pending.questions)+"\n"))
+		}
+		sb.WriteString("\n")
 	}
 	m.statusBarDirect()
 }
@@ -242,7 +324,6 @@ func (m *tuiModel) statusBarDirect() {
 		streamOutTok = m.streamOutCJK + (m.streamOutNonCJK+3)/4
 	}
 	streamPromptEst := m.streamPromptEst
-	outStart := m.streamOutStart
 	m.streamMu.Unlock()
 	if m.loading && (!streaming || streamText == "") {
 		frame := spinnerFrames[int(m.spinnerIdx.Load())%len(spinnerFrames)]
@@ -253,11 +334,11 @@ func (m *tuiModel) statusBarDirect() {
 	}
 
 	sb.WriteString(sgrColor("magenta", "tokens: "))
-	sb.WriteString(fmt.Sprintf("%d", s.CumulativeTotalTokens))
+	sb.WriteString(formatTokens(s.CumulativeTotalTokens))
 	sb.WriteString(sgrColor("magenta", "(in:"))
-	sb.WriteString(fmt.Sprintf("%d", s.CumulativePromptTokens))
+	sb.WriteString(formatTokens(s.CumulativePromptTokens))
 	sb.WriteString(sgrColor("magenta", " out:"))
-	sb.WriteString(fmt.Sprintf("%d", s.CumulativeCompletionTokens))
+	sb.WriteString(formatTokens(s.CumulativeCompletionTokens))
 	sb.WriteString(sgrColor("magenta", ")"))
 	// 流式回复中：追加本步实时（输入来自 loop 首次分片附带的估算，
 	// 输出为流式 Thinking+Content 实际内容的增量估算；服务端下发 usage 分片后排精确值）
@@ -296,19 +377,10 @@ func (m *tuiModel) statusBarDirect() {
 		sb.WriteString(sgrColor("magenta", "缓存: -"))
 	}
 
-	// 流式回复中：实时速度 = 输出 token 估算 / 自首个输出分片折算；
-	// 流结束（usage 分片）后由 AddUsage 更新为精确值；否则展示上一次完整请求平均速度
-	if streaming && havingOut {
-		secs := time.Since(outStart).Seconds()
-		speed := 0.0
-		if secs > 0 {
-			speed = float64(streamOutTok) / secs
-		}
+	// 展示当前模型会话级平滑平均速度（累计输出 / 累计耗时），切换模型时自动清零。
+	if s.ModelAvgTokPerSec > 0 {
 		sb.WriteString(sgrColor("magenta", " | "))
-		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%.0f tok/s", speed)))
-	} else if s.LastCompletionTokens > 0 && s.LastResponseDuration > 0 {
-		sb.WriteString(sgrColor("magenta", " | "))
-		sb.WriteString(sgrColor("magenta", fmt.Sprintf("%.0f tok/s", s.LastSpeedTokensPerSec)))
+		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%.0f tok/s", s.ModelAvgTokPerSec)))
 	} else {
 		sb.WriteString(sgrColor("magenta", " | "))
 		sb.WriteString(sgrColor("magenta", ". tok/s"))
@@ -592,36 +664,20 @@ func (m *tuiModel) startTask(input string) {
 
 	m.setLoading(true)
 	m.stats.RequestStartTime = time.Now()
+	// bash 增量输出：注册回调 + 清空上轮残留（任务结束会注销）
+	m.clearBashLive()
+	m.setBashLive(true)
 	m.addChatLine(chatLine{role: "user", content: input, ts: time.Now()})
 
-	// 设置 ask_user_question 回调：阻塞等待用户在聊天区回答（通过 askPending channel 传递）
+	// 设置 ask_user_question 回调：阻塞等待用户在聊天区回答（通过 askPending channel 传递）。
+	// 注意必须走 builtins.SetAskUser——工具读的是 builtins 包内的回调，
+	// 只设 m.agent.AskUser 会让工具永远走「无交互界面」降级分支。
+	// 计划审批（exit_plan_mode）同形复用同一机制，否则会静默 approve。
 	m.askMu.Lock()
 	m.askPending = nil
 	m.askMu.Unlock()
-	m.agent.AskUser = func(questionsJSON string) (string, error) {
-		ch := make(chan string, 1)
-		m.askMu.Lock()
-		m.askPending = &askPending{questions: questionsJSON, answerCh: ch}
-		m.askMu.Unlock()
-		// 通知事件循环渲染问题提示（QueueUpdateDraw 安全）
-		m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
-		select {
-		case ans := <-ch:
-			m.askMu.Lock()
-			if m.askPending != nil && m.askPending.answerCh == ch {
-				m.askPending = nil
-			}
-			m.askMu.Unlock()
-			return ans, nil
-		case <-time.After(5 * time.Minute):
-			m.askMu.Lock()
-			if m.askPending != nil && m.askPending.answerCh == ch {
-				m.askPending = nil
-			}
-			m.askMu.Unlock()
-			return "", fmt.Errorf("ask_user timed out after 5 minutes")
-		}
-	}
+	builtins.SetAskUser(m.askViaChat)
+	agent.SetPlanAskUser(m.askViaChat)
 
 	// 工具交换收集：每次工具执行后记录，任务结束时持久化到会话文件 + Initial。
 	// 会话恢复后模型能看到之前试过什么（修复“工具调用过程不落盘”的黑盒问题）。
@@ -658,6 +714,8 @@ func (m *tuiModel) startTask(input string) {
 				m.textView.ScrollToEnd()
 			}
 		})
+		// 任务结束：注销 bash 增量回调（实时块不再显示）
+		m.setBashLive(false)
 
 		// 任务有效性检查：若用户已取消并发出新任务（evtCh 被替换），丢弃本次结果
 		m.liveMu.Lock()
@@ -716,14 +774,20 @@ func (m *tuiModel) startTask(input string) {
 				counted := m.streamCountedUsage
 				m.streamMu.Unlock()
 				if !sameUsage(counted, u) {
-					m.stats.AddUsage(u, elapsed)
+					if notice := m.recordUsage(u, elapsed); notice != "" {
+						m.addChatLineAsync(chatLine{role: "err", content: notice, ts: time.Now()})
+					}
 				}
 			}
 		}
 		if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 			m.stats.ThinkingLevel = ut.ThinkingEnabled()
 		}
+		prevModel := m.stats.ModelName
 		m.stats.ModelName = m.agent.Model()
+		if prevModel != "" && prevModel != m.agent.Model() {
+			m.stats.ResetModelStats()
+		}
 
 		// 无论成功与否，都追加本次 user 消息到初始历史（供下次 Run 继承）
 		m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: input})
@@ -779,7 +843,11 @@ func (m *tuiModel) flushStream() {
 			if !start.IsZero() {
 				dur = time.Since(start)
 			}
-			m.stats.AddUsage(usage, dur)
+			notice := m.recordUsage(usage, dur)
+			if notice != "" {
+				// 在事件循环内，可直接写入聊天区
+				m.lines = append(m.lines, chatLine{role: "err", content: notice, ts: time.Now()})
+			}
 		}
 
 		// 拷贝模式：不覆盖拷贝视图（否则选择高亮/拷贝位置被流式重绘打乱）。
@@ -814,9 +882,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		lines: []chatLine{
 			{role: "system", content: banner(), ts: time.Now()},
 		},
-		stats:    tuiStats{ModelName: a.Model()},
-		clip:     newClipboard(),
-		copyMode: false,
+		stats:      tuiStats{ModelName: a.Model()},
+		clip:       newClipboard(),
+		copyMode:   false,
+		pasteGuard: pasteGuardEnabledFor(os.Getenv),
 		renderer: func() *glamour.TermRenderer {
 			r, _ := glamour.NewTermRenderer(
 				glamour.WithAutoStyle(),
@@ -911,8 +980,11 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 
 	// 应用
 	m.app = tview.NewApplication()
-	m.app.EnableMouse(true)
-	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理
+	// Windows（ConPTY/Windows Terminal）下默认不启用鼠标上报：conhost 的
+	// win32-input-mode 双重编码缺陷会把鼠标事件还原成字符泄漏进输入框，
+	// 既产生乱码又会被误判成 ESC → 无辜「任务已取消」。详见 platform_input.go。
+	m.app.EnableMouse(shouldEnableMouse())
+	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理（Unix 生效；Windows 由 pasteGuard 兜底）
 
 	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
 	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
@@ -941,6 +1013,21 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 
 	// 全局按键捕获：Enter 发送、Alt+Enter 换行
 	m.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// 粘贴换行防护：Windows 无 bracketed paste，粘贴多行文本的换行会变成裸 Enter。
+		// 记录按键时间，毫秒级连发的 Enter 视为粘贴换行 → 插入换行而非提交。
+		// 注意：本函数返回 nil 表示事件被吞掉（InputCapture 语义），与 MouseCapture 相反。
+		now := time.Now()
+		defer func() { m.lastKeyAt = now }()
+		if m.pasteGuard && event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModAlt == 0 {
+			if isPasteNewline(now, m.lastKeyAt) || isPasteNewline(now, m.lastNewlineAt) {
+				m.lastNewlineAt = now
+				m.numpadState = 0 // 小键盘序列不会含 Enter，顺带复位避免状态卡住
+				cur := m.inputField.GetText()
+				m.inputField.SetText(cur+"\n", true)
+				return nil
+			}
+		}
+
 		// 小键盘数字键状态机：\x1bOx → 数字
 		// tcell 把 \x1bOx 拆成 Alt+O 事件 + 普通字母事件
 		// 我们需要组合它们并映射为数字
@@ -1172,8 +1259,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return
 		}
 		// @ 路径/工具/命令补全
-		if atIdx := strings.LastIndex(current, "@"); atIdx >= 0 {
-			after := strings.TrimSpace(current[atIdx+1:])
+		if atIdx := lastAtMentionIndex(current); atIdx >= 0 {
 			// 收集工具名列表
 			var toolNames []string
 			for _, t := range m.agent.Plugins.Tools() {
@@ -1183,12 +1269,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			for _, c := range m.agent.Commands.List() {
 				cmdNames = append(cmdNames, "/"+c.Name)
 			}
-			candidates := completeAtRaw(after, cmdNames, toolNames)
-			if len(candidates) == 0 {
-				m.autoComplete.SetText("")
-				m.autoCompleteList = nil
-				return
-			}
+			candidates := completeAtRaw(atAfterToken(current, atIdx), cmdNames, toolNames)
 			if len(candidates) == 1 {
 				// 唯一匹配：填入候选
 				// 如果候选是纯路径（不含 @cmd:/@tool:/@file: 等分类前缀），保留 @ 后内容不变
@@ -1250,9 +1331,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			} else {
 				m.autoComplete.SetText("")
 			}
-		} else if idx := strings.LastIndex(current, "@"); idx >= 0 {
-			// @ 补全：检测 @ 后面的内容
-			after := strings.TrimSpace(current[idx+1:])
+		} else if idx := lastAtMentionIndex(current); idx >= 0 {
+			// @ 补全：仅在 @ 处于 token 边界时触发（否则粘贴密码也会弹候选）
+			after := atAfterToken(current, idx)
 			var toolNames []string
 			for _, t := range m.agent.Plugins.Tools() {
 				toolNames = append(toolNames, t.Name)
@@ -1343,21 +1424,86 @@ func (m *tuiModel) addQuitHint() {
 	m.addChatLine(chatLine{role: "system", content: hint, ts: time.Now()})
 }
 
+// askViaChat 是 TUI 侧的问答实现：把问题（带编号选项）渲染进聊天区，
+// 阻塞等待用户在输入框回复编号/文字。供 ask_user_question 与计划审批共用。
+// 从 agent goroutine 调用；答案由 submitInput 在事件循环中填入 channel。
+func (m *tuiModel) askViaChat(questionsJSON string) (string, error) {
+	var qs []builtins.Question
+	_ = json.Unmarshal([]byte(questionsJSON), &qs)
+	if len(qs) == 0 {
+		return "[]", nil
+	}
+	ch := make(chan string, 1)
+	m.askMu.Lock()
+	m.askPending = &askPending{questions: questionsJSON, qs: qs, answerCh: ch}
+	m.askMu.Unlock()
+	// 通知事件循环渲染问题提示（QueueUpdateDraw 安全）
+	m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
+
+	clearPending := func() {
+		m.askMu.Lock()
+		if m.askPending != nil && m.askPending.answerCh == ch {
+			m.askPending = nil
+		}
+		m.askMu.Unlock()
+	}
+
+	// 轮询 Aborted：用户按 ESC 取消任务时不能干等 5 分钟（工具阻塞会让
+	// canceling 一直是 true，期间所有新输入都被排队）
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(5 * time.Minute)
+	for {
+		select {
+		case ans := <-ch:
+			clearPending()
+			return ans, nil
+		case <-ticker.C:
+			if m.agent.Aborted() {
+				clearPending()
+				return "[]", nil
+			}
+		case <-deadline:
+			clearPending()
+			// 超时不报错（否则工具失败会打断任务）：返回空答案让模型自行决策
+			m.addChatLineAsync(chatLine{role: "err", content: "提问等待超时（5 分钟），已让模型自行决策", ts: time.Now()})
+			return "[]", nil
+		}
+	}
+}
+
 // submitInput 处理发送：命令派发 / 退出 / 排队 / 启动任务
 func (m *tuiModel) submitInput(s string) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return
 	}
-	// 若当前有 ask_user_question 等待回答，将输入作为答案（优先于正常任务流）
+	// 若当前有 ask_user_question 等待回答，将输入作为答案（优先于正常任务流）。
+	// 多问题时逐问收集：未答完不发 channel，只在聊天区提示进入下一问。
 	m.askMu.Lock()
 	pending := m.askPending
+	var askPayload string
+	askDone := false
+	if pending != nil && pending.idx < len(pending.qs) {
+		pending.answers = append(pending.answers, answerFor(pending.qs[pending.idx], s))
+		pending.idx++
+		if pending.idx >= len(pending.qs) {
+			b, _ := json.Marshal(pending.answers)
+			askPayload = string(b)
+			m.askPending = nil
+			askDone = true
+		}
+	}
 	m.askMu.Unlock()
 	if pending != nil {
 		m.app.QueueUpdateDraw(func() {
 			m.addChatLine(chatLine{role: "user", content: "【回答问题】" + s, ts: time.Now()})
 		})
-		pending.answerCh <- s
+		if askDone {
+			pending.answerCh <- askPayload
+		} else {
+			m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
+		}
 		return
 	}
 
@@ -1381,7 +1527,11 @@ func (m *tuiModel) submitInput(s string) {
 				if result.Out != "" {
 					m.addChatLine(chatLine{role: "bot", content: result.Out, ts: time.Now()})
 				}
+				prevModel := m.stats.ModelName
 				m.stats.ModelName = m.agent.Model()
+				if prevModel != "" && prevModel != m.agent.Model() {
+					m.stats.ResetModelStats()
+				}
 				if ut, ok := m.agent.LLM.(interface{ ThinkingEnabled() string }); ok {
 					m.stats.ThinkingLevel = ut.ThinkingEnabled()
 				}

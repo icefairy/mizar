@@ -4,6 +4,16 @@
 
 ---
 
+## [Unreleased]
+
+### 🐛 修复
+
+- **Windows 上「没按键却突然任务已取消」+ 输入框乱码**：根因是 `EnableMouse(true)` 在 Windows 上要求 conhost 向宿主终端请求鼠标上报，而 ConPTY 的 win32-input-mode 存在双重编码缺陷（microsoft/terminal#15083、#16343），鼠标移动/滚轮被还原成字符流灌进控制台输入缓冲；tcell 的 ConsoleScreen（`ReadConsoleInputW`，无 VT 序列解析）把它们当普通按键交给 tview → 输入框出现 `[<35;66;61M...` 乱码，且序列以 ESC 开头，被误判为用户按下 ESC → 无辜触发「任务已取消（当前步骤结束后停止）」。现 Windows 下默认不启用鼠标上报，整条链路断开；复制粘贴改用终端原生能力（拖选 + `Ctrl+Shift+C/V`、右键菜单），键盘侧 `Alt+L` / `Alt+C` 拷贝模式不受影响，聊天区滚动仍可用 `PgUp`/`PgDn`。需要鼠标的用户可设 `MIZAR_MOUSE=1` 强制开启。
+- **Windows 粘贴多行文本被逐行提交**：tcell 在 Windows 上 `EnablePaste` 是空实现（无 bracketed paste），粘贴多行时换行符变成裸 Enter，导致半截内容被发送。现增加粘贴换行防护：毫秒级连发的 Enter 判定为粘贴换行（插入换行而非提交），人手打字间隔（≥8ms）仍正常提交；`MIZAR_PASTE_GUARD=0` 可关闭。
+- **粘贴带 `@` 的文本被误解析成文件引用**：`resolveAtRef` 原先取行内最后一个 `@` 并把其后整段文字当路径，粘贴密码（`p@ssw0rd`）、邮箱（`user@example.com`）会被改写成「读取文件 xxx」。现对齐 pi 的边界规则：① `@` 必须处于 token 边界（行首或前一字符是空白/标点），词内 `@` 一律不解析；② 裸路径需真实存在或带路径形态（含 `/`、`./` `../` `~/` 开头）才解析；③ 显式前缀 `@cmd:` `@tool:` `@file:` `@read:` `@dir:` 表达明确意图，照旧解析；④ 带空格路径用 `@"my file.txt"` 引号形式；⑤ 引用后的自然语言不再被吞掉。补全侧同步只在边界处触发，粘贴密码不再弹候选。
+
+---
+
 ## [v0.4.1] — 2026-09-04
 
 ### ✨ 新增
@@ -32,7 +42,13 @@
 - **循环卫生守卫（Loop Guard）**：复刻 deepseek-harness 的 repeat-tool-reminder，JSON deep key-sort 参数规范化后比较，同一工具+参数连续重复时在阈值 [3, 5, 8] 处渐进注入提醒（gentle → detailed，含工具名/次数/参数预览），超 8 次终止任务。比原 WeakModelTuner 直接 kill 更宽容。
 - **todo_write 工具**：结构化任务清单，支持 `pending/in_progress/completed` 状态，whole-list replacement 语义，单次调用替换整个列表。
 - **后台任务（Jobs）**：`job_start` / `job_list` / `job_output` / `job_kill` 工具 + `bash run_in_background`，进程退出后自动注入完成通知到对话上下文。
-- **ask_user_question 工具**：TUI 模式下阻塞等待用户回答（5 分钟超时），非 TUI 模式优雅降级提示"请自行完成任务"。
+- **ask_user_question 工具（文本编号选项）**：问题渲染为带编号的文本选项（`1) xxx`），用户直接回复编号即完成选择。TUI、经典 readline、`-task` 单次任务三种模式均可用（多选 `1,3`；直接回车 = 第 1 项）；无交互界面（Server/管道）时降级为「把选项写进正文，用户下一条消息回编号」，而非只说“请自行决策”。同时修复 `SetAskUser` / `SetPlanAskUser` 零调用导致 TUI 提问也走降级、`exit_plan_mode` 静默 approve 的问题。
+- **借鉴 pi agent v1.1.0（5 项）**：
+  - **压缩摘要保真**：工具调用序列化为单行（`edit(path="/x", edits=[2 item(s)])`）、工具结果截断、累计 `<read-files>`/`<modified-files>` 清单；`SummaryPrompt` 补 `## Constraints & Preferences` 节。入口统一为 `agent.BuildSummaryInput`。
+  - **压缩切点修复**：去掉压缩后插入的空 `system` 占位（白占 prompt 且干扰缓存前缀）；切点落在单个 user span 内部时额外生成「span 前缀摘要」与历史摘要合并（对齐 pi split user-message span）。
+  - **显著 cache miss 提示**：命中率从高位下跌 ≥30 个百分点且落到 50% 以下时在聊天区提示一行，说明「上下文前缀已失效，本轮更慢更贵」；prompt < 5000 tokens 不判定（噪音），恢复后可再次提示。
+  - **bash 增量输出流式**：命令运行中在聊天区尾部实时显示最近 12 行（80ms 节流，缓冲上限 64KB）；超时/结束时 Flush 保证尾部输出不丢；无回调（Server/CI）时退化为原行为。
+  - **通用工具 terminate**：`plugins.Tool.Terminate` 声明终止语义，执行成功后以返回值收尾、省一次 follow-up LLM 调用；失败时忽略声明让模型纠正。
 - **skill 按需加载工具**：通过 `skill <name>` 一次性返回 SKILL.md 全文，替代原有的索引注入 + read 文件方式。
 - **插件直连 LLM**：`ai_chat` / `ai_chat_stream` 宿主函数，插件可直接调用 LLM 而无需经过 Agent 循环（v0.3.0 引入）。
 - **流式输出**：LLM SSE → agent 流式回调 → TUI/Server 增量渲染，支持实时打字机效果。

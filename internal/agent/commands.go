@@ -25,6 +25,9 @@ type Command struct {
 	Description string // 帮助文本
 	PluginFile  string // 来源插件文件（空=内置命令）
 	Run         func(args string) (string, error)
+	// Timeout 该命令的执行超时；0=沿用 DispatchAsync 调用方的默认值。
+	// 走 LLM/网络的慢命令（如 compact）应设大值。
+	Timeout time.Duration
 }
 
 // CommandRegistry 斜杠命令注册表（线程安全）。
@@ -191,6 +194,10 @@ func (r *CommandRegistry) DispatchAsync(line string, timeout time.Duration) <-ch
 			result.Handled = true
 			result.Out, result.Err = out, err
 		}()
+		// 命令自带超时优先（慢命令如 compact 标大值）
+		if c.Timeout > 0 {
+			timeout = c.Timeout
+		}
 		if timeout > 0 {
 			select {
 			case <-time.After(timeout):
