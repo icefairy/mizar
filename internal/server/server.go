@@ -31,7 +31,7 @@ func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {
 		session: st,
 		mux:     http.NewServeMux(),
 		hub:     newHub(),
-		web:     newWebUI(),
+		web:     newWebUI(webStorePath()),
 	}
 	s.wsUp = newWSUpgrader(cfg.Token)
 	s.routes()
@@ -108,4 +108,11 @@ func (s *Server) EmitToWS(event, dataJSON string) {
 		}
 	}
 	s.hub.broadcast(map[string]any{"type": "event", "event": event, "data": data})
+}
+
+// broadcastStream 广播流式增量（step + 可显示文本增量 + 是否思考过程）。
+func (s *Server) broadcastStream(step int, delta, kind string) {
+	s.hub.broadcast(map[string]any{
+		"type": "event", "event": "stream", "step": step, "delta": delta, "kind": kind,
+	})
 }

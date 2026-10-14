@@ -249,6 +249,14 @@ func (a *Agent) Model() string {
 	return "mizar-agent"
 }
 
+// LLMInfo 返回底层 LLM 的 baseURL 与 apiKey（Web UI 拉模型清单用）。
+func (a *Agent) LLMInfo() (string, string) {
+	if lm, ok := a.LLM.(interface{ Info() (string, string) }); ok {
+		return lm.Info()
+	}
+	return "", ""
+}
+
 // stableBasePrompt 系统提示的稳定前缀（identity + 工作方法 + 搜索定位）。
 // 跨会话不变，保证 prefix cache 命中。
 const stableBasePrompt = `你是开阳(Mizar) Agent，一个自举的编码智能体。你通过调用工具帮助用户完成任务。

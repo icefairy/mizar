@@ -33,8 +33,39 @@ type OpenAI struct {
 	Client  *http.Client
 	// 思考等级（auto/off/low/medium/high），空串等价 auto
 	ThinkingLevel string
+	// Params 运行时对话参数（temperature/top_p/max_tokens，Web UI 设置用）。
+	// nil = 不传，保持供应商默认。进程级生效，影响 Chat / ChatWithTools 全部路径。
+	Params *ChatParams
 	// 最后一次响应的 token 用量（只读，供 TUI 状态栏展示）
 	lastUsage *agent.Usage
+}
+
+// ChatParams 运行时对话参数（可选覆盖）。
+type ChatParams struct {
+	Temperature *float64 `json:"temperature,omitempty"` // 温度 0-2
+	TopP        *float64 `json:"top_p,omitempty"`       // 核采样 0-1
+	MaxTokens   int      `json:"max_tokens,omitempty"`  // 最大输出 token（0=不传）
+}
+
+// SetParams 设置运行时对话参数（nil 清除）。
+func (o *OpenAI) SetParams(p *ChatParams) {
+	o.Params = p
+}
+
+// applyParams 把运行时参数应用到请求（nil 字段不覆盖，保持默认）。
+func (o *OpenAI) applyParams(r *chatReq) {
+	if o.Params == nil {
+		return
+	}
+	if o.Params.Temperature != nil {
+		r.Temperature = o.Params.Temperature
+	}
+	if o.Params.TopP != nil {
+		r.TopP = o.Params.TopP
+	}
+	if o.Params.MaxTokens > 0 {
+		r.MaxTokens = o.Params.MaxTokens
+	}
 }
 
 // NewOpenAI 创建客户端。
@@ -117,7 +148,8 @@ type chatReq struct {
 	Messages     []chatMsg `json:"messages"`
 	Tools        []toolDef `json:"tools,omitempty"`
 	MaxTokens    int       `json:"max_tokens,omitempty"`
-	Temperature  float64   `json:"temperature,omitempty"`
+	Temperature  *float64  `json:"temperature,omitempty"`
+	TopP         *float64  `json:"top_p,omitempty"`
 	Stream       bool      `json:"stream,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 	Thinking     *struct {
@@ -521,6 +553,7 @@ func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message,
 		req.Tools = append(req.Tools, pluginsToolToDef(t))
 	}
 	c.setThinking(&req)
+	c.applyParams(&req)
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -662,6 +695,7 @@ func (o *OpenAI) chatStream(ctx context.Context, messages []agent.Message, tools
 		req.Tools = append(req.Tools, pluginsToolToDef(t))
 	}
 	o.setThinking(&req)
+	o.applyParams(&req)
 	reply, err := o.streamCoreCtx(ctx, &req, true, onToken)
 	if err != nil {
 		return reply, err
@@ -682,7 +716,7 @@ func (o *OpenAI) AIChatStream(req AIChatRequest, onToken func(agent.StreamDelta)
 		r.MaxTokens = req.MaxTokens
 	}
 	if req.Temperature != nil {
-		r.Temperature = *req.Temperature
+		r.Temperature = req.Temperature
 	}
 	if req.Thinking != "" {
 		o.setThinkingLevel(&r, req.Thinking)
@@ -956,6 +990,7 @@ func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 	req := chatReq{Model: c.Model}
 	req.Messages = encodeMessages(messages)
 	c.setThinking(&req)
+	c.applyParams(&req)
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -1005,7 +1040,7 @@ func (o *OpenAI) AIChat(req AIChatRequest) (string, error) {
 		r.MaxTokens = req.MaxTokens
 	}
 	if req.Temperature != nil {
-		r.Temperature = *req.Temperature
+		r.Temperature = req.Temperature
 	}
 	if req.Thinking != "" {
 		o.setThinkingLevel(&r, req.Thinking)
@@ -1170,6 +1205,23 @@ func (o *OpenAI) LastUsage() *agent.Usage {
 
 func (o *OpenAI) ModelName() string {
 	return o.Model
+}
+
+// SetModel 运行时切换模型（Web UI 用）。线程安全由调用方保证（进程级设置，低频）。
+func (o *OpenAI) SetModel(m string) {
+	if m != "" {
+		o.Model = m
+	}
+}
+
+// Thinking 返回当前思考等级。
+func (o *OpenAI) Thinking() string {
+	return o.ThinkingLevel
+}
+
+// Info 返回 baseURL 与 apiKey（Web UI 拉模型清单用）。
+func (o *OpenAI) Info() (string, string) {
+	return o.BaseURL, o.APIKey
 }
 
 // ============================================================================

@@ -21,25 +21,98 @@
 
 <!-- 主界面 -->
 <div id="app" class="app hidden">
-  <header class="topbar">
-    <div class="brand">开阳 · Mizar</div>
-    <div class="modes">
-      <button id="modeChat" class="mode active" type="button">普通对话</button>
-      <button id="modeAgent" class="mode" type="button">Agent 模式</button>
+  <!-- 左侧会话栏 -->
+  <aside id="sidebar" class="sidebar">
+    <div class="side-head">
+      <button id="newConvBtn" class="new-conv" type="button">+ 新建会话</button>
     </div>
-    <div class="right">
-      <span id="modelTag" class="model-tag"></span>
-      <button id="abortBtn" class="ghost hidden" type="button">中止</button>
-      <button id="logoutBtn" class="ghost" type="button">退出</button>
+    <div id="convList" class="conv-list"></div>
+    <div class="side-foot">
+      <button id="settingsBtn" class="ghost wide" type="button">⚙ 设置</button>
+      <button id="logoutBtn" class="ghost wide" type="button">退出</button>
     </div>
-  </header>
+  </aside>
 
-  <main id="log" class="log"></main>
+  <!-- 右侧主区 -->
+  <div class="main">
+    <header class="topbar">
+      <button id="menuBtn" class="ghost only-mobile" type="button">☰</button>
+      <div class="brand">开阳 · Mizar</div>
+      <div class="modes">
+        <button id="modeChat" class="mode active" type="button">普通对话</button>
+        <button id="modeAgent" class="mode" type="button">Agent 模式</button>
+      </div>
+      <div class="right">
+        <span id="modelTag" class="model-tag"></span>
+        <button id="abortBtn" class="ghost hidden" type="button">中止</button>
+      </div>
+    </header>
 
-  <footer class="composer">
-    <textarea id="input" rows="1" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
-    <button id="sendBtn" type="button">发送</button>
-  </footer>
+    <main id="log" class="log"></main>
+
+    <footer class="composer">
+      <textarea id="input" rows="1" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
+      <button id="sendBtn" type="button">发送</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 设置面板 -->
+<div id="settings" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>设置</h2>
+      <button id="settingsClose" class="ghost" type="button">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="field">
+        <span>模型</span>
+        <div class="row">
+          <input id="setModel" type="text" placeholder="deepseek-v4-flash" list="modelList">
+          <button id="refreshModels" class="ghost" type="button">拉取</button>
+        </div>
+        <datalist id="modelList"></datalist>
+        <small id="modelHint" class="hint"></small>
+      </label>
+
+      <label class="field">
+        <span>思考等级</span>
+        <select id="setThinking">
+          <option value="auto">自动 (auto)</option>
+          <option value="off">关闭 (off)</option>
+          <option value="low">低 (low)</option>
+          <option value="medium">中 (medium)</option>
+          <option value="high">高 (high)</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span>温度 temperature <em id="tempVal">—</em></span>
+        <input id="setTemp" type="range" min="0" max="2" step="0.1">
+        <button id="tempClear" class="link" type="button">用默认值</button>
+      </label>
+
+      <label class="field">
+        <span>核采样 top_p <em id="toppVal">—</em></span>
+        <input id="setTopp" type="range" min="0" max="1" step="0.05">
+        <button id="toppClear" class="link" type="button">用默认值</button>
+      </label>
+
+      <label class="field">
+        <span>最大输出 token</span>
+        <input id="setMaxTokens" type="number" min="0" step="256" placeholder="0 = 不限制">
+      </label>
+
+      <label class="field">
+        <span>系统提示词</span>
+        <textarea id="setSystem" rows="3" placeholder="留空使用默认"></textarea>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <span id="settingsMsg" class="hint"></span>
+      <button id="settingsSave" class="primary" type="button">保存并应用</button>
+    </div>
+  </div>
 </div>
 
 <script src="/web/app.js"></script>

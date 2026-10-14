@@ -8,11 +8,15 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"mizar/internal/agent"
+	"mizar/internal/config"
+	"mizar/internal/llm"
 )
 
 //go:embed webui
@@ -24,16 +28,20 @@ type webSession struct {
 	expires  time.Time
 }
 
-// webUI Web UI 运行时状态：会话表 + 普通对话历史。
+// webUI Web UI 运行时状态：登录会话表 + 会话存储。
 type webUI struct {
 	mu       sync.Mutex
-	sessions map[string]webSession    // token -> session
-	chat     []agent.Message          // 普通对话模式的历史（system + user/assistant）
+	sessions map[string]webSession // token -> session
 	sessTTL  time.Duration
+	store    *webStore
 }
 
-func newWebUI() *webUI {
-	return &webUI{sessions: map[string]webSession{}, sessTTL: 24 * time.Hour}
+func newWebUI(storePath string) *webUI {
+	return &webUI{
+		sessions: map[string]webSession{},
+		sessTTL:  24 * time.Hour,
+		store:    newWebStore(storePath),
+	}
 }
 
 // cookieName 会话 cookie 名。
@@ -42,6 +50,13 @@ const webCookieName = "mizar_web_session"
 // newToken 生成随机会话 token。
 func newToken() string {
 	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// randHex 生成 n 字节随机十六进制串（会话 id 用）。
+func randHex(n int) string {
+	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
@@ -80,6 +95,15 @@ func (u *webUI) dropSession(tok string) {
 	delete(u.sessions, tok)
 }
 
+// webStorePath Web UI 数据文件路径（~/.mizar/webui.json）。
+func webStorePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "."
+	}
+	return filepath.Join(home, ".mizar", "webui.json")
+}
+
 // routes 注册 Web UI 端点（在 Server.routes 中调用）。
 func (s *Server) webRoutes() {
 	if !s.cfg.Web.Enabled {
@@ -115,11 +139,16 @@ func (s *Server) webRoutes() {
 	s.mux.HandleFunc("/web/api/login", s.handleWebLogin)
 	s.mux.HandleFunc("/web/api/logout", s.handleWebLogout)
 	s.mux.HandleFunc("/web/api/me", s.webAuth(s.handleWebMe))
+	// 会话 CRUD
+	s.mux.HandleFunc("/web/api/conversations", s.webAuth(s.handleConversations))
+	s.mux.HandleFunc("/web/api/conversation", s.webAuth(s.handleConversation))
 	// 对话 / Agent 运行 / 中止
 	s.mux.HandleFunc("/web/api/chat", s.webAuth(s.handleWebChat))
 	s.mux.HandleFunc("/web/api/run", s.webAuth(s.handleWebRun))
 	s.mux.HandleFunc("/web/api/abort", s.webAuth(s.handleWebAbort))
-	s.mux.HandleFunc("/web/api/clear", s.webAuth(s.handleWebClear))
+	// 设置（模型 + 对话参数）
+	s.mux.HandleFunc("/web/api/settings", s.webAuth(s.handleSettings))
+	s.mux.HandleFunc("/web/api/models", s.webAuth(s.handleModelsList))
 	// WebSocket（cookie 鉴权，复用广播 hub）
 	s.mux.HandleFunc("/web/ws", s.webAuth(s.handleWS))
 }
@@ -200,7 +229,7 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleWebMe GET /web/api/me → 当前登录用户 + 模型
+// handleWebMe GET /web/api/me → 当前登录用户 + 模型 + 设置
 func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 	c, _ := r.Cookie(webCookieName)
 	user := ""
@@ -210,23 +239,96 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username": user,
 		"model":    s.agent.Model(),
+		"settings": s.web.store.getSettings(),
 	})
 }
 
-// handleWebChat POST /web/api/chat {message} → 普通对话（不调用工具）
+// handleConversations GET(列表) / POST(新建) / DELETE(删除)
+func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
+	st := s.web.store
+	switch r.Method {
+	case http.MethodGet:
+		list := st.list()
+		// 只返回摘要（不含完整消息），减小响应体
+		out := make([]map[string]any, 0, len(list))
+		for _, c := range list {
+			out = append(out, map[string]any{
+				"id": c.ID, "title": c.Title, "mode": c.Mode,
+				"updated_at": c.UpdatedAt, "count": len(c.Messages),
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"conversations": out})
+	case http.MethodPost:
+		var body struct {
+			Mode string `json:"mode"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Mode == "" {
+			body.Mode = "chat"
+		}
+		c := st.create(body.Mode)
+		writeJSON(w, http.StatusOK, map[string]any{"conversation": c})
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" || !st.delete(id) {
+			errJSON(w, http.StatusNotFound, "conversation not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleConversation GET(单会话) / PATCH(重命名)
+func (s *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
+	st := s.web.store
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		errJSON(w, http.StatusBadRequest, "id required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		c := st.get(id)
+		if c == nil {
+			errJSON(w, http.StatusNotFound, "conversation not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"conversation": c})
+	case http.MethodPatch:
+		var body struct {
+			Title string `json:"title"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Title) == "" {
+			errJSON(w, http.StatusBadRequest, "title required")
+			return
+		}
+		if !st.rename(id, strings.TrimSpace(body.Title)) {
+			errJSON(w, http.StatusNotFound, "conversation not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleWebChat POST /web/api/chat {conversation_id,message} → 普通对话（不调用工具）
 func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var body struct {
-		Message string `json:"message"`
+		ConversationID string `json:"conversation_id"`
+		Message        string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Message) == "" {
 		errJSON(w, http.StatusBadRequest, "message required")
 		return
 	}
-	reply, err := s.chatOnce(body.Message)
+	reply, err := s.chatOnce(body.ConversationID, body.Message)
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -234,55 +336,131 @@ func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
-// chatOnce 普通对话：维护独立历史，直接调 LLM（无工具循环）。
-func (s *Server) chatOnce(msg string) (string, error) {
-	u := s.web
-	u.mu.Lock()
-	if len(u.chat) == 0 {
-		u.chat = append(u.chat, agent.Message{Role: agent.RoleSystem,
-			Content: "你是开阳（Mizar）的普通对话助手。直接、简洁地回答用户问题，用中文。不调用任何工具。"})
-	}
-	u.chat = append(u.chat, agent.Message{Role: agent.RoleUser, Content: msg})
-	hist := make([]agent.Message, len(u.chat))
-	copy(hist, u.chat)
-	u.mu.Unlock()
-
-	llm := s.agent.LLM
-	if llm == nil {
+// chatOnce 普通对话：按会话维护历史，直接调 LLM（无工具循环）。
+// 支持流式：底层 LLM 若实现 ChatStream，则逐分片通过 WS 广播。
+func (s *Server) chatOnce(convID, msg string) (string, error) {
+	client := s.agent.LLM
+	if client == nil {
 		return "", errString("LLM 未初始化")
 	}
-	reply, err := llm.Chat(hist)
+	set := s.web.store.getSettings()
+	sys := set.System
+	if strings.TrimSpace(sys) == "" {
+		sys = "你是开阳（Mizar）的对话助手。直接、简洁地回答用户问题，用中文。"
+	}
+	// 组装历史
+	msgs := []agent.Message{{Role: agent.RoleSystem, Content: sys}}
+	if convID != "" {
+		if c := s.web.store.get(convID); c != nil {
+			for _, m := range c.Messages {
+				msgs = append(msgs, agent.Message{Role: m.Role, Content: m.Content})
+			}
+		}
+	}
+	msgs = append(msgs, agent.Message{Role: agent.RoleUser, Content: msg})
+	// 截断：仅保留 system + 最近 40 条
+	if len(msgs) > 41 {
+		msgs = append(msgs[:1], msgs[len(msgs)-40:]...)
+	}
+
+	var reply string
+	var err error
+	// 优先走 AIChatStream：wrapReply=false，返回纯文本（不包 agent 控制 JSON），
+	// 且支持 system/参数覆盖；逐分片通过 WS 广播。
+	if sl, ok := client.(interface {
+		AIChatStream(llm.AIChatRequest, func(agent.StreamDelta)) (string, error)
+	}); ok {
+		req := llm.AIChatRequest{System: sys, Thinking: set.Thinking,
+			Temperature: set.Temperature, MaxTokens: set.MaxTokens}
+		if set.TopP != nil {
+			// AIChatRequest 无 TopP 字段，走全局 Params（applySettings 已设）
+			_ = set.TopP
+		}
+		for _, m := range msgs[1:] { // 跳过我们组装的 system，system 用 req.System 传
+			req.Messages = append(req.Messages, llm.AIChatMsg{Role: m.Role, Content: m.Content})
+		}
+		reply, err = sl.AIChatStream(req, func(d agent.StreamDelta) {
+			if d.Thinking != "" {
+				s.broadcastStream(0, d.Thinking, "thinking")
+			}
+			if d.Content != "" {
+				s.broadcastStream(0, d.Content, "reply")
+			}
+		})
+	} else {
+		reply, err = client.Chat(msgs)
+	}
 	if err != nil {
 		return "", err
 	}
-	u.mu.Lock()
-	u.chat = append(u.chat, agent.Message{Role: agent.RoleAssistant, Content: reply})
-	// 简单截断：历史过长时保留最近 40 条（对话模式无需复杂压缩）
-	if len(u.chat) > 40 {
-		u.chat = append(u.chat[:1], u.chat[len(u.chat)-39:]...)
+	// 记录到会话
+	if convID != "" {
+		s.web.store.appendMsg(convID, convMessage{Role: "user", Content: msg})
+		s.web.store.appendMsg(convID, convMessage{Role: "assistant", Content: reply})
+		s.web.store.setMode(convID, "chat")
 	}
-	u.mu.Unlock()
 	return reply, nil
 }
 
-// handleWebRun POST /web/api/run {message} → Agent 模式（完整工具循环）
+// handleWebRun POST /web/api/run {conversation_id,message} → Agent 模式（完整工具循环）
 func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var body struct {
-		Message string `json:"message"`
+		ConversationID string `json:"conversation_id"`
+		Message        string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Message) == "" {
 		errJSON(w, http.StatusBadRequest, "message required")
 		return
 	}
 	s.logf("web agent.run: %s", truncateStr(body.Message, 80))
+
+	// Agent 模式复用会话历史：把该会话的 user/assistant 消息注入 a.Initial，
+	// 使切换模式时上下文连续（修复"切 Agent 模式后列表无变化"的割裂感）。
+	if body.ConversationID != "" {
+		if c := s.web.store.get(body.ConversationID); c != nil {
+			var initial []agent.Message
+			for _, m := range c.Messages {
+				initial = append(initial, agent.Message{Role: m.Role, Content: m.Content})
+			}
+			s.agent.Initial = initial
+		}
+	}
+
+	// 流式输出：把每步 LLM 的 reply 文本增量 + 思考过程通过 WS 广播给前端。
+	// 用 StreamTextExtractor 提取可显示文本（剥掉控制 JSON / 工具调用 JSON）。
+	var extr agent.StreamTextExtractor
+	var curStep = -1
+	s.agent.OnLLMStream = func(step int, d agent.StreamDelta) {
+		if step != curStep {
+			// 步骤切换：新的一步开始，重置提取器（工具调用后模型会重新输出）
+			extr.Reset()
+			curStep = step
+		}
+		if d.Thinking != "" {
+			s.broadcastStream(step, d.Thinking, "thinking")
+		}
+		if d.Content == "" {
+			return
+		}
+		if inc := extr.Feed(d.Content); inc != "" {
+			s.broadcastStream(step, inc, "reply")
+		}
+	}
+	defer func() { s.agent.OnLLMStream = nil }()
+
 	reply, err := s.agent.Run(body.Message)
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if body.ConversationID != "" {
+		s.web.store.appendMsg(body.ConversationID, convMessage{Role: "user", Content: body.Message})
+		s.web.store.appendMsg(body.ConversationID, convMessage{Role: "assistant", Content: reply})
+		s.web.store.setMode(body.ConversationID, "agent")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reply": reply})
 }
@@ -293,14 +471,89 @@ func (s *Server) handleWebAbort(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleWebClear POST /web/api/clear → 清空普通对话历史
-func (s *Server) handleWebClear(w http.ResponseWriter, r *http.Request) {
-	if s.web != nil {
-		s.web.mu.Lock()
-		s.web.chat = nil
-		s.web.mu.Unlock()
+// handleSettings GET/POST /web/api/settings → 模型 + 对话参数
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	st := s.web.store
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"settings": st.getSettings(),
+			"model":    s.agent.Model(),
+		})
+	case http.MethodPost:
+		var v webSettings
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			errJSON(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		// 空模型 = 保持当前
+		if strings.TrimSpace(v.Model) == "" {
+			v.Model = s.agent.Model()
+		}
+		st.saveSettings(v)
+		// 应用到 LLM 客户端
+		s.applySettings(v)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": v, "model": s.agent.Model()})
+	default:
+		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// applySettings 把设置应用到 LLM 客户端（模型 + 参数 + 思考等级）。
+// 空字段跳过（不覆盖启动时来自 config.json 的默认值）。
+func (s *Server) applySettings(v webSettings) {
+	type modelSwitcher interface{ SetModel(string) }
+	type paramSetter interface{ SetParams(*llm.ChatParams) }
+	type thinkingSetter interface{ SetThinking(string) }
+	// 模型切换
+	if v.Model != "" {
+		if ms, ok := s.agent.LLM.(modelSwitcher); ok {
+			ms.SetModel(v.Model)
+		}
+	}
+	// 参数设置（全 nil 则跳过，保持默认）
+	if v.Temperature != nil || v.TopP != nil || v.MaxTokens > 0 {
+		if ps, ok := s.agent.LLM.(paramSetter); ok {
+			ps.SetParams(&llm.ChatParams{
+				Temperature: v.Temperature,
+				TopP:        v.TopP,
+				MaxTokens:   v.MaxTokens,
+			})
+		}
+	}
+	// 思考等级（空串跳过，不覆盖 config.json 的 thinking_level）
+	if v.Thinking != "" {
+		if ts, ok := s.agent.LLM.(thinkingSetter); ok {
+			ts.SetThinking(v.Thinking)
+		}
+	}
+}
+
+// handleModelsList GET /web/api/models → 从供应商拉取可用模型清单
+func (s *Server) handleModelsList(w http.ResponseWriter, r *http.Request) {
+	baseURL, apiKey := s.agent.LLMInfo()
+	models, err := config.ListModels(baseURL, apiKey)
+	if err != nil {
+		// 拉取失败不阻断：返回当前模型 + 错误提示
+		writeJSON(w, http.StatusOK, map[string]any{
+			"models":  []string{s.agent.Model()},
+			"current": s.agent.Model(),
+			"error":   err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"models":  models,
+		"current": s.agent.Model(),
+	})
+}
+
+// ApplyStoredSettings 启动时应用持久化的 Web UI 设置（模型/参数/思考等级）。
+func (s *Server) ApplyStoredSettings() {
+	if s.web == nil {
+		return
+	}
+	s.applySettings(s.web.store.getSettings())
 }
 
 // errString 简单 error 包装。

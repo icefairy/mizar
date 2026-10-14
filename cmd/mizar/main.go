@@ -37,7 +37,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.4.5"
+var version = "v0.4.6"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -1555,6 +1555,8 @@ func main() {
 		}
 		cfg.Web = server.WebAuth{Enabled: true, Username: webCfg.Username, Password: webCfg.Password}
 		srv := server.New(cfg, a, st)
+		// 应用持久化的 Web UI 设置（模型/参数/思考等级）
+		srv.ApplyStoredSettings()
 		// 插件 ws_emit 能力：注入 Server 广播
 		host.WSEmit = func(event, dataJSON string) { srv.EmitToWS(event, dataJSON) }
 		// 强制重载使 ws_emit 对已加载插件生效

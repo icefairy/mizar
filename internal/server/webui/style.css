@@ -42,8 +42,39 @@ body {
 .login-card button:disabled { opacity: .6; cursor: default; }
 .err { color: var(--err); font-size: 12px; min-height: 18px; margin-top: 8px; }
 
-/* 主界面 */
-.app { display: flex; flex-direction: column; height: 100%; }
+/* 主界面：左右布局（侧栏 + 主区） */
+.app { display: flex; flex-direction: row; height: 100%; }
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+/* 侧栏 */
+.sidebar {
+  width: 240px; flex: 0 0 240px; display: flex; flex-direction: column;
+  background: var(--bg2); border-right: 1px solid var(--line);
+  transition: margin-left .2s, transform .2s;
+}
+.sidebar.collapsed { margin-left: -240px; }
+.side-head { padding: 12px; }
+.new-conv {
+  width: 100%; padding: 9px; border: 1px dashed var(--line); border-radius: 9px;
+  background: transparent; color: var(--fg); font-size: 13px; cursor: pointer;
+}
+.new-conv:hover { border-color: var(--accent); color: var(--accent2); }
+.conv-list { flex: 1; overflow-y: auto; padding: 4px 8px; }
+.conv-item {
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px; margin-bottom: 2px;
+  border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--fg);
+}
+.conv-item:hover { background: var(--bg3); }
+.conv-item.active { background: var(--bg3); border: 1px solid var(--accent); }
+.conv-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-item .tag { font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.conv-item .del { opacity: 0; font-size: 12px; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 0 2px; }
+.conv-item:hover .del { opacity: 1; }
+.conv-item .del:hover { color: var(--err); }
+.side-foot { padding: 10px; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); }
+.ghost.wide { width: 100%; text-align: left; padding: 8px 10px; }
+.only-mobile { display: inline-block; }
+
 .topbar {
   display: flex; align-items: center; gap: 14px; padding: 10px 16px;
   background: var(--bg2); border-bottom: 1px solid var(--line);
@@ -96,3 +127,46 @@ body {
 }
 .composer button:hover { background: var(--accent2); }
 .composer button:disabled { opacity: .5; cursor: default; }
+
+/* 设置面板 */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal-card {
+  width: 460px; max-width: 92vw; max-height: 88vh; display: flex; flex-direction: column;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 16px 50px rgba(0,0,0,.6);
+}
+.modal-head { display: flex; align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.modal-head h2 { margin: 0; font-size: 16px; flex: 1; }
+.modal-body { padding: 16px 18px; overflow-y: auto; }
+.modal-foot { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-top: 1px solid var(--line); }
+.modal-foot .hint { flex: 1; }
+.field { display: block; margin-bottom: 18px; }
+.field > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.field > span em { color: var(--accent2); font-style: normal; }
+.field .row { display: flex; gap: 8px; }
+.field input[type=text], .field input[type=number], .field select, .field textarea {
+  width: 100%; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; color: var(--fg); font-size: 13px; font-family: inherit; outline: none;
+}
+.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
+.field input[type=range] { width: 100%; margin: 4px 0; accent-color: var(--accent); }
+.field .row input { flex: 1; }
+.field textarea { resize: vertical; }
+.hint { font-size: 11px; color: var(--muted); }
+.link { background: none; border: 0; color: var(--accent2); font-size: 11px; cursor: pointer; padding: 2px 0; }
+.primary {
+  padding: 9px 20px; border: 0; border-radius: 9px; background: var(--accent);
+  color: #fff; font-weight: 600; font-size: 13px; cursor: pointer;
+}
+.primary:hover { background: var(--accent2); }
+
+/* 移动端：侧栏抽屉 */
+@media (max-width: 720px) {
+  .sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 40; margin-left: 0; transform: translateX(0); }
+  .sidebar.collapsed { margin-left: 0; transform: translateX(-100%); }
+  .only-mobile { display: inline-block; }
+  .brand { display: none; }
+}
