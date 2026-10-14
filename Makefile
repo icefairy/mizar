@@ -11,14 +11,17 @@
 # UPX 压缩会显著拖慢构建且压缩产物不利于符号调试，除非显式要求否则不做。
 #
 # 静态编译策略：项目无真实 import "C"，强制 CGO_ENABLED=0 产出纯静态二进制，
-# 不依赖宿主 GLIBC，可跨发行版部署（解决 Alibaba Cloud Linux 等老 GLIBC 系统
-# 报 "GLIBC_2.34 not found" 的问题）。如需临时回到动态编译用 make dynamic。
+# 不依赖宿主 GLIBC，可跨发行版部署（解决 CentOS 7 / glibc 2.17 报
+# "GLIBC_2.32 not found"、Alibaba Cloud Linux 等老 GLIBC 系统的问题）。
+# GOAMD64=v1 限定 x86-64 基线指令集，兼容老 CPU（避免 SIGILL）。
+# ⚠ 发布必须走 make release，勿手工 go build（手工易漏 CGO_ENABLED=0 导致动态链接）。
+# 如需临时回到动态编译用 make dynamic。
 
 BINARY  := mizar
 PKG     := ./cmd/mizar
 LDFLAGS := -s -w
 TRIM    := -trimpath
-GOENV   := CGO_ENABLED=0
+GOENV   := CGO_ENABLED=0 GOAMD64=v1
 
 .PHONY: all build debug dynamic test release upx clean
 
