@@ -41,6 +41,15 @@ type Config struct {
 	// MCPServers 外部 MCP server 列表（mcp_call 宿主函数用）。
 	// 每项: name + (command/args | url)。覆盖内置 db_query 之外的长尾能力。
 	MCPServers []engine.MCPServerConf `json:"mcp_servers,omitempty"`
+	// Web Web UI 配置（-serve 模式下提供网页界面 + 登录鉴权）。
+	Web *WebConfig `json:"web,omitempty"`
+}
+
+// WebConfig Web UI 配置。
+type WebConfig struct {
+	Enabled  bool   `json:"enabled"`             // 是否启用 Web UI（-serve 下默认启用）
+	Username string `json:"username,omitempty"`  // 登录用户名（空=admin）
+	Password string `json:"password,omitempty"`  // 登录密码（空=首次启动随机生成并写回配置）
 }
 
 // SkillInjectIsIndex 技能注入是否索引模式（默认 index；full = 全量正文）。

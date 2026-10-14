@@ -20,6 +20,7 @@ type Server struct {
 	mux     *http.ServeMux
 	wsUp    *wsUpgrader
 	hub     *hub
+	web     *webUI
 }
 
 // New 创建 Server。
@@ -30,6 +31,7 @@ func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {
 		session: st,
 		mux:     http.NewServeMux(),
 		hub:     newHub(),
+		web:     newWebUI(),
 	}
 	s.wsUp = newWSUpgrader(cfg.Token)
 	s.routes()
@@ -49,6 +51,8 @@ func (s *Server) routes() {
 	// 管理：动态开关
 	s.mux.HandleFunc("/admin/status", s.auth(s.handleStatus))
 	s.mux.HandleFunc("/admin/switch", s.auth(s.handleSwitch))
+	// Web UI（浏览器界面 + cookie 登录）
+	s.webRoutes()
 }
 
 // auth 认证中间件：Token 非空时校验 Bearer。

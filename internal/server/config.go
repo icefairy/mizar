@@ -16,6 +16,16 @@ type Config struct {
 	Addr     string   // 监听地址，如 ":3003"
 	Token    string   // Bearer 认证 token（空=不认证，内网默认建议设置）
 	Services Services // 各服务开关
+
+	// Web Web UI：浏览器界面 + 会话登录（与 Bearer Token 独立）。
+	Web WebAuth
+}
+
+// WebAuth Web UI 登录鉴权配置。
+type WebAuth struct {
+	Enabled  bool   // 是否启用 Web UI（默认 true）
+	Username string // 登录用户名（空=admin）
+	Password string // 登录密码（空=不校验密码，仅本地开发用）
 }
 
 // NewConfig 默认配置：三服务全开。

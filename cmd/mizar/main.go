@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -37,6 +38,27 @@ import (
 )
 
 var version = "v0.4.4"
+
+// hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
+func hostPort(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "127.0.0.1" + addr
+	}
+	return addr
+}
+
+// randPassword 生成 n 位随机密码（Web UI 首次启动用）。
+func randPassword(n int) string {
+	const chars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "mizar-web-admin"
+	}
+	for i := range b {
+		b[i] = chars[int(b[i])%len(chars)]
+	}
+	return string(b)
+}
 
 // startupHint 首次运行未配置供应商时，banner 末尾追加的引导提示。
 var startupHint string
@@ -1171,7 +1193,7 @@ func main() {
 	// 内置 /compact 命令：手动触发上下文压缩
 	a.Commands.Register(agent.Command{
 		Name:        "compact",
-		Description: "手动触发上下文压缩（/compact 或 /compact <摘要指引>）",
+		Description: "压缩上下文（/compact 或 /compact <摘要指引>）",
 		Timeout:     10 * time.Minute,
 		Run: func(args string) (string, error) {
 			if a.Compactor == nil {
@@ -1182,23 +1204,11 @@ func main() {
 				return "✗ 消息不足，无需压缩", nil
 			}
 			est := agent.EstimateMessages(msgs)
-			limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "当前估算: %d/%d tokens（%d 条消息）\n", est, limit, len(msgs))
-			if est <= limit {
-				sb.WriteString("  未达到压缩阈值，仍可强制压缩：/compact force\n")
-			}
-			cut := a.Compactor.FindCutPoint(msgs)
-			if cut <= 0 {
-				sb.WriteString("  无可切点（保留消息量在预算内）\n")
-				return sb.String(), nil
-			}
-			action := strings.TrimSpace(args)
-			force := strings.HasPrefix(strings.ToLower(action), "force")
-			customPrompt := ""
-			if !force && action != "" {
-				customPrompt = action
-			}
+			fmt.Fprintf(&sb, "当前估算: %d tokens（%d 条消息）\n", est, len(msgs))
+			// 手动压缩：无条件执行。用户主动敲 /compact 即表示需要压缩，
+			// 不再判断阈值、不需要 force 关键字。参数（若有）一律视为摘要指引。
+			customPrompt := strings.TrimSpace(args)
 			// 用自定义指令替换 Summarize 以生成结构化摘要
 			origSummarize := a.Compactor.Summarize
 			customUsed := false
@@ -1212,7 +1222,8 @@ func main() {
 				}
 				customUsed = true
 			}
-			newMsgs, err := a.Compactor.Compact(msgs)
+			// 强制压缩：保留最近约 KeepRecentTokens；估算不足时按条数折半兜底。
+			newMsgs, err := a.Compactor.CompactForce(msgs, a.Compactor.KeepRecentTokens)
 			if customUsed {
 				a.Compactor.Summarize = origSummarize // 恢复
 			}
@@ -1517,6 +1528,32 @@ func main() {
 	if *serve {
 		cfg := server.NewConfig(*addr, *token)
 		cfg.SetAll(*httpOn, *rpcOn, *wsOn)
+		// Web UI：启用 + 登录鉴权（密码优先取配置，空则随机生成并写回）
+		webCfg := &config.WebConfig{}
+		diskCfg, _ := config.Load(config.DefaultPath())
+		if diskCfg != nil && diskCfg.Web != nil {
+			webCfg = diskCfg.Web
+		}
+		genPwd := false
+		if webCfg.Password == "" {
+			webCfg.Password = randPassword(12)
+			genPwd = true
+		}
+		if webCfg.Username == "" {
+			webCfg.Username = "admin"
+		}
+		if genPwd {
+			if diskCfg == nil {
+				diskCfg = &config.Config{}
+			}
+			diskCfg.Web = webCfg
+			if err := config.Save(config.DefaultPath(), diskCfg); err != nil {
+				log.Printf("Web UI 密码写回配置失败: %v", err)
+			} else {
+				log.Printf("Web UI 首次启动：已生成登录密码并写入 %s", config.DefaultPath())
+			}
+		}
+		cfg.Web = server.WebAuth{Enabled: true, Username: webCfg.Username, Password: webCfg.Password}
 		srv := server.New(cfg, a, st)
 		// 插件 ws_emit 能力：注入 Server 广播
 		host.WSEmit = func(event, dataJSON string) { srv.EmitToWS(event, dataJSON) }
@@ -1527,6 +1564,7 @@ func main() {
 		log.Printf("  JSON-RPC 2.0:   POST %s/rpc (agent.run/steer/abort)", *addr)
 		log.Printf("  WebSocket:      %s/ws (实时事件 + 快速纠正)", *addr)
 		log.Printf("  admin:          GET %s/admin/status  POST %s/admin/switch", *addr, *addr)
+		log.Printf("  Web UI:         http://%s/web/  (登录用户: %s)", hostPort(*addr), webCfg.Username)
 		// 先探测端口可用性，避免"正在运行"横幅后跟启动失败的尴尬
 		probe, err := net.Listen("tcp", *addr)
 		if err != nil {
@@ -1540,6 +1578,7 @@ func main() {
 		fmt.Printf("\n✅ Mizar Server 正在运行: %s\n", *addr)
 		fmt.Printf("   OpenAI 兼容: POST %s/v1/chat/completions\n", *addr)
 		fmt.Printf("   JSON-RPC:    POST %s/rpc   WebSocket: %s/ws\n", *addr, *addr)
+		fmt.Printf("   Web UI:      http://%s/web/  (用户 %s)\n", hostPort(*addr), webCfg.Username)
 		fmt.Printf("   Ctrl+C 停止服务\n\n")
 		if err := srv.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "\n❌ Server 运行异常退出: %v\n", err)

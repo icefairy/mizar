@@ -121,6 +121,122 @@ func (c *Compactor) FindCutPoint(msgs []Message) int {
 	return cut
 }
 
+// FindCutPointAt 找「保留最近 ≈ keepTokens」的切点：从后往前累计到 keepTokens，
+// 取该位置往前最近的合法切点。用于强制压缩（上下文溢出兜底）——服务端已报超限，
+// 不再受 ShouldCompact 本地估算阈值约束。
+// 返回 -1 表示没有合法切点（无可保留边界，如只有 system）。
+func (c *Compactor) FindCutPointAt(msgs []Message, keepTokens int) int {
+	if c == nil || keepTokens < 0 {
+		return -1
+	}
+	acc := 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		acc += EstimateTokens(msgs[i])
+		if acc >= keepTokens {
+			for j := i; j >= 1; j-- { // j>=1：绝不切在 index 0（system）
+				if msgs[j].IsCutPoint() {
+					return j
+				}
+			}
+			break
+		}
+	}
+	return -1
+}
+
+// SummarizeSafe 生成摘要，并保证摘要请求本身不超过模型窗口（否则摘要调用也会 400）。
+// 策略：先试全量；失败则按输入 token 逐级截断（保留更早的历史，丢弃尾部 tool 噪音）
+// 重试，直至成功或耗尽。
+func (c *Compactor) SummarizeSafe(msgs []Message) (string, error) {
+	if c == nil || c.Summarize == nil {
+		return "", fmt.Errorf("compactor not configured")
+	}
+	summary, err := c.Summarize(msgs)
+	if err == nil {
+		return summary, nil
+	}
+	// 逐级缩减输入（25% → 10% → 4% 窗口）重试
+	for _, frac := range []float64{0.25, 0.10, 0.04} {
+		budget := int(float64(c.ContextWindow) * frac)
+		if budget < 500 {
+			budget = 500
+		}
+		trimmed := TrimMessagesToBudget(msgs, budget)
+		if len(trimmed) == 0 {
+			continue
+		}
+		if s, e2 := c.Summarize(trimmed); e2 == nil {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("summarize failed after trim: %w", err)
+}
+
+// TrimMessagesToBudget 从头部累计消息直到超出 budget（保留更早历史，丢弃尾部），
+// 供摘要输入超限时降级使用。
+func TrimMessagesToBudget(msgs []Message, budget int) []Message {
+	var out []Message
+	acc := 0
+	for _, m := range msgs {
+		t := EstimateTokens(m)
+		if acc+t > budget && len(out) > 0 {
+			break
+		}
+		out = append(out, m)
+		acc += t
+	}
+	return out
+}
+
+// CompactForce 强制压缩（上下文溢出兜底）：不受 ShouldCompact 本地估算约束。
+// 保留最近 keepTokens（≤0 时取 KeepRecentTokens/2，即"只保留一半"），
+// 摘要输入超限时自动降级截断。
+func (c *Compactor) CompactForce(msgs []Message, keepTokens int) ([]Message, error) {
+	if c == nil || c.Summarize == nil {
+		return msgs, fmt.Errorf("compactor not configured")
+	}
+	if keepTokens <= 0 {
+		keepTokens = c.KeepRecentTokens / 2
+	}
+	cut := c.FindCutPointAt(msgs, keepTokens)
+	if cut <= 0 {
+		// 本地估算偏小（服务端实测超限但估算不足）→ 找不到 token 切点。
+		// 回退：按「消息条数」折半，保留最近一半（符合"只保留一半历史"的兜底策略），
+		// 找 len/2 附近最近的合法切点。
+		mid := len(msgs) / 2
+		for j := mid; j >= 1; j-- {
+			if msgs[j].IsCutPoint() {
+				cut = j
+				break
+			}
+		}
+		if cut <= 0 { // 仍无切点：逐条向后找第一个合法切点
+			for j := 1; j < len(msgs); j++ {
+				if msgs[j].IsCutPoint() {
+					cut = j
+					break
+				}
+			}
+		}
+		if cut <= 0 {
+			return msgs, fmt.Errorf("no cut point available")
+		}
+	}
+	toSummarize := msgs[:cut]
+	keep := msgs[cut:]
+	summary, err := c.SummarizeSafe(toSummarize)
+	if err != nil {
+		return msgs, err
+	}
+	var out []Message
+	if len(msgs) > 0 && msgs[0].Role == RoleSystem {
+		out = append(out, msgs[0])
+	}
+	out = append(out, Message{Role: RoleUser, Content: strings.TrimSpace(summary), Kind: KindSummary})
+	out = append(out, keep...)
+	return out, nil
+}
+
 // Compact 执行压缩：找到切点 → 对切点前消息生成摘要 → 返回新消息列表。
 // 结构: [system?] + [summary(user, KindSummary)] + [cut: 保留的最近消息]
 //

@@ -578,26 +578,34 @@ func (a *Agent) Run(task string) (string, error) {
 				a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
 				return "", ErrAborted
 			}
-			// Context overflow：不走重试，直接触发压缩后继续
+			// Context overflow：不走重试，直接强制压缩后继续。
+			// ⚠ 关键：这里不再用 ShouldCompact（本地启发式估算）否决——服务端 400
+			// 已明确报超限，而 EstimateMessages 对工具输出/JSON/base64 严重低估，
+			// 曾导致「服务端说 500K、本地估算才 100K」→ 不压缩 → 任务直接失败。
 			if isContextOverflow(llmErr) {
 				a.log("%s", q.FormatLog("llm_overflow", "err=", truncate(llmErr.Error(), 100)))
 				if a.Compactor != nil {
 					est := EstimateMessages(msgs)
-					if a.Compactor.ShouldCompact(est) {
-						a.log("%s", q.FormatLog("compact_on_overflow", "est=", fmt.Sprintf("%d", est)))
-						var compErr error
-						msgs, compErr = a.Compactor.Compact(msgs)
-						if compErr != nil {
-							a.log("%s", q.FormatLog("compact_fail_on_overflow", "err=", compErr.Error()))
-						} else {
-							a.log("%s", q.FormatLog("compact_on_overflow_result", "msgs=", fmt.Sprintf("%d", len(msgs))))
-							continue // 压缩后继续下一轮 LLM 调用
-						}
-					} else {
-						// 压缩器存在但未触发压缩条件（上下文还不够大），说明 overflow 信号不可靠，走正常失败路径
+					a.log("%s", q.FormatLog("compact_force", "est=", fmt.Sprintf("%d", est)))
+					// 强制压缩：保留最近约一半（KeepRecentTokens/2），摘要输入超限自动降级。
+					msgs2, compErr := a.Compactor.CompactForce(msgs, a.Compactor.KeepRecentTokens/2)
+					if compErr == nil && len(msgs2) < len(msgs) {
+						msgs = msgs2
+						a.log("%s", q.FormatLog("compact_force_result", "msgs=", fmt.Sprintf("%d", len(msgs))))
+						continue // 压缩后继续下一轮 LLM 调用
+					}
+					if compErr != nil {
+						a.log("%s", q.FormatLog("compact_force_fail", "err=", compErr.Error()))
+					}
+					// 兜底：压缩失败或未瘦身时，仍按预算硬截断（丢弃最早消息），
+					// 至少让请求变小，避免直接失败。
+					if tr := hardTrimOnOverflow(msgs, a.Compactor.ContextWindow/4); len(tr) < len(msgs) {
+						msgs = tr
+						a.log("%s", q.FormatLog("compact_hardtrim", "msgs=", fmt.Sprintf("%d", len(msgs))))
+						continue
 					}
 				}
-				// 无压缩器或压缩失败：当作普通错误处理
+				// 无压缩器：当作普通错误处理
 			}
 			// 不可重试错误：直接失败，不消耗重试预算
 			if isNonRetryableError(llmErr) {
@@ -1401,6 +1409,42 @@ func isContextOverflow(err error) bool {
 		strings.Contains(s, "context length") ||
 		strings.Contains(s, "超出上下文") ||
 		strings.Contains(s, "上下文溢出")
+}
+
+// hardTrimOnOverflow 上下文溢出的最后兜底：强制压缩失败时，按 token 预算从
+// 头部保留消息（丢弃尾部最早之外的内容），保留 system + 最近若干条，保证请求瘦身。
+// 保留结构：[system] + [最近消息...]，从尾部累计到 budget。至少保留 system + 最后一条。
+func hardTrimOnOverflow(msgs []Message, budget int) []Message {
+	if len(msgs) <= 1 {
+		return msgs
+	}
+	var sys *Message
+	body := msgs
+	if msgs[0].Role == RoleSystem {
+		s := msgs[0]
+		sys = &s
+		body = msgs[1:]
+	}
+	// 从尾部累计保留
+	var keep []Message
+	acc := 0
+	for i := len(body) - 1; i >= 0; i-- {
+		t := EstimateTokens(body[i])
+		if acc+t > budget && len(keep) > 0 {
+			break
+		}
+		keep = append([]Message{body[i]}, keep...)
+		acc += t
+	}
+	if len(keep) == 0 && len(body) > 0 {
+		keep = body[len(body)-1:]
+	}
+	var out []Message
+	if sys != nil {
+		out = append(out, *sys)
+	}
+	out = append(out, keep...)
+	return out
 }
 
 // isNonRetryableError 判断 LLM 错误是否不可重试（确定性失败）。
