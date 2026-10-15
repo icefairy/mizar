@@ -4,6 +4,22 @@
 
 ---
 
+## [v0.5.0]
+
+### ✨ 新增（插件启用/禁用/重载）
+
+- **插件级启用/禁用**：新增 `/list_plugins`（列出插件及状态：✅ 已加载 / ⛔ 已禁用 / ⚠️ 加载失败）、`/disable_plugin <名>`（立即卸载并持久化到 `~/.mizar/extensions/.disabled.json`）、`/enable_plugin <名>`（取消禁用并加载）、`/reload_plugins`（重载全部，已禁用的保持禁用）。
+- **持久化禁用清单**：禁用状态写入插件目录下的 `.disabled.json`，重启后依然生效；`/list_plugins` 支持省略扩展名（`memory` → `memory.ts`）。
+- **用途**：一个二进制可同时满足多种记忆后端——内置本地 SQLite 版开箱即用，需要与其它 agent 共用记忆时，`/disable_plugin memory.ts` 换成自己的（如 HMEM 版）即可。
+
+### ✨ 改进（记忆插件自托管化）
+
+- **`memory.ts` 改为自托管 SQLite**：数据存在本地单文件 `~/.mizar/memory/mem.db`，**零外部服务、零依赖**，随二进制发布即用。此前是 HMEM C/S 版，离不开独立部署的 HMEM Server，不适合随包发布。
+- **中文分词检索**：中文按**二元组（bigram）**切分 + 单字，英文/数字按整词，过滤停用词；用「覆盖率 75% + 精确度 25%」加权打分（按 token 长度加权），返回相似度最高的若干条（**默认 3 条**）。工具：`mem_write`/`mem_search`/`mem_list`/`mem_get`/`mem_delete`/`mem_stats`/`mem_clear`。
+- **新增宿主函数 `env(name)`**：插件可读环境变量定位 `HOME`，不再硬编码 `/root`（`db.ts`、`image_vision.ts` 同步改用）。
+
+---
+
 ## [v0.4.9]
 
 ### ✨ 新增（Markdown 渲染补全）

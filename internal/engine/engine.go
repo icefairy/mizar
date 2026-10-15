@@ -62,6 +62,9 @@ type HostFuncs struct {
 	AIChatStream func(reqJSON string, onDelta func(deltaJSON string)) (string, error)
 	Log                   func(msg string)
 	Sleep                 func(ms int)
+	// Env 读取环境变量：env(name) -> 值（不存在返回空串）。
+	// 插件用 env("HOME") 定位用户目录，避免硬编码 /root。nil 时不注册。
+	Env func(name string) string
 	// WSEmit 向所有 WS 客户端广播自定义事件（event + JSON 数据）。
 	WSEmit func(event, dataJSON string)
 	// WSClient 插件 WS 客户端桥（连外部 WS 服务，如飞书长连接）。
@@ -186,6 +189,9 @@ func (e *Engine) registerHostFuncs() error {
 	}
 	if h.Sleep != nil {
 		reg("sleep", h.Sleep)
+	}
+	if h.Env != nil {
+		reg("env", h.Env)
 	}
 	if h.WSEmit != nil {
 		reg("ws_emit", h.WSEmit)

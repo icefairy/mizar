@@ -38,7 +38,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.4.9"
+var version = "v0.5.0"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -193,6 +193,8 @@ func main() {
 			return out, nil
 		},
 		Log: func(msg string) { log.Print(msg) },
+		// Env：插件读环境变量（定位 HOME 等），避免硬编码路径
+		Env: func(name string) string { return os.Getenv(name) },
 		// DBQuery：内置数据库查询（sqlite3/mysql/postgres），插件 db_query() 直达
 		DBQuery: engine.DBQueryFn,
 		// DBExecBatch：事务批量执行，插件 db_exec_batch() 直达（连接池复用）
@@ -333,6 +335,8 @@ func main() {
 	stats := skills.LoadStats(filepath.Join(config.ConfigDir(), "skill_stats.json"))
 
 	pm := plugins.NewManager(extAbs, host)
+	// 读入插件禁用清单（.disabled.json）——被禁用的插件不加载
+	pm.LoadDisabledPlugins()
 	// 禁用工具（来自技能统计周报，用户确认后记录）——只影响工具注册表，不动 System prompt
 	pm.SetDisabledTools(stats.DisabledNames())
 	// agent 实例先声明后赋值（builtins.All 的插件热重载回调需要引用它）
@@ -779,6 +783,83 @@ func main() {
 			fmt.Fprintf(&sb, "✓ 配置已重载: model=%s window=%d thinking=%s\n", cfg.Model, cfg.ContextWindow, cfg.ThinkingStr())
 			fmt.Fprintf(&sb, "%s\n", pluginSummary)
 			return sb.String(), nil
+		},
+	})
+	// 内置 /list_plugins：列出插件及其状态（已加载/已禁用）
+	a.Commands.Register(agent.Command{
+		Name:        "list_plugins",
+		Description: "列出插件及状态（已加载/已禁用）",
+		Run: func(args string) (string, error) {
+			all := pm.PluginFiles()
+			if len(all) == 0 {
+				return fmt.Sprintf("插件目录 %s 无插件", pm.Dir()), nil
+			}
+			loaded := map[string]bool{}
+			for _, f := range pm.LoadedPlugins() {
+				loaded[f] = true
+			}
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "插件目录: %s\n共 %d 个:\n", pm.Dir(), len(all))
+			for _, f := range all {
+				status := "✅ 已加载"
+				if pm.PluginDisabled(f) {
+					status = "⛔ 已禁用"
+				} else if !loaded[f] {
+					status = "⚠️ 未加载（加载失败？）"
+				}
+				fmt.Fprintf(&sb, "  %s %s\n", status, f)
+			}
+			sb.WriteString("\n命令: /enable_plugin <名> · /disable_plugin <名> · /reload_plugins")
+			return sb.String(), nil
+		},
+	})
+	// 内置 /enable_plugin：启用插件（取消禁用并加载）
+	a.Commands.Register(agent.Command{
+		Name:        "enable_plugin",
+		Description: "启用插件（/enable_plugin <文件名，可省略 .ts>）",
+		Run: func(args string) (string, error) {
+			name := resolvePluginName(pm, args)
+			if name == "" {
+				return "用法: /enable_plugin <文件名>（用 /list_plugins 查看）", nil
+			}
+			if !pm.PluginDisabled(name) {
+				return fmt.Sprintf("插件 %s 本就处于启用状态", name), nil
+			}
+			pm.SetPluginDisabled(name, false)
+			summary := reloadPlugins(pm, a)
+			return fmt.Sprintf("✅ 已启用 %s\n%s", name, summary), nil
+		},
+	})
+	// 内置 /disable_plugin：禁用插件（卸载并持久化）
+	a.Commands.Register(agent.Command{
+		Name:        "disable_plugin",
+		Description: "禁用插件（/disable_plugin <文件名，可省略 .ts>）",
+		Run: func(args string) (string, error) {
+			name := resolvePluginName(pm, args)
+			if name == "" {
+				return "用法: /disable_plugin <文件名>（用 /list_plugins 查看）", nil
+			}
+			if pm.PluginDisabled(name) {
+				return fmt.Sprintf("插件 %s 本就处于禁用状态", name), nil
+			}
+			pm.SetPluginDisabled(name, true)
+			// 同步命令注册表（该插件导出的命令需移除）
+			cmds := make([]agent.Command, 0, len(pm.Commands()))
+			for _, c := range pm.Commands() {
+				cc := c
+				cmds = append(cmds, agent.Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
+			}
+			a.Commands.SyncFromPlugins(cmds)
+			a.ReloadTools()
+			return fmt.Sprintf("⛔ 已禁用 %s（已卸载，配置已持久化）", name), nil
+		},
+	})
+	// 内置 /reload_plugins：强制重载全部插件（跳过已禁用）
+	a.Commands.Register(agent.Command{
+		Name:        "reload_plugins",
+		Description: "重载全部插件（/reload_plugins，已禁用的仍保持禁用）",
+		Run: func(args string) (string, error) {
+			return reloadPlugins(pm, a), nil
 		},
 	})
 	// 内置 /new 命令：直接创建新会话（= /session new 快捷方式）

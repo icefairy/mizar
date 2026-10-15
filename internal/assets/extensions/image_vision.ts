@@ -49,13 +49,13 @@ export function tool_image_describe(args: string): string {
 interface Config { baseUrl: string; apiKey: string; model: string }
 
 function loadConfig(): Config {
-  // 优先环境变量，其次 ~/.mizar/config.json
-  const env = (typeof process !== 'undefined' ? (process as any).env : {}) || {};
-  let baseUrl = env.MIZAR_BASE_URL || '';
-  let apiKey = env.MIZAR_API_KEY || '';
-  let model = env.MIZAR_MODEL || '';
+  // 优先环境变量（env 宿主函数），其次 ~/.mizar/config.json
+  const getEnv = (k: string): string => { try { return env(k) || ''; } catch (e) { return ''; } };
+  let baseUrl = getEnv('MIZAR_BASE_URL');
+  let apiKey = getEnv('MIZAR_API_KEY');
+  let model = getEnv('MIZAR_MODEL');
   try {
-    const home = env.HOME || '/root';
+    const home = getEnv('MIZAR_HOME') || getEnv('HOME') || '/root';
     const raw = fs_read(home + '/.mizar/config.json');
     if (raw) {
       const cfg = JSON.parse(raw);

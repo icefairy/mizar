@@ -287,6 +287,31 @@ func resolveAtRef(line string, cmdNames, toolNames []string) string {
 	return strings.TrimSpace(line[:atIdx] + resolved + rest)
 }
 
+// resolvePluginName 把用户输入解析为插件目录中的实际文件名：
+// 支持带/不带扩展名、大小写不敏感；找不到返回空串。
+func resolvePluginName(pm *plugins.Manager, arg string) string {
+	name := strings.TrimSpace(arg)
+	if name == "" {
+		return ""
+	}
+	files := pm.PluginFiles()
+	// 精确匹配
+	for _, f := range files {
+		if f == name {
+			return f
+		}
+	}
+	// 忽略大小写 / 省略扩展名
+	base := strings.ToLower(name)
+	for _, f := range files {
+		lf := strings.ToLower(f)
+		if lf == base || strings.TrimSuffix(lf, ".ts") == base || strings.TrimSuffix(lf, ".js") == base {
+			return f
+		}
+	}
+	return ""
+}
+
 // reloadPlugins 强制重载插件目录中的全部插件，并同步斜杠命令、失效系统提示缓存。
 // 返回给调用方（模型/命令）的人类可读摘要。供 write/edit 自动热重载、/reload 命令、
 // 以及模型显式调用 reload_plugins 工具共用，保证各处行为一致。

@@ -18,8 +18,9 @@
  */
 
 const CONFIG_PATH = (function () {
-  const env = (typeof process !== 'undefined' ? (process as any).env : {}) || {};
-  return (env.HOME || '/root') + '/.mizar/db_connections.json';
+  let h = "";
+  try { h = env("MIZAR_HOME") || env("HOME") || ""; } catch (e) {}
+  return (h || "/root") + '/.mizar/db_connections.json';
 })();
 
 interface Conn {

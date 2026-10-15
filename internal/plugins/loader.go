@@ -54,6 +54,7 @@ type Manager struct {
 	maxExec    time.Duration     // 单次插件执行超时
 	onTool     func(name string) // 工具调用回调（技能统计用）
 	disabled   map[string]bool   // 禁用的工具（不注册、不可调用，不影响提示词）
+	disabledPl map[string]bool   // 禁用的插件文件（不加载；热重载时跳过）
 
 	// LSP 提供者注册跟踪（按文件名，热重载时清理用）
 	lspDiagNames map[string][]string // filename → registered diagnostic provider names
@@ -82,6 +83,7 @@ func NewManager(dir string, host *engine.HostFuncs) *Manager {
 		rpcMethods:    make(map[string]RPCMethod),
 		modTime:       make(map[string]time.Time),
 		disabled:      make(map[string]bool),
+		disabledPl:    make(map[string]bool),
 		maxExec:       30 * time.Second,
 		lspDiagNames:  make(map[string][]string),
 		lspCompNames:  make(map[string][]string),
@@ -211,6 +213,11 @@ func (m *Manager) loadAll(force bool) (loaded []string, failed map[string]error)
 			continue
 		}
 		if strings.HasSuffix(e.Name(), ".ts") || strings.HasSuffix(e.Name(), ".js") {
+			// 被禁用的插件文件：跳过加载（若已加载则卸载）
+			if m.isPluginDisabled(e.Name()) {
+				m.unloadPlugin(e.Name())
+				continue
+			}
 			files = append(files, e.Name())
 		}
 	}
@@ -553,6 +560,115 @@ func (m *Manager) SetDisabledTools(names []string) {
 		m.disabled[n] = true
 	}
 }
+
+// ---------- 插件级启用/禁用 ----------
+
+// isPluginDisabled 判断某插件文件是否被禁用。
+func (m *Manager) isPluginDisabled(filename string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.disabledPl[filename]
+}
+
+// PluginDisabled 导出判断（供命令层查询）。
+func (m *Manager) PluginDisabled(filename string) bool { return m.isPluginDisabled(filename) }
+
+// SetPluginDisabled 启用/禁用某个插件文件。
+// 禁用会立即卸载该插件（注销其工具/命令/RPC/hook/服务器）；
+// 启用需要调用方随后 LoadAll/ReloadAll 才能加载进来。
+func (m *Manager) SetPluginDisabled(filename string, disabled bool) {
+	m.mu.Lock()
+	if disabled {
+		m.disabledPl[filename] = true
+	} else {
+		delete(m.disabledPl, filename)
+	}
+	m.mu.Unlock()
+	if disabled {
+		m.unloadPlugin(filename)
+	}
+	m.saveDisabledPlugins()
+}
+
+// disabledPluginsPath 禁用清单持久化路径（插件目录下的隐藏文件）。
+func (m *Manager) disabledPluginsPath() string {
+	return filepath.Join(m.dir, ".disabled.json")
+}
+
+// saveDisabledPlugins 把禁用清单落盘（幂等，失败仅日志）。
+func (m *Manager) saveDisabledPlugins() {
+	list := m.DisabledPlugins()
+	data, err := json.MarshalIndent(map[string]any{"disabled": list}, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(m.disabledPluginsPath(), data, 0o644)
+}
+
+// LoadDisabledPlugins 从插件目录的 .disabled.json 读入禁用清单（启动时调用）。
+func (m *Manager) LoadDisabledPlugins() {
+	data, err := os.ReadFile(m.disabledPluginsPath())
+	if err != nil {
+		return
+	}
+	var f struct {
+		Disabled []string `json:"disabled"`
+	}
+	if json.Unmarshal(data, &f) != nil {
+		return
+	}
+	m.mu.Lock()
+	for _, n := range f.Disabled {
+		m.disabledPl[n] = true
+	}
+	m.mu.Unlock()
+}
+
+// DisabledPlugins 返回当前被禁用的插件文件名列表（排序）。
+func (m *Manager) DisabledPlugins() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.disabledPl))
+	for f := range m.disabledPl {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// PluginFiles 返回目录中全部插件文件名（排序），含已禁用与加载失败的。
+func (m *Manager) PluginFiles() []string {
+	entries, err := os.ReadDir(m.dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".ts") || strings.HasSuffix(e.Name(), ".js") {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LoadedPlugins 返回当前已成功加载的插件文件名（排序）。
+func (m *Manager) LoadedPlugins() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.engines))
+	for f := range m.engines {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Dir 返回插件目录路径。
+func (m *Manager) Dir() string { return m.dir }
 
 // Get 按名取工具（禁用的返回 false）。
 func (m *Manager) Get(name string) (Tool, bool) {
