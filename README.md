@@ -94,6 +94,9 @@
 | OpenAI 兼容 | `POST /v1/chat/completions` | 任意 OpenAI SDK 改 `base_url` 即可 |
 | JSON-RPC 2.0 | `POST /rpc` | `agent.run` / `agent.steer` / `agent.abort` / `tools.list` / `system.ping` |
 | WebSocket | `GET /ws` | 实时事件流 + 中途快速纠正（steer） |
+| Web UI | `GET /web/` | 浏览器界面：多会话 / 模型切换 / 对话参数 / 流式输出 |
+
+> 📖 **完整 API 文档（所有端点、请求/响应、示例）：[`docs/api.md`](docs/api.md)**
 
 运行期动态开关服务：
 ```bash
