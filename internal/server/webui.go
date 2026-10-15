@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -329,12 +330,134 @@ func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, http.StatusBadRequest, "message required")
 		return
 	}
+	// 斜杠命令拦截：/compact、/list_plugins 等由命令注册表处理，不发给 LLM。
+	if out, ok := s.dispatchWebCommand(body.Message, body.ConversationID); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"reply": out, "command": true})
+		return
+	}
 	reply, err := s.chatOnce(body.ConversationID, body.Message)
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reply": reply})
+}
+
+// dispatchWebCommand 尝试把消息当作斜杠命令执行。
+// 命中返回（输出文本, true）；非命令返回 ("", false)。
+// 未知命令也返回 true（提示「未知命令」），避免把 /xxx 当普通消息误发 LLM。
+// convID 用于需要操作当前会话历史的命令（如 /compact）。
+func (s *Server) dispatchWebCommand(msg, convID string) (string, bool) {
+	trimmed := strings.TrimSpace(msg)
+	if !strings.HasPrefix(trimmed, "/") {
+		return "", false
+	}
+	if s.agent == nil || s.agent.Commands == nil {
+		return "", false
+	}
+	// /compact 特判：Web 的会话历史在 webStore，需压缩当前会话并回写，
+	// 而不是操作 agent 内存里的 a.Initial（那是 TUI/单会话语义）。
+	if name, args := splitCommand(trimmed); name == "compact" {
+		return s.compactWebConversation(convID, args), true
+	}
+	handled, out, err := s.agent.Commands.Dispatch(trimmed)
+	if !handled {
+		return "", false
+	}
+	if err != nil {
+		return "✗ " + err.Error(), true
+	}
+	if strings.TrimSpace(out) == "" {
+		return "✓ 命令已执行", true
+	}
+	return out, true
+}
+
+// splitCommand 拆出命令名与参数（"/compact 指引" → "compact", "指引"）。
+func splitCommand(line string) (string, string) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", ""
+	}
+	name := strings.TrimPrefix(fields[0], "/")
+	args := ""
+	if len(fields) > 1 {
+		args = strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
+	}
+	return name, args
+}
+
+// compactWebConversation 压缩指定 Web 会话的历史并回写。
+// 会话历史不足或未启用压缩器时给出明确提示（不再「无反应」）。
+func (s *Server) compactWebConversation(convID, customPrompt string) string {
+	if s.agent == nil || s.agent.Compactor == nil {
+		return "✗ 会话压缩未启用（启动时使用了 --no-compact）"
+	}
+	if convID == "" {
+		return "✗ 无活动会话，无法压缩"
+	}
+	c := s.web.store.get(convID)
+	if c == nil {
+		return "✗ 会话不存在"
+	}
+	if len(c.Messages) <= 1 {
+		return "✗ 消息不足，无需压缩"
+	}
+	// convMessage → agent.Message
+	msgs := make([]agent.Message, 0, len(c.Messages))
+	for _, m := range c.Messages {
+		msgs = append(msgs, agent.Message{Role: m.Role, Content: m.Content})
+	}
+	est := agent.EstimateMessages(msgs)
+
+	// 自定义摘要指引：临时包裹 Summarize
+	comp := s.agent.Compactor
+	origSummarize := comp.Summarize
+	if strings.TrimSpace(customPrompt) != "" {
+		cp := strings.TrimSpace(customPrompt)
+		comp.Summarize = func(ms []agent.Message) (string, error) {
+			base, err := origSummarize(ms)
+			if err != nil {
+				return "", err
+			}
+			return base + "\n\n额外要求：" + cp, nil
+		}
+		defer func() { comp.Summarize = origSummarize }()
+	}
+
+	newMsgs, err := comp.CompactForce(msgs, comp.KeepRecentTokens)
+	if err != nil {
+		return "✗ 压缩失败: " + err.Error()
+	}
+	cutOccurred := false
+	for _, m := range newMsgs {
+		if m.Kind == agent.KindSummary {
+			cutOccurred = true
+			break
+		}
+	}
+	if !cutOccurred {
+		return fmt.Sprintf("当前估算: %d tokens（%d 条消息）\n  无需压缩（消息结构不允许切分）", est, len(msgs))
+	}
+	// 回写会话历史
+	out := make([]convMessage, 0, len(newMsgs))
+	for _, m := range newMsgs {
+		role := m.Role
+		if role != "user" && role != "assistant" {
+			role = "user" // 摘要等内部消息对前端按 user 呈现
+		}
+		out = append(out, convMessage{Role: role, Content: m.Content})
+	}
+	s.web.store.setMessages(convID, out)
+
+	newEst := agent.EstimateMessages(newMsgs)
+	reduced := est - newEst
+	pct := 0.0
+	if est > 0 {
+		pct = float64(reduced) / float64(est) * 100
+	}
+	return fmt.Sprintf("当前估算: %d tokens（%d 条消息）\n✓ 已压缩: %d → %d tokens（节省 %d tokens, %.1f%%）",
+		est, len(msgs), est, newEst, reduced, pct)
 }
 
 // chatOnce 普通对话：按会话维护历史，直接调 LLM（无工具循环）。
@@ -420,6 +543,12 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Message) == "" {
 		errJSON(w, http.StatusBadRequest, "message required")
+		return
+	}
+	// 斜杠命令拦截：/compact、/list_plugins 等由命令注册表处理，不进入 Agent 循环。
+	if out, ok := s.dispatchWebCommand(body.Message, body.ConversationID); ok {
+		s.logf("web command: %s", truncateStr(body.Message, 80))
+		writeJSON(w, http.StatusOK, map[string]any{"reply": out, "command": true})
 		return
 	}
 	s.logf("web agent.run: %s", truncateStr(body.Message, 80))

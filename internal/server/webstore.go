@@ -188,6 +188,20 @@ func (s *webStore) setMode(id, mode string) {
 	}
 }
 
+// setMessages 用新消息列表替换某会话历史（供 /compact 回写压缩结果）。
+func (s *webStore) setMessages(id string, msgs []convMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.Convs {
+		if c.ID == id {
+			c.Messages = msgs
+			c.UpdatedAt = time.Now()
+			_ = s.saveLocked()
+			return
+		}
+	}
+}
+
 // getSettings 读取设置副本。
 func (s *webStore) getSettings() webSettings {
 	s.mu.Lock()
