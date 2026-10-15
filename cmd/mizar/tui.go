@@ -2002,5 +2002,15 @@ func classicFallback(a *agent.Agent, st *session.Store, sessionID string) {
 			continue
 		}
 		fmt.Println(reply)
+		// 追加本轮对话到初始历史，使后续 Run 继承上下文；
+		// 同时落盘会话（否则经典模式下 /compact 永远读不到历史，
+		// 且会话无法续接）。与 TUI 的 Initial 维护保持一致。
+		a.Initial = append(a.Initial,
+			agent.Message{Role: agent.RoleUser, Content: line},
+			agent.Message{Role: agent.RoleAssistant, Content: reply})
+		if st != nil && sessionID != "" {
+			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: line})
+			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+		}
 	}
 }

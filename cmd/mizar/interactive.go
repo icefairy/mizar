@@ -199,7 +199,8 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		// 处理 @file: / @cmd: / @tool: 引用
 		input := resolveAtRef(trimmed, cmdNames, toolNames)
 
-		// 工具交换收集：任务结束时持久化到会话文件（经典模式无需 Initial，历史逐轮重放）
+		// 工具交换收集：任务结束时持久化到会话文件，并追加进 a.Initial
+		// （供后续轮次继承上下文 + /compact 读取历史）
 		var exchanges []agent.Message
 		a.OnToolExchange = func(tool, args, reason, out string, err error) {
 			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, reason, out, err)...)
@@ -254,5 +255,10 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 			}
 			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
+		// 维护内存历史：否则 /compact 永远读不到历史（"消息不足"），
+		// 且后续轮次上下文丢失（每轮 Run 都从空 Initial 开始）。
+		a.Initial = append(a.Initial, agent.Message{Role: agent.RoleUser, Content: trimmed})
+		a.Initial = append(a.Initial, exchanges...)
+		a.Initial = append(a.Initial, agent.Message{Role: agent.RoleAssistant, Content: reply})
 	}
 }
