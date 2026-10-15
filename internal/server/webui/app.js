@@ -8,31 +8,127 @@
   const modeChat = $("modeChat"), modeAgent = $("modeAgent");
   const abortBtn = $("abortBtn"), logoutBtn = $("logoutBtn"), modelTag = $("modelTag");
   const convList = $("convList"), newConvBtn = $("newConvBtn"), sidebar = $("sidebar"), menuBtn = $("menuBtn");
+  const pinBtn = $("pinBtn"), themeBtn = $("themeBtn");
   const settingsBtn = $("settingsBtn"), settingsModal = $("settings"), settingsClose = $("settingsClose");
   const settingsSave = $("settingsSave"), settingsMsg = $("settingsMsg"), refreshModels = $("refreshModels");
+  const qkModel = $("qkModel"), qkThinking = $("qkThinking"), quickMsg = $("quickMsg");
 
   let mode = "chat";   // chat | agent
   let busy = false;
   let ws = null;
   let curConv = null;  // 当前会话 id
   let convs = [];      // 会话摘要列表
-  let streamBody = null;   // 当前流式渲染的目标消息体
-  let streamBuf = "";      // 当前流式累计文本
-  let thinkingBuf = "";    // 当前思考过程累计
+  let streamBody = null;   // 当前流式正文目标
+  let streamBuf = "";      // 流式正文累计
+  let thinkingEl = null;   // 当前思考块
+  let thinkingBuf = "";    // 思考累计
   let streamStep = -1;     // 当前流式 step
+
+  // ---------- 主题 ----------
+  function applyTheme(t) {
+    document.documentElement.setAttribute("data-theme", t);
+    try { localStorage.setItem("mizar-theme", t); } catch (e) {}
+    if (themeBtn) themeBtn.textContent = t === "dark" ? "☀️" : "🌙";
+  }
+  (function initTheme() {
+    let t = "light";
+    try { t = localStorage.getItem("mizar-theme") || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); } catch (e) {}
+    applyTheme(t);
+  })();
+  themeBtn.addEventListener("click", () => {
+    applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  });
+
+  // ---------- 侧栏常驻锁定 ----------
+  let pinned = false;
+  try { pinned = localStorage.getItem("mizar-pin") === "1"; } catch (e) {}
+  function applyPin() {
+    sidebar.classList.toggle("pinned", pinned);
+    pinBtn.classList.toggle("active", pinned);
+    pinBtn.title = pinned ? "已锁定常驻（点击解锁）" : "锁定侧栏常驻（PC 端）";
+    if (pinned) sidebar.classList.remove("collapsed");
+    try { localStorage.setItem("mizar-pin", pinned ? "1" : "0"); } catch (e) {}
+  }
+  pinBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    pinned = !pinned;
+    applyPin();
+  });
+  applyPin();
 
   // ---------- 工具 ----------
   function esc(s) {
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  // 简易 markdown：代码块 + 行内代码
-  function md(s) {
-    let t = esc(s);
-    t = t.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, l, c) => "<pre>" + c.replace(/\n$/, "") + "</pre>");
-    t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
-    return t;
+  // 行内 markdown（输入已转义的纯文本）
+  function inline(t) {
+    let x = esc(t);
+    x = x.replace(/`([^`]+)`/g, "<code>$1</code>");
+    x = x.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    x = x.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    x = x.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    x = x.replace(/\n/g, "<br>");
+    return x;
   }
+  // markdown：各级标题 / 代码块（带复制）/ 列表 / 引用 / 行内
+  function md(s) {
+    const lines = String(s == null ? "" : s).split("\n");
+    let html = "", i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      // 围栏代码块
+      const fence = line.match(/^\s*```(\w*)\s*$/);
+      if (fence) {
+        const lang = fence[1] || "";
+        const buf = [];
+        i++;
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+        i++; // 跳过结束围栏
+        html += '<div class="code-wrap">' +
+          (lang ? '<span class="code-lang">' + esc(lang) + "</span>" : "") +
+          '<button class="code-copy" type="button">复制</button>' +
+          "<pre><code>" + esc(buf.join("\n")) + "</code></pre></div>";
+        continue;
+      }
+      // 标题
+      const h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { const n = h[1].length; html += "<h" + n + ">" + inline(h[2]) + "</h" + n + ">"; i++; continue; }
+      // 分隔线
+      if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { html += "<hr>"; i++; continue; }
+      // 引用
+      if (/^\s*>\s?/.test(line)) {
+        const buf = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
+        html += "<blockquote>" + inline(buf.join("\n")) + "</blockquote>";
+        continue;
+      }
+      // 无序列表
+      if (/^\s*[-*+]\s+/.test(line)) {
+        const buf = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { buf.push(lines[i].replace(/^\s*[-*+]\s+/, "")); i++; }
+        html += "<ul>" + buf.map((x) => "<li>" + inline(x) + "</li>").join("") + "</ul>";
+        continue;
+      }
+      // 有序列表
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const buf = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { buf.push(lines[i].replace(/^\s*\d+\.\s+/, "")); i++; }
+        html += "<ol>" + buf.map((x) => "<li>" + inline(x) + "</li>").join("") + "</ol>";
+        continue;
+      }
+      // 空行
+      if (/^\s*$/.test(line)) { i++; continue; }
+      // 段落
+      const buf = [line]; i++;
+      while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^\s*```/.test(lines[i]) &&
+        !/^#{1,6}\s/.test(lines[i]) && !/^\s*[-*+]\s+/.test(lines[i]) &&
+        !/^\s*\d+\.\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i])) { buf.push(lines[i]); i++; }
+      html += "<p>" + inline(buf.join("\n")) + "</p>";
+    }
+    return html;
+  }
+
   async function api(path, opts) {
     const r = await fetch(path, Object.assign({ credentials: "same-origin" }, opts || {}));
     let j = null;
@@ -41,10 +137,14 @@
     if (!r.ok) throw new Error((j && j.error && j.error.message) || ("HTTP " + r.status));
     return j;
   }
+
+  // 追加一条消息；assistant/error 走 md 渲染，其余纯文本
   function addMsg(kind, who, text) {
     const wrap = document.createElement("div");
     wrap.className = "msg " + kind;
-    wrap.innerHTML = '<div class="who">' + esc(who) + '</div><div class="body"></div>';
+    wrap.__raw = text == null ? "" : String(text);
+    wrap.innerHTML = '<div class="who">' + esc(who) + '</div><div class="body"></div>' +
+      '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
     const body = wrap.querySelector(".body");
     if (kind === "assistant" || kind === "error") body.innerHTML = md(text);
     else body.textContent = text;
@@ -53,6 +153,34 @@
     return body;
   }
   function clearLog() { log.innerHTML = ""; }
+
+  // 复制（带降级）
+  async function copyText(txt, btn) {
+    try {
+      await navigator.clipboard.writeText(txt);
+    } catch (e) {
+      const ta = document.createElement("textarea");
+      ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch (e2) {}
+      document.body.removeChild(ta);
+    }
+    if (btn) { const old = btn.textContent; btn.textContent = "已复制"; setTimeout(() => { btn.textContent = old; }, 900); }
+  }
+  // 事件委托：代码块复制 / 整条消息复制
+  log.addEventListener("click", (e) => {
+    const cc = e.target.closest(".code-copy");
+    if (cc) {
+      const code = cc.parentElement.querySelector("pre code");
+      if (code) copyText(code.textContent, cc);
+      return;
+    }
+    const mc = e.target.closest(".msg-copy");
+    if (mc) {
+      const wrap = mc.closest(".msg");
+      if (wrap) copyText(wrap.__raw || "", mc);
+    }
+  });
 
   // ---------- 登录 ----------
   async function checkAuth() {
@@ -101,8 +229,8 @@
     modeChat.classList.toggle("active", m === "chat");
     modeAgent.classList.toggle("active", m === "agent");
     input.placeholder = m === "chat"
-      ? "普通对话：直接问答，Enter 发送"
-      : "Agent 模式：可调用工具执行任务，Enter 发送";
+      ? "普通对话：直接问答，Enter 发送 / Shift+Enter 换行"
+      : "Agent 模式：可调用工具执行任务，Enter 发送 / Shift+Enter 换行";
   }
   modeChat.addEventListener("click", () => setMode("chat"));
   modeAgent.addEventListener("click", () => setMode("agent"));
@@ -167,17 +295,20 @@
     } catch (e) { addMsg("error", "错误", e.message); }
   }
   function collapseOnMobile() {
+    if (pinned) return; // 已锁定常驻，不自动收起
     if (window.matchMedia("(max-width: 720px)").matches) sidebar.classList.add("collapsed");
   }
   // 侧栏开关：主动打开后，点主区空白处自动收起（含桌面端）
   let sidebarToggled = false;
   if (menuBtn) menuBtn.addEventListener("click", (e) => {
     e.stopPropagation();
+    if (pinned) return; // 锁定时不允许收起
     const willOpen = sidebar.classList.contains("collapsed");
     sidebar.classList.toggle("collapsed");
-    sidebarToggled = willOpen; // 打开状态才标记为"用户主动打开"
+    sidebarToggled = willOpen;
   });
   document.addEventListener("click", (e) => {
+    if (pinned) return;
     if (!sidebarToggled) return;
     if (sidebar.contains(e.target) || (menuBtn && menuBtn.contains(e.target))) return;
     sidebar.classList.add("collapsed");
@@ -185,7 +316,7 @@
   });
   newConvBtn.addEventListener("click", createConv);
 
-  // ---------- WebSocket 事件（Agent 模式实时输出） ----------
+  // ---------- WebSocket 事件 ----------
   function connectWS() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(proto + "://" + location.host + "/web/ws");
@@ -194,7 +325,6 @@
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.type !== "event") return;
       if (m.event === "tool_call") {
-        // 工具调用前先把已流式的正文收尾（新一段回复要另起）
         finalizeStream();
         addMsg("tool", "工具", "→ " + m.tool + "(" + (m.args || "") + ")");
       } else if (m.event === "tool_result") {
@@ -206,34 +336,38 @@
     ws.onclose = () => { ws = null; };
   }
 
-  // 流式：按 step 分段渲染。reply 进正文，thinking 进灰色思考块。
+  // 流式：reply 进正文，thinking 进独立思考块（不再持续闪烁光标）
   function handleStream(step, delta, kind) {
     if (!delta) return;
     if (kind === "thinking") {
-      if (!thinkingBuf) {
-        streamBody = addMsg("sys", "思考", "");
+      if (!thinkingEl) {
+        thinkingEl = addMsg("sys", "思考", "");
         thinkingBuf = "";
+        thinkingEl.classList.add("cursor");
       }
       thinkingBuf += delta;
-      if (streamBody) { streamBody.textContent = thinkingBuf; streamBody.classList.add("cursor"); }
+      thinkingEl.textContent = thinkingBuf;
       log.scrollTop = log.scrollHeight;
       return;
     }
-    // reply：step 变化或从思考切回正文 → 新起一段
-    if (step !== streamStep || (streamBody && streamBody.parentElement.classList.contains("sys"))) {
+    // reply：一旦正文开始，思考块结束（移除闪烁光标）
+    if (thinkingEl) { thinkingEl.classList.remove("cursor"); }
+    if (step !== streamStep) {
       streamStep = step;
       streamBody = addMsg("assistant", "开阳", "");
       streamBuf = "";
     }
     if (!streamBody) { streamBody = addMsg("assistant", "开阳", ""); streamBuf = ""; }
     streamBuf += delta;
+    streamBody.__raw = streamBuf;
     streamBody.innerHTML = md(streamBuf);
     streamBody.classList.add("cursor");
     log.scrollTop = log.scrollHeight;
   }
   function finalizeStream() {
-    if (streamBody) { streamBody.classList.remove("cursor"); }
-    streamBody = null; streamBuf = ""; thinkingBuf = ""; streamStep = -1;
+    if (streamBody) streamBody.classList.remove("cursor");
+    if (thinkingEl) thinkingEl.classList.remove("cursor");
+    streamBody = null; streamBuf = ""; thinkingEl = null; thinkingBuf = ""; streamStep = -1;
   }
 
   // ---------- 发送 ----------
@@ -247,7 +381,6 @@
     busy = true; sendBtn.disabled = true;
     abortBtn.classList.remove("hidden");
     finalizeStream();
-    // 本地即时更新标题
     const item = convs.find((c) => c.id === curConv);
     if (item && (item.title === "新会话" || !item.title)) { item.title = text.slice(0, 24); renderConvList(); }
 
@@ -256,11 +389,11 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ conversation_id: curConv, message: text }),
       });
-      // 流式已渲染则不再重复追加；否则（无流式，如降级路径）用完整回复补上
       if (!streamBuf) {
-        if (streamBody) streamBody.innerHTML = md(j.reply || "(空)");
+        if (streamBody) { streamBody.__raw = j.reply || ""; streamBody.innerHTML = md(j.reply || "(空)"); }
         else addMsg("assistant", "开阳", j.reply || "(空)");
       } else if (streamBody) {
+        streamBody.__raw = j.reply || streamBuf;
         streamBody.innerHTML = md(j.reply || streamBuf);
       }
     } catch (e) {
@@ -284,14 +417,14 @@
     await fetch("/web/api/abort", { method: "POST", credentials: "same-origin" }).catch(() => {});
   });
   function autoGrow() {
-    input.style.height = "auto";
-    input.style.height = Math.min(input.scrollHeight, 180) + "px";
+    // 固定 5 行高度（由 CSS min-height 控制），超过则纵向滚动
+    input.style.height = "";
   }
-  input.addEventListener("input", autoGrow);
 
   // ---------- 设置面板 ----------
   const setModel = $("setModel"), setThinking = $("setThinking"), setTemp = $("setTemp"),
     setTopp = $("setTopp"), setMaxTokens = $("setMaxTokens"), setSystem = $("setSystem"),
+    setMaxHistory = $("setMaxHistory"),
     tempVal = $("tempVal"), toppVal = $("toppVal"), modelList = $("modelList"), modelHint = $("modelHint");
   let curSettings = {};
   let tempTouched = false, toppTouched = false;
@@ -301,7 +434,11 @@
     setModel.value = curSettings.model || "";
     setThinking.value = curSettings.thinking || "auto";
     setMaxTokens.value = curSettings.max_tokens || "";
+    setMaxHistory.value = curSettings.max_history || 50;
     setSystem.value = curSettings.system || "";
+    // 快捷行同步
+    qkModel.value = curSettings.model || "";
+    qkThinking.value = curSettings.thinking || "auto";
     tempTouched = curSettings.temperature != null;
     toppTouched = curSettings.top_p != null;
     if (tempTouched) { setTemp.value = curSettings.temperature; tempVal.textContent = curSettings.temperature; }
@@ -331,26 +468,50 @@
     } catch (e) { modelHint.textContent = "拉取失败：" + e.message; }
   });
 
+  // 保存设置（合并：保留未在本次表单中出现的字段）
+  async function saveSettings(patch, okMsg) {
+    const v = Object.assign({}, curSettings, patch);
+    const j = await api("/web/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(v),
+    });
+    curSettings = j.settings || v;
+    setModelTag(j.model);
+    return j;
+  }
   settingsSave.addEventListener("click", async () => {
     const v = {
       model: setModel.value.trim(),
       thinking: setThinking.value,
       max_tokens: parseInt(setMaxTokens.value || "0", 10) || 0,
+      max_history: parseInt(setMaxHistory.value || "50", 10) || 50,
       system: setSystem.value,
     };
     if (tempTouched) v.temperature = parseFloat(setTemp.value);
     if (toppTouched) v.top_p = parseFloat(setTopp.value);
     settingsMsg.textContent = "保存中…";
     try {
-      const j = await api("/web/api/settings", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(v),
-      });
-      curSettings = j.settings || v;
-      setModelTag(j.model);
+      await saveSettings(v);
+      // 同步快捷行
+      qkModel.value = curSettings.model || "";
+      qkThinking.value = curSettings.thinking || "auto";
       settingsMsg.textContent = "✓ 已保存并应用";
       setTimeout(() => settingsModal.classList.add("hidden"), 600);
     } catch (e) { settingsMsg.textContent = "✗ " + e.message; }
   });
+
+  // 快捷行：模型 + 思考等级 即时保存
+  async function quickSave(patch) {
+    quickMsg.textContent = "保存中…";
+    try {
+      await saveSettings(patch);
+      setModel.value = curSettings.model || "";
+      setThinking.value = curSettings.thinking || "auto";
+      quickMsg.textContent = "✓ 已应用";
+      setTimeout(() => { quickMsg.textContent = ""; }, 1200);
+    } catch (e) { quickMsg.textContent = "✗ " + e.message; }
+  }
+  qkThinking.addEventListener("change", () => quickSave({ thinking: qkThinking.value }));
+  qkModel.addEventListener("change", () => quickSave({ model: qkModel.value.trim() }));
 
   // ---------- 启动 ----------
   setMode("chat");

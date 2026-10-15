@@ -358,9 +358,14 @@ func (s *Server) chatOnce(convID, msg string) (string, error) {
 		}
 	}
 	msgs = append(msgs, agent.Message{Role: agent.RoleUser, Content: msg})
-	// 截断：仅保留 system + 最近 40 条
-	if len(msgs) > 41 {
-		msgs = append(msgs[:1], msgs[len(msgs)-40:]...)
+	// 历史截断：仅保留 system + 最近 N 条（N = 设置 max_history，默认 50）。
+	// 仅普通对话模式生效；Agent 模式走完整循环，不受此限制。
+	maxHist := set.MaxHistory
+	if maxHist <= 0 {
+		maxHist = 50
+	}
+	if len(msgs) > maxHist+1 {
+		msgs = append(msgs[:1], msgs[len(msgs)-maxHist:]...)
 	}
 
 	var reply string

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -25,6 +25,7 @@
   <aside id="sidebar" class="sidebar">
     <div class="side-head">
       <button id="newConvBtn" class="new-conv" type="button">+ 新建会话</button>
+      <button id="pinBtn" class="pin-btn" type="button" title="锁定侧栏常驻（PC 端）">📌</button>
     </div>
     <div id="convList" class="conv-list"></div>
     <div class="side-foot">
@@ -44,6 +45,7 @@
       </div>
       <div class="right">
         <span id="modelTag" class="model-tag"></span>
+        <button id="themeBtn" class="ghost" type="button" title="切换主题">🌙</button>
         <button id="abortBtn" class="ghost hidden" type="button">中止</button>
       </div>
     </header>
@@ -51,8 +53,28 @@
     <main id="log" class="log"></main>
 
     <footer class="composer">
-      <textarea id="input" rows="1" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
-      <button id="sendBtn" type="button">发送</button>
+      <!-- 快捷参数行：模型 + 思考等级 -->
+      <div class="quickbar">
+        <label class="qk">
+          <span>模型</span>
+          <input id="qkModel" type="text" placeholder="deepseek-v4-flash" list="modelList" spellcheck="false">
+        </label>
+        <label class="qk">
+          <span>思考</span>
+          <select id="qkThinking">
+            <option value="auto">自动</option>
+            <option value="off">关闭</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+          </select>
+        </label>
+        <span id="quickMsg" class="quick-msg"></span>
+      </div>
+      <div class="input-row">
+        <textarea id="input" rows="5" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
+        <button id="sendBtn" type="button">发送</button>
+      </div>
     </footer>
   </div>
 </div>
@@ -84,6 +106,12 @@
           <option value="medium">中 (medium)</option>
           <option value="high">高 (high)</option>
         </select>
+      </label>
+
+      <label class="field">
+        <span>最大历史条数（普通对话）</span>
+        <input id="setMaxHistory" type="number" min="1" step="1" placeholder="50">
+        <small class="hint">普通对话模式最多发送的历史消息条数，默认 50；Agent 模式不受此限制。</small>
       </label>
 
       <label class="field">

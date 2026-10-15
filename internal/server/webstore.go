@@ -38,7 +38,8 @@ type webSettings struct {
 	TopP        *float64 `json:"top_p,omitempty"`
 	MaxTokens   int      `json:"max_tokens,omitempty"`
 	System      string   `json:"system,omitempty"`
-	Thinking    string   `json:"thinking,omitempty"` // auto/off/low/medium/high
+	Thinking    string   `json:"thinking,omitempty"`    // auto/off/low/medium/high
+	MaxHistory  int      `json:"max_history,omitempty"` // 普通对话模式最多发送的历史消息条数（默认 50；agent 模式不生效）
 }
 
 // webStore 会话 + 设置存储（带文件持久化）。
