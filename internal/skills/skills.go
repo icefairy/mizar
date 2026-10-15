@@ -44,7 +44,13 @@ func NewManager(dir string) *Manager {
 	return &Manager{dir: dir, skills: make(map[string]Skill)}
 }
 
-// LoadAll 加载目录下所有 .md 技能文件（跳过 README.md）。
+// LoadAll 加载技能目录下的技能。
+//
+// 支持两种布局（可混用）：
+//  1. 顶层单文件：`<name>.md`
+//  2. 子目录（推荐，可携带 references/ 等附属文件）：`<name>/SKILL.md`
+//
+// 同名时子目录优先。跳过 README.md 与非技能子目录。
 func (m *Manager) LoadAll() (loaded []string, failed map[string]error) {
 	failed = make(map[string]error)
 	entries, err := os.ReadDir(m.dir)
@@ -52,35 +58,68 @@ func (m *Manager) LoadAll() (loaded []string, failed map[string]error) {
 		failed["<dir>"] = err
 		return nil, failed
 	}
-	var files []string
+	// 收集候选：{相对路径（相对 m.dir）, 展示名}
+	type cand struct {
+		rel  string // 相对技能目录的路径，如 "handoff/SKILL.md" 或 "db.md"
+		file string // 完整路径
+	}
+	var cands []cand
 	for _, e := range entries {
+		name := e.Name()
 		if e.IsDir() {
+			// 子目录：查找 SKILL.md（大小写不敏感）
+			sub := filepath.Join(m.dir, name)
+			if p := findSkillDoc(sub); p != "" {
+				rel, _ := filepath.Rel(m.dir, p)
+				cands = append(cands, cand{rel: rel, file: p})
+			}
 			continue
 		}
-		name := e.Name()
 		if strings.HasSuffix(name, ".md") && !strings.EqualFold(name, "README.md") {
-			files = append(files, name)
+			cands = append(cands, cand{rel: name, file: filepath.Join(m.dir, name)})
 		}
 	}
-	sort.Strings(files)
+	sort.Slice(cands, func(i, j int) bool {
+		di := strings.Contains(cands[i].rel, string(os.PathSeparator))
+		dj := strings.Contains(cands[j].rel, string(os.PathSeparator))
+		if di != dj {
+			return !di // 顶层文件在前，子目录在后（子目录优先，最后写入覆盖同名）
+		}
+		return cands[i].rel < cands[j].rel
+	})
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, f := range files {
-		body, err := os.ReadFile(filepath.Join(m.dir, f))
+	for _, c := range cands {
+		body, err := os.ReadFile(c.file)
 		if err != nil {
-			failed[f] = err
+			failed[c.rel] = err
 			continue
 		}
-		s, err := parseSkill(f, string(body))
+		s, err := parseSkill(c.rel, string(body))
 		if err != nil {
-			failed[f] = err
+			failed[c.rel] = err
 			continue
 		}
-		s.Path = filepath.Join(m.dir, f)
+		s.Path = c.file
 		m.skills[s.Name] = s
-		loaded = append(loaded, f)
+		loaded = append(loaded, c.rel)
 	}
 	return loaded, failed
+}
+
+// findSkillDoc 在技能子目录里找 SKILL.md（大小写不敏感），返回完整路径（无则空串）。
+func findSkillDoc(dir string) string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range ents {
+		if !e.IsDir() && strings.EqualFold(e.Name(), "SKILL.md") {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
 }
 
 // Get 按名取技能。
@@ -178,7 +217,7 @@ func parseSkill(source, body string) (Skill, error) {
 		if strings.HasPrefix(first, "#") {
 			s.Name = strings.TrimSpace(strings.TrimPrefix(first, "#"))
 		} else {
-			s.Name = strings.TrimSuffix(filepath.Base(source), ".md")
+			s.Name = defaultSkillName(source)
 		}
 		s.Body = strings.TrimSpace(content)
 		if len(s.Body) > 80 {
@@ -188,10 +227,22 @@ func parseSkill(source, body string) (Skill, error) {
 		}
 	}
 	if s.Name == "" {
-		s.Name = strings.TrimSuffix(filepath.Base(source), ".md")
+		s.Name = defaultSkillName(source)
 	}
 	if s.Description == "" {
 		s.Description = s.Name
 	}
 	return s, nil
+}
+
+// defaultSkillName 从来源路径推断技能名：
+//   - "handoff/SKILL.md" → "handoff"（子目录名）
+//   - "db.md"            → "db"
+func defaultSkillName(source string) string {
+	base := filepath.Base(source)
+	if strings.EqualFold(base, "SKILL.md") {
+		// 取父目录名
+		return filepath.Base(filepath.Dir(source))
+	}
+	return strings.TrimSuffix(base, ".md")
 }

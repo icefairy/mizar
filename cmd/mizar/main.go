@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"mizar/internal/agent"
+	"mizar/internal/assets"
 	"mizar/internal/builtins"
 	"mizar/internal/config"
 	"mizar/internal/context"
@@ -37,7 +38,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.4.8"
+var version = "v0.4.9"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -91,6 +92,7 @@ func main() {
 		// 宿主函数文档生成
 		genDoc    = flag.Bool("plugin-doc", false, "生成宿主函数文档（精简清单 + doc_get 指引）")
 		genDocOut = flag.String("plugin-doc-out", "docs/host-funcs.md", "文档输出路径")
+		noAssets  = flag.Bool("no-assets", false, "不释放内置插件/技能（默认首次运行自动释放到 ~/.mizar）")
 	)
 	// 兼容别名：-server → -serve（Go flag 无别名机制，解析前替换）
 	// 避免用户拼写 -server 时直接 flag 报错
@@ -319,6 +321,14 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+
+	// 释放内置插件/技能（随二进制发布，只补缺不覆盖）。--no-assets 可关闭。
+	if !*noAssets {
+		if r := assets.Release(extAbs, skAbs); len(r.Written) > 0 {
+			log.Printf("已释放内置插件/技能 %d 个: %v", len(r.Written), r.Written)
+		}
+	}
+
 	// 技能使用统计（默认开启，全局配置 skill_stats_enabled=false 关闭）
 	stats := skills.LoadStats(filepath.Join(config.ConfigDir(), "skill_stats.json"))
 

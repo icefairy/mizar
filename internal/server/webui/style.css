@@ -206,6 +206,22 @@ button { font-family: inherit; cursor: pointer; }
 .msg .body li { margin: .2em 0; }
 .msg .body a { color: var(--accent); }
 .msg .body blockquote { margin: .5em 0; padding: .2em .8em; border-left: 3px solid var(--border); color: var(--text-dim); }
+/* 表格 */
+.msg .body .md-table-wrap { overflow-x: auto; margin: .6em 0; }
+.msg .body table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.msg .body th, .msg .body td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+.msg .body th { background: var(--bg-side); font-weight: 600; white-space: nowrap; }
+.msg .body tbody tr:nth-child(even) { background: var(--bg-code); }
+.msg.user .body table, .msg.user .body th, .msg.user .body td { border-color: rgba(255,255,255,.35); }
+.msg.user .body th { background: rgba(255,255,255,.15); }
+/* 任务列表 */
+.msg .body li.task { list-style: none; margin-left: -1.2em; }
+.msg .body li.task input { margin-right: 6px; vertical-align: middle; }
+/* 删除线 / 高亮 / 图片 */
+.msg .body del { color: var(--text-dim); }
+.msg .body mark { background: #ffe58f; color: #1f2329; padding: 0 3px; border-radius: 3px; }
+[data-theme="dark"] .msg .body mark { background: #7a5d00; color: #ffe58f; }
+.msg .body img { border-radius: 8px; margin: .4em 0; }
 .msg .body code {
   background: var(--bg-code); padding: 1px 5px; border-radius: 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;

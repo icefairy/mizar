@@ -42,11 +42,20 @@ func toolSkill(dir string) plugins.Tool {
 }
 
 func findSkillFile(dir, name string) string {
+	// 1) 子目录形式：<name>/SKILL.md（大小写不敏感）
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
-	// 优先精确匹配
+	for _, e := range entries {
+		if e.IsDir() && strings.EqualFold(e.Name(), name) {
+			sub := filepath.Join(dir, e.Name())
+			if p := findSkillDocIn(sub); p != "" {
+				return filepath.Join(e.Name(), filepath.Base(p))
+			}
+		}
+	}
+	// 2) 顶层文件：<name>.md（精确，再忽略大小写）
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -55,14 +64,26 @@ func findSkillFile(dir, name string) string {
 			return e.Name()
 		}
 	}
-	// 其次按名称前缀/包含匹配
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		base := strings.TrimSuffix(e.Name(), ".md")
-		if strings.EqualFold(base, name) {
+		if strings.EqualFold(strings.TrimSuffix(e.Name(), ".md"), name) {
 			return e.Name()
+		}
+	}
+	return ""
+}
+
+// findSkillDocIn 在子目录里找 SKILL.md（大小写不敏感）。
+func findSkillDocIn(dir string) string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range ents {
+		if !e.IsDir() && strings.EqualFold(e.Name(), "SKILL.md") {
+			return filepath.Join(dir, e.Name())
 		}
 	}
 	return ""

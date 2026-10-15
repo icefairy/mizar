@@ -70,13 +70,85 @@
   function inline(t) {
     let x = esc(t);
     x = x.replace(/`([^`]+)`/g, "<code>$1</code>");
+    // 图片（须在链接之前）
+    x = x.replace(/!\[([^\]]*)\]\(([^)]+)\)/g,
+      '<img src="$2" alt="$1" loading="lazy" style="max-width:100%">');
+    // 链接
+    x = x.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     x = x.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     x = x.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-    x = x.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // 删除线
+    x = x.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+    // 高亮 ==x==
+    x = x.replace(/==([^=]+)==/g, "<mark>$1</mark>");
     x = x.replace(/\n/g, "<br>");
     return x;
   }
-  // markdown：各级标题 / 代码块（带复制）/ 列表 / 引用 / 行内
+  // 列表解析：支持缩进嵌套与任务列表 - [ ] / - [x]
+  // 返回 { html, next }。以起始行缩进为基准，更深缩进的条目归入子列表。
+  function parseList(lines, start) {
+    const first = lines[start].match(/^(\s*)([-*+]|\d+\.)\s+/);
+    const baseIndent = first[1].length;
+    const ordered = /\d+\./.test(first[2]);
+    const tag = ordered ? "ol" : "ul";
+    let html = "<" + tag + ">";
+    let i = start;
+    while (i < lines.length) {
+      const m = lines[i].match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+      if (!m) break;
+      const indent = m[1].length;
+      if (indent < baseIndent) break;
+      if (indent > baseIndent) {
+        // 子列表：递归，结果并进上一个 <li>（移除其闭合标签后追加）
+        const sub = parseList(lines, i);
+        html = html.replace(/<\/li>$/, sub.html + "</li>");
+        i = sub.next;
+        continue;
+      }
+      let text = m[3];
+      // 任务列表
+      const task = text.match(/^\[([ xX])\]\s+(.*)$/);
+      if (task) {
+        const checked = task[1].toLowerCase() === "x";
+        html += '<li class="task"><input type="checkbox" disabled' + (checked ? " checked" : "") +
+          ">" + inline(task[2]) + "</li>";
+      } else {
+        html += "<li>" + inline(text) + "</li>";
+      }
+      i++;
+    }
+    return { html: html + "</" + tag + ">", next: i };
+  }
+  // 表格辅助：按未转义的 | 拆单元格
+  function splitRow(line) {
+    let s = String(line).trim();
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|")) s = s.slice(0, -1);
+    const cells = [];
+    let cur = "";
+    for (let k = 0; k < s.length; k++) {
+      if (s[k] === "\\" && s[k + 1] === "|") { cur += "|"; k++; }
+      else if (s[k] === "|") { cells.push(cur.trim()); cur = ""; }
+      else cur += s[k];
+    }
+    cells.push(cur.trim());
+    return cells;
+  }
+  // 分隔行：| --- | :--: | 之类（至少一个 -）
+  function isSepRow(line) {
+    return /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line);
+  }
+  // 表格起始：当前行含 |，且下一行是分隔行
+  function isTableStart(lines, i) {
+    return i + 1 < lines.length && String(lines[i]).includes("|") && isSepRow(lines[i + 1]);
+  }
+  function alignOf(sep) {
+    return splitRow(sep).map((c) => {
+      const l = c.startsWith(":"), r = c.endsWith(":");
+      if (l && r) return "center"; if (r) return "right"; if (l) return "left"; return "";
+    });
+  }
+  // markdown：各级标题 / 代码块（带复制）/ 表格 / 列表 / 引用 / 行内
   function md(s) {
     const lines = String(s == null ? "" : s).split("\n");
     let html = "", i = 0;
@@ -96,6 +168,23 @@
           "<pre><code>" + esc(buf.join("\n")) + "</code></pre></div>";
         continue;
       }
+      // 表格（当前行含 | 且下一行是分隔行）
+      if (isTableStart(lines, i)) {
+        const header = splitRow(line);
+        const aligns = alignOf(lines[i + 1]);
+        i += 2; // 跳过表头 + 分隔行
+        let th = "<tr>" + header.map((c, k) =>
+          '<th' + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : "") + ">" + inline(c) + "</th>").join("") + "</tr>";
+        let tb = "";
+        while (i < lines.length && String(lines[i]).includes("|") && !/^\s*$/.test(lines[i])) {
+          const cells = splitRow(lines[i]);
+          tb += "<tr>" + cells.map((c, k) =>
+            "<td" + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : "") + ">" + inline(c) + "</td>").join("") + "</tr>";
+          i++;
+        }
+        html += '<div class="md-table-wrap"><table><thead>' + th + "</thead><tbody>" + tb + "</tbody></table></div>";
+        continue;
+      }
       // 标题
       const h = line.match(/^(#{1,6})\s+(.*)$/);
       if (h) { const n = h[1].length; html += "<h" + n + ">" + inline(h[2]) + "</h" + n + ">"; i++; continue; }
@@ -108,18 +197,11 @@
         html += "<blockquote>" + inline(buf.join("\n")) + "</blockquote>";
         continue;
       }
-      // 无序列表
-      if (/^\s*[-*+]\s+/.test(line)) {
-        const buf = [];
-        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { buf.push(lines[i].replace(/^\s*[-*+]\s+/, "")); i++; }
-        html += "<ul>" + buf.map((x) => "<li>" + inline(x) + "</li>").join("") + "</ul>";
-        continue;
-      }
-      // 有序列表
-      if (/^\s*\d+\.\s+/.test(line)) {
-        const buf = [];
-        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { buf.push(lines[i].replace(/^\s*\d+\.\s+/, "")); i++; }
-        html += "<ol>" + buf.map((x) => "<li>" + inline(x) + "</li>").join("") + "</ol>";
+      // 列表（有序/无序，支持缩进嵌套与任务列表）
+      if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+        const consumed = parseList(lines, i);
+        html += consumed.html;
+        i = consumed.next;
         continue;
       }
       // 空行
@@ -128,7 +210,8 @@
       const buf = [line]; i++;
       while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^\s*```/.test(lines[i]) &&
         !/^#{1,6}\s/.test(lines[i]) && !/^\s*[-*+]\s+/.test(lines[i]) &&
-        !/^\s*\d+\.\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i])) { buf.push(lines[i]); i++; }
+        !/^\s*\d+\.\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i]) &&
+        !/^\s*(-{3,}|\*{3,})\s*$/.test(lines[i]) && !isTableStart(lines, i)) { buf.push(lines[i]); i++; }
       html += "<p>" + inline(buf.join("\n")) + "</p>";
     }
     return html;

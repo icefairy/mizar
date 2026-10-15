@@ -4,6 +4,28 @@
 
 ---
 
+## [v0.4.9]
+
+### ✨ 新增（Markdown 渲染补全）
+
+- **表格**：支持 GFM 表格（`| a | b |` + 分隔行），含左/中/右对齐（`:---`/`:--:`/`---:`）、表头样式、斑马纹、横向滚动。
+- **删除线** `~~x~~`、**高亮** `==x==`、**图片** `![alt](url)`。
+- **任务列表** `- [ ]` / `- [x]`（渲染为勾选框）。
+- **嵌套列表**：无序/有序列表支持缩进嵌套（含混合嵌套）。
+
+### ✨ 新增（内置插件与技能随二进制发布）
+
+- **内置资产自动释放**：`assets/` 下的默认插件与技能用 `go:embed` 内嵌进二进制，**首次运行时自动释放**到 `~/.mizar/extensions` 与 `~/.mizar/skills`。**只补缺、不覆盖**（已存在的文件一律跳过，保护用户修改）；`--no-assets` 可关闭。
+- **内置数据库插件 `db.ts`**：PostgreSQL / MySQL / SQLite 常用增删改查——`db_conn`（连接配置管理）/`db_tables`/`db_schema`/`db_query`/`db_exec`/`db_insert`/`db_update`/`db_delete`/`db_count`/`db_close`。连接信息由用户或其他技能提供（`~/.mizar/db_connections.json` 或内联 dsn）。`db_update`/`db_delete` 强制 `where`（防全表误操作）。
+- **内置图片识别插件 `image_vision.ts`**：多模态模型识别图片（通用版，从 `~/.mizar/config.json` 读配置）。
+- **内置技能**：`handoff`（交接）、`memory`（全局记忆）、`database`（数据库操作）。
+
+### ✨ 改进（技能支持子目录）
+
+- **技能加载支持子目录布局** `<name>/SKILL.md`（可携带 `references/` 等附属文件），与顶层单文件 `<name>.md` 兼容；同名时子目录优先。此前 `skill_manager` 工具按子目录写入，加载器却只认顶层文件——现在两者一致。
+
+---
+
 ## [v0.4.8]
 
 ### ✨ 改进（Agent 模式过程展示）
