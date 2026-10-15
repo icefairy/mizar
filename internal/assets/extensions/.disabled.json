@@ -1,0 +1,5 @@
+{
+  "disabled": [
+    "memory_hmem.ts"
+  ]
+}

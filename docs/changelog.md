@@ -12,11 +12,12 @@
 - **持久化禁用清单**：禁用状态写入插件目录下的 `.disabled.json`，重启后依然生效；`/list_plugins` 支持省略扩展名（`memory` → `memory.ts`）。
 - **用途**：一个二进制可同时满足多种记忆后端——内置本地 SQLite 版开箱即用，需要与其它 agent 共用记忆时，`/disable_plugin memory.ts` 换成自己的（如 HMEM 版）即可。
 
-### ✨ 改进（记忆插件自托管化）
+### ✨ 改进（记忆插件自托管化 + HMEM 版内置）
 
 - **`memory.ts` 改为自托管 SQLite**：数据存在本地单文件 `~/.mizar/memory/mem.db`，**零外部服务、零依赖**，随二进制发布即用。此前是 HMEM C/S 版，离不开独立部署的 HMEM Server，不适合随包发布。
-- **中文分词检索**：中文按**二元组（bigram）**切分 + 单字，英文/数字按整词，过滤停用词；用「覆盖率 75% + 精确度 25%」加权打分（按 token 长度加权），返回相似度最高的若干条（**默认 3 条**）。工具：`mem_write`/`mem_search`/`mem_list`/`mem_get`/`mem_delete`/`mem_stats`/`mem_clear`。
-- **新增宿主函数 `env(name)`**：插件可读环境变量定位 `HOME`，不再硬编码 `/root`（`db.ts`、`image_vision.ts` 同步改用）。
+- **内置 HMEM 服务端版 `memory_hmem.ts`**：连接 [HMEM Server](https://github.com/icefairy/hmem_hermes_agent)（向量+关键词混合检索、反思引擎、知识图谱），实现**多 agent 共用一套记忆**。默认**禁用**（需自建服务），用 `/disable_plugin memory.ts` + `/enable_plugin memory_hmem.ts` 切换。两个插件导出同名 `mem_*` 工具，同时启用会冲突——加载器会打印冲突警告。
+- **中文分词检索**（SQLite 版）：中文按**二元组（bigram）**切分 + 单字，英文/数字按整词，过滤停用词；用「覆盖率 75% + 精确度 25%」加权打分（按 token 长度加权），返回相似度最高的若干条（**默认 3 条**）。工具：`mem_write`/`mem_search`/`mem_list`/`mem_get`/`mem_delete`/`mem_stats`/`mem_clear`。
+- **新增宿主函数 `env(name)`**：插件可读环境变量定位 `HOME`，不再硬编码 `/root`（`db.ts`、`image_vision.ts`、`memory_hmem.ts` 均用）。
 
 ---
 

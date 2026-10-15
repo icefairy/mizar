@@ -141,8 +141,8 @@
       <h2>最新动态</h2>
       <div class="grid cols-2">
         <div class="card">
-          <h3>v0.5.0 · 插件启用/禁用/重载 + 记忆自托管</h3>
-          <p>新增 <code>/list_plugins</code>、<code>/enable_plugin</code>、<code>/disable_plugin</code>、<code>/reload_plugins</code>，可切换插件后端（如用 HMEM 版记忆替代内置版，与其它 agent 共用记忆）；记忆插件改为自托管 SQLite，中文二元组分词检索、默认返回 3 条，零外部服务。</p>
+          <h3>v0.5.0 · 插件启用/禁用/重载 + 记忆双后端</h3>
+          <p>新增 <code>/list_plugins</code>、<code>/enable_plugin</code>、<code>/disable_plugin</code>、<code>/reload_plugins</code>，可切换插件后端；内置两个记忆插件——本地 SQLite 版开箱即用，<a href="https://github.com/icefairy/hmem_hermes_agent" target="_blank" rel="noopener">HMEM 服务端版</a>（向量检索 / 反思引擎 / 知识图谱）可与其它 agent 共用一套记忆，默认禁用、一键切换。</p>
         </div>
         <div class="card">
           <h3>v0.4.8 · Agent 过程分组折叠</h3>

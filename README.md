@@ -76,8 +76,25 @@
 - **生命周期钩子**：`plugin_init` / `plugin_cleanup`，文件删除时自动卸载
 - **JS 插件免编译直跑**：`.js` 文件直接由 goja 解释执行
 - **LSP 插件扩展**：JS 插件可注册 Provider，支持诊断 / 定义跳转 / 引用查找 / 补全
-- **启用 / 禁用 / 重载**：`/list_plugins` 查看（✅ 已加载 / ⛔ 已禁用）、`/disable_plugin <名>` 卸载并持久化、`/enable_plugin <名>` 启用、`/reload_plugins` 重载全部。禁用状态存于 `~/.mizar/extensions/.disabled.json`，重启后保持。用于切换插件后端（如用自备的 HMEM 记忆插件替代内置 SQLite 版，与其它 agent 共用记忆）。
+- **启用 / 禁用 / 重载**：`/list_plugins` 查看（✅ 已加载 / ⛔ 已禁用）、`/disable_plugin <名>` 卸载并持久化、`/enable_plugin <名>` 启用、`/reload_plugins` 重载全部。禁用状态存于 `~/.mizar/extensions/.disabled.json`，重启后保持。用于切换插件后端（如用 HMEM 记忆插件替代内置 SQLite 版，与其它 agent 共用记忆）。
 - **内置资产自动释放**：常用插件（数据库 CRUD、图片识别、记忆）与技能（交接 / 记忆 / 数据库）用 `go:embed` 内嵌，**首次运行自动释放**到 `~/.mizar`，**只补缺不覆盖**（保护用户修改），`--no-assets` 可关闭。
+
+### 4.1 记忆后端（本地 SQLite / HMEM 服务端，二选一）
+
+内置两个记忆插件，导出同名 `mem_*` 工具，**同时只启用一个**：
+
+| 插件 | 后端 | 特点 | 默认 |
+|------|------|------|------|
+| `memory.ts` | 本地 SQLite | 零外部服务、零依赖，开箱即用；中文 bigram 分词检索 | ✅ 启用 |
+| `memory_hmem.ts` | [HMEM Server](https://github.com/icefairy/hmem_hermes_agent) | 向量+关键词混合检索、反思引擎（经验→洞察）、知识图谱，**多 agent 共用一套记忆** | ⛔ 禁用 |
+
+```bash
+# 切换到 HMEM 版（需先部署 HMEM Server）
+/disable_plugin memory.ts
+/enable_plugin memory_hmem.ts
+```
+
+HMEM 连接配置：环境变量 `MIZAR_HMEM_API_URL` / `MIZAR_HMEM_API_KEY` / `MIZAR_HMEM_NAMESPACE`，或 `/mem config set apiUrl http://localhost:8000`。
 
 ### 5. 技能系统
 - SKILL.md 纯文本技能，frontmatter 解析后注入上下文

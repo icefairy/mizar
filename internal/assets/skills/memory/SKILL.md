@@ -33,6 +33,27 @@ description: Use when 需要跨会话记住事实、检索过往经验、或沉�
 
 斜杠命令：`/mem store|search|list|get|delete|stats|clear|config`。
 
+## 两种记忆后端（二选一）
+
+Mizar 内置**两个**记忆插件，导出同名 `mem_*` 工具，**同时只应启用一个**（同时启用会工具名冲突，后加载者生效）：
+
+| 插件 | 后端 | 特点 | 默认 |
+|------|------|------|------|
+| `memory.ts` | 本地 SQLite | 零外部服务、零依赖，开箱即用 | ✅ 启用 |
+| `memory_hmem.ts` | [HMEM Server](https://github.com/icefairy/hmem_hermes_agent) | 向量+关键词混合检索、反思引擎、知识图谱，**多 agent 共用一套记忆** | ⛔ 禁用 |
+
+**切换到 HMEM 版**（需先自建 HMEM 服务，默认 `http://localhost:8000`）：
+
+```
+/disable_plugin memory.ts
+/enable_plugin memory_hmem.ts
+```
+
+配置 HMEM 连接（或用环境变量 `MIZAR_HMEM_API_URL` / `MIZAR_HMEM_API_KEY` / `MIZAR_HMEM_NAMESPACE`）：
+`/mem config set apiUrl http://localhost:8000` · `/mem config set namespace 我的空间`
+
+> 下文工具表以本地 SQLite 版为准；HMEM 版工具名相同，另有 `mem_reflect`（归纳洞察）、`mem_models`（洞察/心智模型）、`mem_graph`（知识图谱）、`mem_namespaces`（命名空间）。
+
 ## 要点
 
 - **写「可复用的事实」，不写流水账**：`用户偏好结论先行` ✓，`今天下午改了 X 文件` ✗。

@@ -355,6 +355,13 @@ func (m *Manager) loadPlugin(filename string) error {
 	m.removeLSPLocked(filename)
 	m.removeServersLocked(filename) // 关闭旧 HTTP 服务器，释放端口
 	for _, t := range tools {
+		// 工具名冲突检测：不同插件导出同名工具时警告（后者覆盖前者）。
+		// 典型场景：memory.ts（本地 SQLite）与 memory_hmem.ts（HMEM 服务端）都导出 mem_*，
+		// 二者应二选一（用 /disable_plugin 切换），不应同时启用。
+		if exist, ok := m.tools[t.Name]; ok && exist.PluginFile != filename && exist.PluginFile != "" {
+			log.Printf("⚠ 工具名冲突: %q 同时由 %s 与 %s 导出，后者生效（请用 /disable_plugin 禁用其一）",
+				t.Name, exist.PluginFile, filename)
+		}
 		m.tools[t.Name] = t
 	}
 	for _, c := range cmds {
