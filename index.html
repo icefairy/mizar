@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.4.8</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -118,6 +118,7 @@
         <a class="btn primary" href="https://github.com/icefairy/mizar" target="_blank" rel="noopener">GitHub 仓库</a>
         <a class="btn" href="#quickstart">快速开始</a>
         <a class="btn" href="#features">核心特性</a>
+        <a class="btn" href="#news">最新动态</a>
       </div>
     </header>
 
@@ -129,8 +130,33 @@
         <div class="card"><h3>📄 SKILL.md 技能</h3><p>纯文本技能文件，兼容 Anthropic/Hermes 生态，frontmatter 解析后按需注入上下文。</p></div>
         <div class="card"><h3>🔌 MCP 协议</h3><p>接入任意语言实现的 MCP 服务器，工具生态不再受限。</p></div>
         <div class="card"><h3>🖥️ 交互式 TUI</h3><p>基于 tview，支持鼠标滚动、多行编辑、Tab 补全、流式输出与等待进度指示。</p></div>
-        <div class="card"><h3>🌐 Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 三种接入方式。</p></div>
+        <div class="card"><h3>🌐 Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 三种接入方式，另含浏览器 Web UI 与管理接口。API 详见 <a href="docs/api.md">docs/api.md</a>。</p></div>
+        <div class="card"><h3>🖥️ Web UI</h3><p>内嵌式浏览器界面：多会话管理、模型/参数设置、流式输出、暗黑主题、Markdown 渲染；Agent 过程默认折叠分组，回复一目了然。</p></div>
+        <div class="card"><h3>🔍 诊断日志</h3><p>关键事件落盘 <code>~/.mizar/logs</code>（TUI/Agent/LLM/panic），三步定位「任务莫名中止/卡死」：看 RUN 边界、ESC 取消、finish_reason。</p></div>
       </div>
+    </section>
+
+    <section id="news">
+      <h2>最新动态</h2>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.4.8 · Agent 过程分组折叠</h3>
+          <p>一轮对话组织为「用户提问 → 工作过程（默认折叠）→ 最终答复」；工具调用/结果压缩为单行、去除空气泡；修复用户多行消息被挤成一行。</p>
+        </div>
+        <div class="card">
+          <h3>v0.4.7 · Web UI 体验增强</h3>
+          <p>侧栏锁定常驻、暗黑/明亮主题、快捷参数行、Markdown 渲染与逐条复制、消息左右对齐；设置新增最大历史条数。</p>
+        </div>
+        <div class="card">
+          <h3>v0.4.6 · Web UI + 溢出兜底</h3>
+          <p>内嵌浏览器 Web UI（多会话 / 模型参数 / 流式输出 / 侧栏收起）；上下文溢出时强制压缩兜底，不再因 400 后无法压缩而失败。</p>
+        </div>
+        <div class="card">
+          <h3>构建 · 强制静态编译</h3>
+          <p>发布强制静态链接 + GOAMD64=v1，单文件兼容 CentOS 7（glibc 2.17）与老 CPU，拷一个文件即可运行。</p>
+        </div>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-top:10px">完整变更见 <a href="docs/changelog.md">docs/changelog.md</a>。</p>
     </section>
 
     <section id="quickstart">
@@ -145,9 +171,13 @@ chmod +x mizar
 /provider &lt;baseURL&gt; &lt;apiKey&gt;
 /model &lt;name&gt;
 /think &lt;level&gt;
+
+<span class="cm"># 或持久化运行：Server + 浏览器 Web UI</span>
+./mizar --serve --addr :3003
+<span class="cm"># 浏览器打开 http://127.0.0.1:3003/web/（首次启动生成登录密码）</span>
       </div>
       <div class="grid cols-2" style="margin-top:14px">
-        <div class="card"><h3>Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 接入。</p></div>
+        <div class="card"><h3>Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket / 浏览器 Web UI，详见 <a href="docs/api.md">docs/api.md</a>。</p></div>
         <div class="card"><h3>自举示例</h3><p>让它写一个插件：<code>./mizar "写一个插件：每天9点检查磁盘占用，超80%告警"</code></p></div>
       </div>
     </section>
@@ -168,9 +198,11 @@ chmod +x mizar
                 <li>llm/ <span class="tree-cmt"># LLM 客户端</span></li>
                 <li>shell/ <span class="tree-cmt"># 安全命令执行</span></li>
                 <li>lsp/ <span class="tree-cmt"># LSP 客户端 + 服务器</span></li>
-                <li>server/ <span class="tree-cmt"># HTTP/RPC/WebSocket</span></li>
+                <li>server/ <span class="tree-cmt"># HTTP/RPC/WebSocket + 内嵌 Web UI</span></li>
                 <li>session/ <span class="tree-cmt"># 会话管理（JSONL）</span></li>
                 <li>lifecycle/ <span class="tree-cmt"># 生命周期钩子</span></li>
+                <li>diag/ <span class="tree-cmt"># 诊断日志（~/.mizar/logs）</span></li>
+                <li>jobs/ <span class="tree-cmt"># 后台任务</span></li>
               </ul>
             </li>
             <li>extensions/ <span class="tree-cmt"># 插件目录</span></li>
