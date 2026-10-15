@@ -8,12 +8,13 @@ import (
 )
 
 // NetBridge 给插件提供 TCP 网络能力：
-//   tcp_listen(addr, onAccept) -> serverID
-//   tcp_dial(addr) -> connID
-//   tcp_send(connID, data)
-//   tcp_onrecv(connID, callback)
-//   tcp_close(connID)
-//   tcp_stop(serverID)
+//
+//	tcp_listen(addr, onAccept) -> serverID
+//	tcp_dial(addr) -> connID
+//	tcp_send(connID, data)
+//	tcp_onrecv(connID, callback)
+//	tcp_close(connID)
+//	tcp_stop(serverID)
 //
 // 服务器端用 accept 回调返回 connID+remoteAddr；接收端用 onRecv 回调返回数据。
 type NetBridge struct {
@@ -29,11 +30,11 @@ type tcpListener struct {
 	closed bool
 }
 type netConn struct {
-	conn          net.Conn
-	mu            sync.Mutex
-	closed        bool
-	recvCallback  func(data string)
-	recvDone      chan struct{}
+	conn         net.Conn
+	mu           sync.Mutex
+	closed       bool
+	recvCallback func(data string)
+	recvDone     chan struct{}
 }
 
 func NewNetBridge() *NetBridge {

@@ -472,6 +472,7 @@ func main() {
 	a.GoalService = goalSvc
 	// GoalLoop：每轮后自动 judge，续跑直到目标完成（复刻 hermes Ralph loop）
 	a.GoalLoop = agent.NewGoalLoop(goalSvc, agent.DefaultGoalLoopConfig())
+	a.GoalLoop.SetCwd(wd)
 	// 辅助 judge 函数：用主 LLM
 	auxLLM := a.LLM
 	a.AuxLLM = auxLLM

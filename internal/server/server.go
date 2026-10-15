@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"mizar/internal/agent"
@@ -21,7 +22,18 @@ type Server struct {
 	wsUp    *wsUpgrader
 	hub     *hub
 	web     *webUI
+	// runMu 串行化 Agent.Run：Agent 实例内的 Initial / OnLLMStream / steer 槽位
+	// 都是共享可变状态，多个入口（/v1/chat/completions、/rpc、/web/api/run）
+	// 并发调用会互相覆盖。用 TryLock 而非 Lock——忙时立即返回 409，
+	// 避免请求无限排队；steer/abort 不走此锁，等待期间仍可实时纠正。
+	runMu sync.Mutex
 }
+
+// acquireRun 尝试独占 Agent；失败返回 false（已有 Run 在执行）。
+func (s *Server) acquireRun() bool { return s.runMu.TryLock() }
+
+// releaseRun 释放 Agent 独占。
+func (s *Server) releaseRun() { s.runMu.Unlock() }
 
 // New 创建 Server。
 func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {

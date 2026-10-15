@@ -52,12 +52,12 @@ func DefaultBackgroundReviewConfig() BackgroundReviewConfig {
 
 // BackgroundReview 管理后台 review goroutine。
 type BackgroundReview struct {
-	cfg    BackgroundReviewConfig
-	mu     sync.Mutex
+	cfg                  BackgroundReviewConfig
+	mu                   sync.Mutex
 	turnsSinceLastReview int
-	running   atomic.Bool
-	done      chan struct{}
-	wg        sync.WaitGroup
+	running              atomic.Bool
+	done                 chan struct{}
+	wg                   sync.WaitGroup
 }
 
 // NewBackgroundReview 创建后台 review 控制器。
@@ -191,27 +191,39 @@ Rules:
 - Never fabricate skills or memories that weren't clearly demonstrated`
 }
 
-func parseReviewResult(text string) (struct{ NewSkillName, NewSkill, MemoryEntry string; Action string }, error) {
+func parseReviewResult(text string) (struct {
+	NewSkillName, NewSkill, MemoryEntry string
+	Action                              string
+}, error) {
 	text = strings.TrimSpace(text)
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 	if start == -1 || end == -1 {
-		return struct{ NewSkillName, NewSkill, MemoryEntry string; Action string }{}, fmt.Errorf("no JSON in review output")
+		return struct {
+			NewSkillName, NewSkill, MemoryEntry string
+			Action                              string
+		}{}, fmt.Errorf("no JSON in review output")
 	}
 	var result struct {
-		Action     string `json:"action"`
-		SkillName  string `json:"skill_name"`
-		SkillBody  string `json:"skill_body"`
-		Entry      string `json:"entry"`
+		Action    string `json:"action"`
+		SkillName string `json:"skill_name"`
+		SkillBody string `json:"skill_body"`
+		Entry     string `json:"entry"`
 	}
 	if err := json.Unmarshal([]byte(text[start:end+1]), &result); err != nil {
-		return struct{ NewSkillName, NewSkill, MemoryEntry string; Action string }{}, err
+		return struct {
+			NewSkillName, NewSkill, MemoryEntry string
+			Action                              string
+		}{}, err
 	}
-	return struct{ NewSkillName, NewSkill, MemoryEntry string; Action string }{
-		Action:      result.Action,
+	return struct {
+		NewSkillName, NewSkill, MemoryEntry string
+		Action                              string
+	}{
+		Action:       result.Action,
 		NewSkillName: result.SkillName,
-		NewSkill:    result.SkillBody,
-		MemoryEntry: result.Entry,
+		NewSkill:     result.SkillBody,
+		MemoryEntry:  result.Entry,
 	}, nil
 }
 
@@ -240,5 +252,3 @@ func (br *BackgroundReview) writeMemory(entry string) {
 	defer f.Close()
 	fmt.Fprintf(f, "%s\n", entry)
 }
-
-

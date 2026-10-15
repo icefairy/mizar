@@ -76,7 +76,7 @@ func TestRunWithCompactor(t *testing.T) {
 	a.Compactor = DefaultCompactor(func(msgs []Message) (string, error) {
 		return "## Goal\ncompacted", nil
 	})
-	a.Compactor.ContextWindow = 200   // 窗口极小，必然触发压缩
+	a.Compactor.ContextWindow = 200 // 窗口极小，必然触发压缩
 	a.Compactor.ReserveTokens = 20
 	a.Compactor.KeepRecentTokens = 30
 

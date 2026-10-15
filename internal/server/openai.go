@@ -25,12 +25,12 @@ type chatReqMsg struct {
 
 // chatResponse OpenAI ChatCompletion 响应体。
 type chatResponse struct {
-	ID      string          `json:"id"`
-	Object  string          `json:"object"`
-	Created int64           `json:"created"`
-	Model   string          `json:"model"`
-	Choices []chatChoice    `json:"choices"`
-	Usage   *chatUsage      `json:"usage,omitempty"`
+	ID      string       `json:"id"`
+	Object  string       `json:"object"`
+	Created int64        `json:"created"`
+	Model   string       `json:"model"`
+	Choices []chatChoice `json:"choices"`
+	Usage   *chatUsage   `json:"usage,omitempty"`
 }
 
 type chatChoice struct {
@@ -104,6 +104,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if task == "" {
 		task = req.Messages[len(req.Messages)-1].Content
 	}
+	// 串行化：Agent 的 Initial/OnLLMStream 是共享可变状态。
+	if !s.acquireRun() {
+		errJSON(w, http.StatusConflict, "agent busy")
+		return
+	}
+	defer s.releaseRun()
 	s.agent.Initial = initial
 
 	start := time.Now()
@@ -141,17 +147,17 @@ type sseDelta struct {
 
 // sseChunk SSE 流式响应块（chat.completion.chunk）。
 type sseChunk struct {
-	ID      string     `json:"id"`
-	Object  string     `json:"object"`
-	Created int64      `json:"created"`
-	Model   string     `json:"model"`
+	ID      string      `json:"id"`
+	Object  string      `json:"object"`
+	Created int64       `json:"created"`
+	Model   string      `json:"model"`
 	Choices []sseChoice `json:"choices"`
 }
 
 type sseChoice struct {
-	Index        int        `json:"index"`
-	Delta        sseDelta   `json:"delta"`
-	FinishReason *string    `json:"finish_reason"`
+	Index        int      `json:"index"`
+	Delta        sseDelta `json:"delta"`
+	FinishReason *string  `json:"finish_reason"`
 }
 
 // handleChatStream SSE 流式响应（stream=true）。
@@ -163,6 +169,14 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request, req *c
 		errJSON(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	// 串行化：Agent 的 Initial/OnLLMStream 是共享可变状态，并发会互相覆盖。
+	// 必须在写任何响应头之前获取，否则错误分支无法改状态码。
+	if !s.acquireRun() {
+		errJSON(w, http.StatusConflict, "agent busy")
+		return
+	}
+	defer s.releaseRun()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")

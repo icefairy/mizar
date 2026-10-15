@@ -46,7 +46,7 @@ func TestCacheMissNoticesOncePerDrop(t *testing.T) {
 func TestCacheMissReFiresAfterRecovery(t *testing.T) {
 	d := NewCacheMissDetector()
 	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 19000})
-	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 1000}) // 提示
+	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 1000})  // 提示
 	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 19000}) // 恢复
 	if got := d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 1000}); got == "" {
 		t.Fatal("恢复后再次下跌应再次提示")

@@ -53,11 +53,18 @@ type GoalLoop struct {
 	cfg     GoalLoopConfig
 	running atomic.Bool
 	active  atomic.Bool // 当前是否有 goal loop 在运行
+	// cwd 门禁命令的工作目录（空 = 进程当前目录）
+	cwd string
 	// 每轮消耗计数
 	turnsUsed int
 	// 连续失败计数
-	parseFailures    int
+	parseFailures     int
 	transportFailures int
+}
+
+// SetCwd 设置门禁命令的工作目录。
+func (gl *GoalLoop) SetCwd(dir string) {
+	gl.cwd = dir
 }
 
 // NewGoalLoop 创建 goal loop 控制器。
@@ -94,12 +101,12 @@ func (gl *GoalLoop) EvaluateAfterTurn(lastResponse string) (bool, string, error)
 	}
 
 	// 检查质量门禁
-	cwd := "" // TODO: 从外部注入 cwd
-	allPassed, failedIdx, output := gl.gs.EvaluateGates(cwd)
+	cwd := gl.cwd // 由 SetCwd 注入（空则用进程当前目录）
+	allPassed, failedIdx, exitCode, output := gl.gs.EvaluateGates(cwd)
 	if !allPassed && failedIdx >= 0 {
 		gate := g.Gates[failedIdx]
-		// 门禁失败：直接返回 continuation prompt，不经过 judge
-		gl.active.Store(false)
+		// 门禁失败：直接返回 continuation prompt（不经过 judge），让模型修到通过为止。
+		// 注意：必须返回 shouldContinue=true，否则调用方会丢弃 continuationPrompt。
 		prompt := fmt.Sprintf(
 			"[Continuing toward your standing goal — quality gate failed]\n"+
 				"Goal: %s\n\n"+
@@ -109,8 +116,8 @@ func (gl *GoalLoop) EvaluateAfterTurn(lastResponse string) (bool, string, error)
 				"Output (tail):\n```\n%s\n```\n\n"+
 				"Fix the underlying problem so this gate passes, then re-run it to confirm. "+
 				"Do not declare the goal complete while any gate fails.",
-			g.Objective, gate.Command, -1, output)
-		return false, prompt, nil
+			g.Objective, gate.Command, exitCode, output)
+		return true, prompt, nil
 	}
 
 	// 调用 judge

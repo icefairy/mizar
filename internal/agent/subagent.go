@@ -265,7 +265,9 @@ func GetSubagentTool(sm *SubagentManager) plugins.Tool {
 		Name:        "get_subagent",
 		Description: "Check status and result of a delegated subagent. Args: {id}.",
 		Run: func(args string) (string, error) {
-			var p struct{ ID string `json:"id"` }
+			var p struct {
+				ID string `json:"id"`
+			}
 			if err := json.Unmarshal([]byte(args), &p); err != nil || p.ID == "" {
 				return `{"error": "id required"}`, fmt.Errorf("get_subagent: id required")
 			}

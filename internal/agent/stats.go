@@ -21,12 +21,12 @@ type StatsSession struct {
 	CumulativeCompletionTokens int
 	CumulativeTotalTokens      int
 	CumulativeCachedTokens     int
-	LastPromptTokens      int
-	LastCompletionTokens  int
-	LastTotalTokens       int
-	LastCachedTokens      int
-	LastResponseDuration  float64
-	LastSpeedTokensPerSec float64
+	LastPromptTokens           int
+	LastCompletionTokens       int
+	LastTotalTokens            int
+	LastCachedTokens           int
+	LastResponseDuration       float64
+	LastSpeedTokensPerSec      float64
 }
 
 // CompactionInfo 压缩状态
@@ -63,13 +63,13 @@ func (s *StatsDataRef) ToInsightsData() insightsDataWrapper {
 
 type insightsDataWrapper struct{ s *StatsDataRef }
 
-func (w insightsDataWrapper) TotalPromptTokens() int   { return w.s.PromptTokens }
+func (w insightsDataWrapper) TotalPromptTokens() int     { return w.s.PromptTokens }
 func (w insightsDataWrapper) TotalCompletionTokens() int { return w.s.CompletionTokens }
-func (w insightsDataWrapper) TotalTokens() int         { return w.s.TotalTokens }
-func (w insightsDataWrapper) CachedTokens() int        { return w.s.CachedTokens }
-func (w insightsDataWrapper) EstCostUSD() float64      { return w.s.EstCostUSD }
-func (w insightsDataWrapper) RunCount() int            { return w.s.RunCount }
-func (w insightsDataWrapper) AvgTurns() float64        { return w.s.AvgTurns }
+func (w insightsDataWrapper) TotalTokens() int           { return w.s.TotalTokens }
+func (w insightsDataWrapper) CachedTokens() int          { return w.s.CachedTokens }
+func (w insightsDataWrapper) EstCostUSD() float64        { return w.s.EstCostUSD }
+func (w insightsDataWrapper) RunCount() int              { return w.s.RunCount }
+func (w insightsDataWrapper) AvgTurns() float64          { return w.s.AvgTurns }
 func (w insightsDataWrapper) TopToolsText() []string {
 	out := make([]string, len(w.s.TopTools))
 	for i, t := range w.s.TopTools {

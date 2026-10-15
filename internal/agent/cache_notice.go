@@ -16,8 +16,8 @@ import (
 //   - 小 prompt 不提示：token 太少时比率噪音大（如 100 token 全 miss 无意义）
 //   - 每次下跌只提示一次，恢复后再次下跌可再次提示（避免刷屏）
 type CacheMissDetector struct {
-	lastHitRate    float64       // 上一次命中率（0~1），-1 表示无基线
-	notified       bool          // 当前这轮下跌是否已提示
+	lastHitRate    float64 // 上一次命中率（0~1），-1 表示无基线
+	notified       bool    // 当前这轮下跌是否已提示
 	haveBase       bool
 	lastNoticeTime time.Time     // 上次提示时间
 	cooldown       time.Duration // 提示冷却时间（默认 60s），避免频繁刷屏

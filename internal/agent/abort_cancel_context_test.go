@@ -92,7 +92,7 @@ func TestAbortSkipsToolForNonStreamLLMWithContext(t *testing.T) {
 	// Abort 在 LLM 返回后、工具执行前触发
 	innerLLM := &cancellableScriptLLM{canceled: make(chan struct{})}
 	wrapper := &abortAfterFirstLLM{
-		inner: innerLLM,
+		inner:   innerLLM,
 		abortCh: make(chan struct{}),
 	}
 	a := New(wrapper, pm)

@@ -7,10 +7,10 @@ import (
 
 func TestSegText(t *testing.T) {
 	cases := map[string][]string{
-		"我爱中国":            {"我", "爱", "中国"},
-		"我们今天去北京天安门":         {"我们", "今天", "去", "北京", "天安门"},
+		"我爱中国":                {"我", "爱", "中国"},
+		"我们今天去北京天安门":          {"我们", "今天", "去", "北京", "天安门"},
 		"Hello world from Go": {"Hello", "world", "from", "Go"},
-		"我爱Go语言":           {"我", "爱", "Go", "语言"},
+		"我爱Go语言":              {"我", "爱", "Go", "语言"},
 	}
 	for in, _ := range cases {
 		got := segText(in)

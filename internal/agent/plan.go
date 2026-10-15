@@ -59,7 +59,7 @@ func (p *PlanMode) IsActive() bool {
 // IsPending 是否有待处理的进入请求（用于 loop pre-step 检查）。
 func (p *PlanMode) IsPending() bool {
 	p.mu.RLock()
- defer p.mu.RUnlock()
+	defer p.mu.RUnlock()
 	return p.pending
 }
 
@@ -91,8 +91,8 @@ const defaultPlanGuidance = "你正处于计划模式。请先探索和设计方
 
 // PlanReview 用户审批 exit_plan_mode 的结果。
 type PlanReview struct {
-	Action     string // "approve" | "keep_planning"
-	Feedback   string // keep_planning 时的额外反馈
+	Action   string // "approve" | "keep_planning"
+	Feedback string // keep_planning 时的额外反馈
 }
 
 // AskPlanReview 通过 ask_user_question 工具触发用户审批。

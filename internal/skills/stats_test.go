@@ -25,9 +25,9 @@ func TestStatsIncrAndPersist(t *testing.T) {
 
 func TestStatsLeastUsed(t *testing.T) {
 	s := LoadStats(filepath.Join(t.TempDir(), "stats.json"))
-	s.Incr("hot")  // 2
-	s.Incr("hot")  // 2
-	s.Incr("cold") // 1
+	s.Incr("hot")     // 2
+	s.Incr("hot")     // 2
+	s.Incr("cold")    // 1
 	s.Ensure("icier") // 从未使用，但已注册
 	least := s.LeastUsed(2)
 	if len(least) != 2 || least[0] != "icier" || least[1] != "cold" {

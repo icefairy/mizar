@@ -39,7 +39,7 @@ export function tool_mem(): string {
 
 	// 桥接 Hooks → Manager（模拟 main.go 的接线）
 	llm := &scriptLLM{fn: func(msgs []Message) (string, error) {
-		return `{"action":"reply","text":"完成"}` , nil
+		return `{"action":"reply","text":"完成"}`, nil
 	}}
 	a := New(llm, m)
 	a.Hooks = NewHooks()

@@ -7,7 +7,6 @@
   const loginForm = $("loginForm"), loginBtn = $("loginBtn"), loginErr = $("loginErr");
   const modeChat = $("modeChat"), modeAgent = $("modeAgent");
   const abortBtn = $("abortBtn"), logoutBtn = $("logoutBtn"), modelTag = $("modelTag");
-  const steerRow = $("steerRow"), steerInput = $("steerInput"), steerSend = $("steerSend"), steerDone = $("steerDone");
   const convList = $("convList"), newConvBtn = $("newConvBtn"), sidebar = $("sidebar"), menuBtn = $("menuBtn");
   const pinBtn = $("pinBtn"), themeBtn = $("themeBtn");
   const settingsBtn = $("settingsBtn"), settingsModal = $("settings"), settingsClose = $("settingsClose");
@@ -559,6 +558,12 @@
     // reply：思考结束
     if (thinkStepEl) { thinkStepEl.classList.remove("cursor"); thinkStepEl = null; }
     const body = ensureReply();
+    // 步骤切换（工具调用后模型重新输出）：不同步骤的回复之间补空行分隔，
+    // 否则多步正文会首尾相连堆在一起、看不出条目边界。
+    if (streamBuf && step !== streamStep) {
+      streamBuf = streamBuf.replace(/\s+$/, "") + "\n\n";
+    }
+    streamStep = step;
     streamBuf += delta;
     body.parentElement.parentElement.__raw = streamBuf;
     body.innerHTML = md(streamBuf);
@@ -572,17 +577,38 @@
   }
 
   // ---------- 发送 ----------
+  // 忙碌中发送的消息 = 后台纠偏（steer）：注入当前循环，页面不做额外展示。
+  // 若循环已结束（服务端 running=false），暂存到 pendingQueue，待本轮收尾后自动补发为新任务。
+  let pendingQueue = [];
   async function send() {
     const text = input.value.trim();
-    if (!text || busy) return;
+    if (!text) return;
+    input.value = "";
+    autoGrow();
+    if (busy) {
+      // Agent 模式：等待期间发送 = 后台纠偏（steer），注入当前循环，页面不做展示。
+      // 普通对话模式无循环可注入，直接排队，本轮结束后自动补发。
+      if (mode !== "agent") { pendingQueue.push(text); flashQuick("已排队，本轮结束后自动发送"); return; }
+      try {
+        const j = await api("/web/api/steer", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: text }),
+        });
+        if (j && j.running === false) { pendingQueue.push(text); flashQuick("已排队，本轮结束后自动发送"); }
+        else flashQuick("已发送纠正，后台生效");
+      } catch (e) { pendingQueue.push(text); flashQuick("已排队，本轮结束后自动发送"); }
+      return;
+    }
+    await runTurn(text);
+  }
+  // runTurn 执行一轮完整对话（用户消息 → 最终答复）。
+  async function runTurn(text) {
     if (!curConv) await createConv();
     newTurn();
     addUserMsg(text);
-    input.value = "";
-    autoGrow();
-    busy = true; sendBtn.disabled = true;
+    busy = true;
+    // 注意：不禁用发送按钮——等待期间用户可继续发送消息，作为后台纠偏注入当前循环。
     abortBtn.classList.remove("hidden");
-    steerRow.classList.remove("hidden");
     const item = convs.find((c) => c.id === curConv);
     if (item && (item.title === "新会话" || !item.title)) { item.title = text.slice(0, 24); renderConvList(); }
 
@@ -606,11 +632,24 @@
   }
   function finish() {
     finalizeTurn();
-    busy = false; sendBtn.disabled = false;
+    busy = false;
     abortBtn.classList.add("hidden");
-    steerRow.classList.add("hidden");
     input.focus();
     api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
+    // 本轮期间未被循环消费的纠正消息：自动作为新任务补发（页面上就是新一轮对话）。
+    if (pendingQueue.length) {
+      const next = pendingQueue.join("\n");
+      pendingQueue = [];
+      runTurn(next);
+    }
+  }
+  // 短暂提示（复用快捷栏的 quickMsg 区域）
+  let quickTimer = null;
+  function flashQuick(msg) {
+    if (!quickMsg) return;
+    quickMsg.textContent = msg;
+    if (quickTimer) clearTimeout(quickTimer);
+    quickTimer = setTimeout(() => { quickMsg.textContent = ""; }, 1500);
   }
   sendBtn.addEventListener("click", send);
   input.addEventListener("keydown", (e) => {
@@ -619,20 +658,6 @@
   abortBtn.addEventListener("click", async () => {
     await fetch("/web/api/abort", { method: "POST", credentials: "same-origin" }).catch(() => {});
   });
-  steerSend.addEventListener("click", doSteer);
-  steerInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSteer(); }
-  });
-  steerDone.addEventListener("click", () => { steerRow.classList.add("hidden"); });
-  async function doSteer() {
-    const text = steerInput.value.trim();
-    if (!text || busy) return;
-    steerInput.value = "";
-    await api("/web/api/steer", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: text }),
-    });
-  }
   function autoGrow() {
     // 固定 5 行高度（由 CSS min-height 控制），超过则纵向滚动
     input.style.height = "";

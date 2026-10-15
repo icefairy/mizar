@@ -111,6 +111,10 @@ func (s *Server) rpcRun(req *rpcRequest) rpcResponse {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidRequest, Message: "params.task required"}}
 	}
 	s.logf("rpc agent.run: %s", truncateStr(p.Task, 80))
+	if !s.acquireRun() {
+		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInternalError, Message: "agent busy"}}
+	}
+	defer s.releaseRun()
 	reply, err := s.agent.Run(p.Task)
 	if err != nil {
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInternalError, Message: err.Error()}}

@@ -88,9 +88,9 @@ func Load(workDir string) string {
 // 返回渲染后的提示文本；无文件时返回空字符串。
 func LoadContextFiles(workDir string) string {
 	labels := map[string]string{
-		"AGENTS.md":   "全局",
+		"AGENTS.md":    "全局",
 		".cursorrules": "项目配置",
-		"USER.md":     "用户档案",
+		"USER.md":      "用户档案",
 	}
 	var sb strings.Builder
 	// 先放全局 AGENTS.md

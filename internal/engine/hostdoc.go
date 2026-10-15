@@ -8,9 +8,9 @@ import (
 // HostDoc 宿主函数文档（两级：Brief 供精简清单，Full 供 doc_get 按需查询）。
 // 这里是宿主函数的权威文档来源——新增/修改宿主函数时同步维护本条。
 type HostDoc struct {
-	Name     string // 函数名
-	Brief    string // 精简版一句话（自动生成清单用）
-	Full     string // 完整文档（参数/返回/示例/常见坑）
+	Name  string // 函数名
+	Brief string // 精简版一句话（自动生成清单用）
+	Full  string // 完整文档（参数/返回/示例/常见坑）
 }
 
 // hostDocs 全部宿主函数文档表（顺序即清单顺序）。

@@ -19,9 +19,9 @@ import (
 const (
 	JSONRPCVersion = "2.0"
 	// 方法
-	MethodInitialize     = "initialize"
-	MethodToolsList      = "tools/list"
-	MethodToolsCall      = "tools/call"
+	MethodInitialize               = "initialize"
+	MethodToolsList                = "tools/list"
+	MethodToolsCall                = "tools/call"
 	MethodNotificationsInitialized = "notifications/initialized"
 )
 

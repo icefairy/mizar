@@ -91,6 +91,12 @@ func (a *Agent) Aborted() bool {
 	return a.aborted.Load()
 }
 
+// Running 查询当前是否有 Run 正在执行（线程安全，非阻塞）。
+// 供 steer 调用方判断：Run 已结束时注入的纠正消息不会被消费，应改作新任务补发。
+func (a *Agent) Running() bool {
+	return a.runActive.Load()
+}
+
 // Reset 重置会话上下文（参照 pi 的 /new 命令）：
 // 清空 Initial 历史、pending steer 槽位、abort 标志；
 // 保留 System / 插件 / Compactor 配置。线程安全。

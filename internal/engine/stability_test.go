@@ -8,7 +8,7 @@ import (
 
 // SetCallTimeout 允许测试缩短超时时间（默认 30s）。
 func (e *Engine) SetCallTimeout(d time.Duration) { e.callTimeout = d }
-func (e *Engine) SetRunTimeout(d time.Duration)   { e.runTimeout = d }
+func (e *Engine) SetRunTimeout(d time.Duration)  { e.runTimeout = d }
 
 func (e *Engine) callTimeoutOrDefault() time.Duration {
 	if e.callTimeout > 0 {

@@ -60,8 +60,8 @@ type HostFuncs struct {
 	// {"thinking":"...","content":"..."}。阻塞直到流结束，返回完整文本。
 	// nil 时不注册该函数。
 	AIChatStream func(reqJSON string, onDelta func(deltaJSON string)) (string, error)
-	Log                   func(msg string)
-	Sleep                 func(ms int)
+	Log          func(msg string)
+	Sleep        func(ms int)
 	// Env 读取环境变量：env(name) -> 值（不存在返回空串）。
 	// 插件用 env("HOME") 定位用户目录，避免硬编码 /root。nil 时不注册。
 	Env func(name string) string

@@ -200,10 +200,16 @@ func expandVars(body string, parts []string) string {
 		n, _ := strconv.Atoi(sub[1])
 		l, _ := strconv.Atoi(sub[2])
 		start := n - 1
-		if start < 0 { start = 0 }
+		if start < 0 {
+			start = 0
+		}
 		end := start + l
-		if end > len(parts) { end = len(parts) }
-		if end <= start { return "" }
+		if end > len(parts) {
+			end = len(parts)
+		}
+		if end <= start {
+			return ""
+		}
 		return strings.Join(parts[start:end], " ")
 	})
 	// 2. ${@:N} — 从 N 起所有
@@ -212,8 +218,12 @@ func expandVars(body string, parts []string) string {
 		sub := reAtStart.FindStringSubmatch(m)
 		n, _ := strconv.Atoi(sub[1])
 		start := n - 1
-		if start < 0 { start = 0 }
-		if start >= len(parts) { return "" }
+		if start < 0 {
+			start = 0
+		}
+		if start >= len(parts) {
+			return ""
+		}
 		return strings.Join(parts[start:], " ")
 	})
 	// 3. ${@:-default} — 所有参数 join，空则用默认值
@@ -222,7 +232,9 @@ func expandVars(body string, parts []string) string {
 		sub := reAtDefault.FindStringSubmatch(m)
 		defaultVal := sub[1]
 		if len(parts) == 0 {
-			if defaultVal != "" { return strings.TrimPrefix(defaultVal, "-") }
+			if defaultVal != "" {
+				return strings.TrimPrefix(defaultVal, "-")
+			}
 			return ""
 		}
 		result := strings.Join(parts, " ")
@@ -247,7 +259,9 @@ func expandVars(body string, parts []string) string {
 		defaultVal := sub[2]
 		if idx >= 1 && idx <= len(parts) {
 			val := parts[idx-1]
-			if val != "" { return val }
+			if val != "" {
+				return val
+			}
 		}
 		if defaultVal != "" {
 			return strings.TrimPrefix(defaultVal, "-")

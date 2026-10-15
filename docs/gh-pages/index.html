@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mizar 开阳 — 极简自举 AI Agent 框架</title>
+  <meta name="description" content="开阳 (Mizar) 是一个极简、零依赖、单文件、可自举的 AI Agent 框架。单个静态 Go 二进制，TypeScript 插件热重载，SKILL.md 技能，MCP 工具协议。" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌟</text></svg>" />
+  <style>
+    :root {
+      --bg: #ffffff;
+      --panel: #ffffff;
+      --panel-2: #f6f8fa;
+      --text: #1f2328;
+      --muted: #656d76;
+      --accent: #0969da;
+      --accent-2: #1a7f37;
+      --border: #d0d7de;
+      --ok: #1a7f37;
+      --warn: #9a6700;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: #ffffff;
+      color: var(--text);
+      line-height: 1.7;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .container { max-width: 1080px; margin: 0 auto; padding: 24px 28px; }
+    header { padding: 44px 0 18px; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #f6f8fa; color: var(--muted); font-size: 12px; border: 1px solid var(--border); }
+    h1 { font-size: clamp(30px, 5vw, 54px); letter-spacing: -0.5px; margin: 10px 0 6px; }
+    h1 span { color: var(--accent); }
+    .tagline { color: var(--muted); font-size: 16px; }
+    .twin { display: inline-flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 16px; border-radius: 10px; border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text); font-size: 14px; cursor: pointer;
+      transition: transform .05s ease, border-color .2s ease;
+    }
+    .btn:hover { border-color: #b0b9c2; transform: translateY(-1px); text-decoration: none; }
+    .btn.primary { background: #0969da; border-color: #0969da; color: #ffffff; }
+    .btn.primary:hover { background: #0550ae; border-color: #0550ae; }
+
+    section { margin: 34px 0; }
+    .grid { display: grid; gap: 14px; }
+    .cols-2 { grid-template-columns: repeat(2, 1fr); }
+    .cols-3 { grid-template-columns: repeat(3, 1fr); }
+    .card {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+    }
+    .card h3 { margin: 0 0 6px; font-size: 15px; color: var(--text); }
+    .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+
+    .code {
+      background: #f6f8fa; border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 16px; color: #1f2328; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 13px; overflow-x: auto;
+    }
+    .code .cm { color: #6e7781; }
+
+    .tree { list-style: none; padding: 0; margin: 0; }
+    .tree, .tree ul { padding-left: 18px; position: relative; }
+    .tree ul::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      top: 4px;
+      bottom: 4px;
+      width: 1px;
+      background: #d0d7de;
+    }
+    .tree li {
+      position: relative;
+      padding: 2px 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      color: #1f2328;
+    }
+    .tree li::before {
+      content: "";
+      position: absolute;
+      left: -12px;
+      top: 8px;
+      width: 8px;
+      height: 1px;
+      background: #d0d7de;
+    }
+    .tree-cmt { color: #6e7781; margin-left: 4px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    th { color: var(--muted); font-weight: 500; background: #f6f8fa; }
+    tr:last-child td { border-bottom: none; }
+
+    .stars { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-top: 10px; }
+    footer { color: var(--muted); font-size: 12px; padding: 28px 0 40px; }
+
+    @media (max-width: 760px) {
+      .cols-2, .cols-3 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="badge">AGPL v3</div>
+      <h1>开阳 <span>Mizar</span></h1>
+      <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
+      <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
+      <div class="twin">
+        <a class="btn primary" href="https://github.com/icefairy/mizar" target="_blank" rel="noopener">GitHub 仓库</a>
+        <a class="btn" href="#quickstart">快速开始</a>
+        <a class="btn" href="#features">核心特性</a>
+      </div>
+    </header>
+
+    <section id="features">
+      <h2>核心特性</h2>
+      <div class="grid cols-3">
+        <div class="card"><h3>🚀 单个静态二进制</h3><p>~20-30MB，无运行时依赖，无需 npm / Python / Docker，拷一个文件到目标机器即可运行。</p></div>
+        <div class="card"><h3>🧩 TS/JS 插件热重载</h3><p>内嵌 esbuild 编译 TS，JS 免编译直跑 goja，修改即生效，无需重启。</p></div>
+        <div class="card"><h3>📄 SKILL.md 技能</h3><p>纯文本技能文件，兼容 Anthropic/Hermes 生态，frontmatter 解析后按需注入上下文。</p></div>
+        <div class="card"><h3>🔌 MCP 协议</h3><p>接入任意语言实现的 MCP 服务器，工具生态不再受限。</p></div>
+        <div class="card"><h3>🖥️ 交互式 TUI</h3><p>基于 tview，支持鼠标滚动、多行编辑、Tab 补全、流式输出与等待进度指示。</p></div>
+        <div class="card"><h3>🌐 Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 三种接入方式。</p></div>
+      </div>
+    </section>
+
+    <section id="quickstart">
+      <h2>快速开始</h2>
+      <div class="code">
+<span class="cm"># 下载单个文件（内网/离线首选）</span>
+curl -O http://192.168.1.10:8080/mizar-linux-amd64
+chmod +x mizar
+./mizar
+
+<span class="cm"># 启动后配置（TUI 内执行）</span>
+/provider &lt;baseURL&gt; &lt;apiKey&gt;
+/model &lt;name&gt;
+/think &lt;level&gt;
+      </div>
+      <div class="grid cols-2" style="margin-top:14px">
+        <div class="card"><h3>Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 接入。</p></div>
+        <div class="card"><h3>自举示例</h3><p>让它写一个插件：<code>./mizar "写一个插件：每天9点检查磁盘占用，超80%告警"</code></p></div>
+      </div>
+    </section>
+
+    <section id="structure">
+      <h2>项目结构</h2>
+      <ul class="tree">
+        <li>mizar/
+          <ul>
+            <li>cmd/mizar/ <span class="tree-cmt"># 入口</span></li>
+            <li>internal/
+              <ul>
+                <li>agent/ <span class="tree-cmt"># Agent 循环</span></li>
+                <li>engine/ <span class="tree-cmt"># goja + esbuild 编译管线</span></li>
+                <li>plugins/ <span class="tree-cmt"># 插件加载器</span></li>
+                <li>skills/ <span class="tree-cmt"># SKILL.md 加载器</span></li>
+                <li>mcp/ <span class="tree-cmt"># MCP 客户端</span></li>
+                <li>llm/ <span class="tree-cmt"># LLM 客户端</span></li>
+                <li>shell/ <span class="tree-cmt"># 安全命令执行</span></li>
+                <li>lsp/ <span class="tree-cmt"># LSP 客户端 + 服务器</span></li>
+                <li>server/ <span class="tree-cmt"># HTTP/RPC/WebSocket</span></li>
+                <li>session/ <span class="tree-cmt"># 会话管理（JSONL）</span></li>
+                <li>lifecycle/ <span class="tree-cmt"># 生命周期钩子</span></li>
+              </ul>
+            </li>
+            <li>extensions/ <span class="tree-cmt"># 插件目录</span></li>
+            <li>skills/ <span class="tree-cmt"># 技能目录</span></li>
+            <li>scenarios/ <span class="tree-cmt"># 验证场景</span></li>
+            <li>docs/ <span class="tree-cmt"># 设计文档</span></li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+
+    <section id="compare">
+      <h2>与 Pi 的对比</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <tr><th>特性</th><th>Pi</th><th>Mizar</th></tr>
+          <tr><td>核心语言</td><td>TypeScript (Node.js)</td><td>Go</td></tr>
+          <tr><td>运行时依赖</td><td>npm + node_modules</td><td>零依赖</td></tr>
+          <tr><td>插件格式</td><td>TS 扩展</td><td>TS / JS（goja + esbuild）</td></tr>
+          <tr><td>技能格式</td><td>SKILL.md</td><td>SKILL.md（兼容）</td></tr>
+          <tr><td>工具协议</td><td>内置 + 扩展</td><td>MCP 协议</td></tr>
+          <tr><td>离线部署</td><td>❌</td><td>✅</td></tr>
+          <tr><td>会话记忆</td><td>全局 JSONL</td><td>Path-Scoped JSONL</td></tr>
+          <tr><td>循环卫生</td><td>—</td><td>RepeatGuard（渐进提醒）</td></tr>
+          <tr><td>计划模式</td><td>/plan + exit_plan_mode</td><td>/plan + TUI 审批</td></tr>
+          <tr><td>会话目标</td><td>create/get/update_goal</td><td>get/create/update_goal（权限约束）</td></tr>
+          <tr><td>定时提醒</td><td>schedule</td><td>schedule（after/at/every）</td></tr>
+        </table>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">完整对比分析见 <a href="docs/pi-comparison.md">docs/pi-comparison.md</a>。</p>
+    </section>
+
+    <footer>
+      <div>Mizar (开阳) · 北斗第六星 · 双星系统</div>
+      <div style="margin-top:6px">姊妹项目：<a href="https://github.com/icefairy/xuanji" target="_blank" rel="noopener">璇玑 (Xuanji)</a> — 一枢纽，一自举，同源同构。</div>
+    </footer>
+  </div>
+</body>
+</html>

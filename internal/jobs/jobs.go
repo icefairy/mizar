@@ -25,20 +25,20 @@ const (
 
 // Job 一条后台任务的快照（只读）。
 type Job struct {
-	ID     string  `json:"id"`
-	Kind   string  `json:"kind"`
-	Label  string  `json:"label,omitempty"`
-	Status Status  `json:"status"`
-	Output string  `json:"output,omitempty"`
-	Error  string  `json:"error,omitempty"`
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Label  string `json:"label,omitempty"`
+	Status Status `json:"status"`
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // Registry 后台任务注册表（线程安全）。
 type Registry struct {
-	mu       sync.Mutex
-	jobs     map[string]*jobRecord
-	nextSeq  atomic.Int64
-	doneChs  map[string]chan string // output streamers：被 job_output 读取时写入
+	mu      sync.Mutex
+	jobs    map[string]*jobRecord
+	nextSeq atomic.Int64
+	doneChs map[string]chan string // output streamers：被 job_output 读取时写入
 }
 
 type jobRecord struct {
@@ -61,7 +61,7 @@ func (r *Registry) Start(kind, label string, run func() (string, error)) string 
 	seq := r.nextSeq.Add(1)
 	id := fmt.Sprintf("%s-%d", kind, seq)
 	rec := &jobRecord{
-		Job:      Job{ID: id, Kind: kind, Label: label, Status: StatusRunning},
+		Job:        Job{ID: id, Kind: kind, Label: label, Status: StatusRunning},
 		doneNotify: make(chan struct{}),
 	}
 	r.jobs[id] = rec

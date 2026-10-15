@@ -27,11 +27,11 @@ type Reminder struct {
 
 // Registry 定时提醒注册表。
 type Registry struct {
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	reminders map[string]*Reminder
-	nextSeq  atomic.Int64
-	done     chan struct{} // 关闭时停止调度 goroutine
-	deliver  func(id, prompt string) // 投递回调（由 main.go 设置）
+	nextSeq   atomic.Int64
+	done      chan struct{}           // 关闭时停止调度 goroutine
+	deliver   func(id, prompt string) // 投递回调（由 main.go 设置）
 }
 
 // NewRegistry 创建提醒注册表。deliver 为 nil 时提醒仅记录不投递。
@@ -69,7 +69,7 @@ func (r *Registry) Create(kind, prompt string, afterSecs int, atTime time.Time, 
 		}
 		// 对齐到最近的未来整点
 		now := time.Now()
-		scheduledAt = now.Add(time.Duration(((everySecs - int(now.Unix())%everySecs)%everySecs+everySecs)%everySecs) * time.Second)
+		scheduledAt = now.Add(time.Duration(((everySecs-int(now.Unix())%everySecs)%everySecs+everySecs)%everySecs) * time.Second)
 	default:
 		return "", fmt.Errorf("schedule: unknown kind %q (expected after/at/every)", kind)
 	}

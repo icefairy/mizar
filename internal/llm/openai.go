@@ -109,12 +109,13 @@ type toolCall struct {
 // 工具交换走**原生字段**（对齐 pi agent 与 OpenAI 协议）：
 //   - assistant 发起调用 → ToolCalls（tool_calls 数组，含 id/function.name/arguments）
 //   - 工具结果 → Role="tool" + ToolCallID（配对的 tool_call_id）
+//
 // 这层编码见 encodeMessages。
 type chatMsg struct {
-	Role       string    `json:"role"`
-	Content    any       `json:"content"`
+	Role       string         `json:"role"`
+	Content    any            `json:"content"`
 	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string    `json:"tool_call_id,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
 
 // wireToolCall OpenAI 原生 tool_calls 元素。
@@ -144,15 +145,15 @@ type chatPartVideoURL struct {
 }
 
 type chatReq struct {
-	Model        string    `json:"model"`
-	Messages     []chatMsg `json:"messages"`
-	Tools        []toolDef `json:"tools,omitempty"`
-	MaxTokens    int       `json:"max_tokens,omitempty"`
-	Temperature  *float64  `json:"temperature,omitempty"`
-	TopP         *float64  `json:"top_p,omitempty"`
-	Stream       bool      `json:"stream,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []chatMsg      `json:"messages"`
+	Tools         []toolDef      `json:"tools,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	TopP          *float64       `json:"top_p,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
-	Thinking     *struct {
+	Thinking      *struct {
 		Type string `json:"type"`
 	} `json:"thinking,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`

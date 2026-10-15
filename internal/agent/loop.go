@@ -170,6 +170,11 @@ type Agent struct {
 	runCtx    stdctx.Context
 	runCancel stdctx.CancelFunc
 
+	// runActive 标记是否有 Run 正在执行。
+	// 用途：Web/WS 端收到 steer（纠正消息）时判断它能否被当前循环消费——
+	// 若为 false，说明循环已结束，该消息会被静默丢弃，调用方应改作新任务补发。
+	runActive atomic.Bool
+
 	// OnLLMStream 可选：LLM 回复流式增量回调（step = 当前循环步，从 0 起）。
 	// 在 Run 的 LLM 请求 goroutine 内同步调用，必须快速返回（勿阻塞/勿做重 IO）。
 	// 每个分片同时携带 Thinkings（思考过程）与 Content（内容，含控制 JSON）；
@@ -435,6 +440,9 @@ func (a *Agent) Run(task string) (string, error) {
 		a.Hooks = NewHooks()
 	}
 	a.resetAbort()
+	// 标记 Run 活跃：steer/abort 调用方可据此判断消息能否被当前循环消费。
+	a.runActive.Store(true)
+	defer a.runActive.Store(false)
 	// 创建 Run 级取消上下文：Abort()（ESC 取消）时立即中断在途 LLM 请求，
 	// 任务 goroutine 不再阻塞到流自然结束（否则 TUI 的 canceling 状态无法解除，
 	// 新消息只能排队等待）。Run 结束自动清理。
@@ -719,11 +727,12 @@ func (a *Agent) Run(task string) (string, error) {
 
 		// GoalLoop judge：每轮后判断目标是否完成，自动续跑（🟡 ImpactModerate）
 		if a.GoalLoop != nil {
-			shouldContinue, continuationPrompt, judgeErr := a.GoalLoop.EvaluateAfterTurn(reply)
+			_, continuationPrompt, judgeErr := a.GoalLoop.EvaluateAfterTurn(reply)
 			if judgeErr != nil {
 				a.log("%s", q.FormatLog("goal_judge_error", "err=", judgeErr.Error()))
-			} else if shouldContinue && continuationPrompt != "" {
-				// 追加 continuation prompt，继续下一轮
+			} else if continuationPrompt != "" {
+				// 判定「有 continuation prompt 即续跑」：非空 prompt 与 shouldContinue
+				// 语义绑定，用单一条件可避免实现方漏置 shouldContinue 时提示被静默丢弃。
 				msgs = append(msgs, Message{Role: RoleUser, Content: continuationPrompt})
 				a.log("%s", q.FormatLog("goal_continue", "step=", fmt.Sprintf("%d", qc.Step)))
 				step++

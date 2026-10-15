@@ -65,5 +65,3 @@ func TestAskPlanReviewNilCallback(t *testing.T) {
 	// （真实 TUI 回调由 main.go 设置，此处跳过）
 	_ = time.Now()
 }
-
-

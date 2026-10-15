@@ -17,10 +17,10 @@ import (
 //  4. 缓存友好：摘要插入位置固定（system 之后），摘要内容在两次压缩之间保持稳定，
 //     使压缩后的前缀依然可命中缓存
 type Compactor struct {
-	ContextWindow    int   // 模型上下文窗口（token）
-	ReserveTokens    int   // 窗口保留余量（默认 16384）
-	KeepRecentTokens int   // 保留最近多少 token（默认 20000）
-	MaxSummaryTokens int   // 摘要最大 token（默认 2000）
+	ContextWindow    int // 模型上下文窗口（token）
+	ReserveTokens    int // 窗口保留余量（默认 16384）
+	KeepRecentTokens int // 保留最近多少 token（默认 20000）
+	MaxSummaryTokens int // 摘要最大 token（默认 2000）
 
 	// Summarize 实际执行摘要的 LLM 调用（由调用方注入，便于 mock 与独立路由）。
 	// messages 是切点之前的所有消息，返回摘要文本。

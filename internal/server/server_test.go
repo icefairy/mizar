@@ -21,7 +21,9 @@ import (
 )
 
 // mockLLM 测试用 LLM（scriptLLM 是 agent 包私有，server 测试自备）。
-type mockLLM struct{ Fn func(msgs []agent.Message) (string, error) }
+type mockLLM struct {
+	Fn func(msgs []agent.Message) (string, error)
+}
 
 func (m *mockLLM) Chat(msgs []agent.Message) (string, error) {
 	if m.Fn != nil {
@@ -363,8 +365,10 @@ type streamMockLLM struct {
 	chunks []string // 依次回调的 content 分片
 }
 
-func (m *streamMockLLM) Chat(msgs []agent.Message) (string, error) { return strings.Join(m.chunks, ""), nil }
-func (m *streamMockLLM) ModelName() string                          { return "mock-stream" }
+func (m *streamMockLLM) Chat(msgs []agent.Message) (string, error) {
+	return strings.Join(m.chunks, ""), nil
+}
+func (m *streamMockLLM) ModelName() string { return "mock-stream" }
 func (m *streamMockLLM) ChatStream(msgs []agent.Message, onToken func(agent.StreamDelta)) (string, error) {
 	for _, c := range m.chunks {
 		onToken(agent.StreamDelta{Content: c})

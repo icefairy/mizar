@@ -13,15 +13,16 @@ import (
 )
 
 // FTPBridge 给插件提供 FTP 客户端能力：
-//   ftp_connect(host, port, user, pass) -> ftpID
-//   ftp_list(ftpID, dir) -> JSON
-//   ftp_download(ftpID, remotePath, localPath)
-//   ftp_upload(ftpID, localPath, remotePath)
-//   ftp_mkdir(ftpID, dir)
-//   ftp_rmdir(ftpID, dir)
-//   ftp_delete(ftpID, path)
-//   ftp_rename(ftpID, from, to)
-//   ftp_close(ftpID)
+//
+//	ftp_connect(host, port, user, pass) -> ftpID
+//	ftp_list(ftpID, dir) -> JSON
+//	ftp_download(ftpID, remotePath, localPath)
+//	ftp_upload(ftpID, localPath, remotePath)
+//	ftp_mkdir(ftpID, dir)
+//	ftp_rmdir(ftpID, dir)
+//	ftp_delete(ftpID, path)
+//	ftp_rename(ftpID, from, to)
+//	ftp_close(ftpID)
 type FTPBridge struct {
 	mu    sync.Mutex
 	conns map[string]*ftpConn

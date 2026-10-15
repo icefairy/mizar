@@ -10,10 +10,10 @@ const (
 
 // 消息类型标记（Kind 字段）
 const (
-	KindNormal    = ""        // 普通 user/assistant 消息
-	KindToolCall  = "tool_call"   // assistant 发出的工具调用 JSON
+	KindNormal     = ""            // 普通 user/assistant 消息
+	KindToolCall   = "tool_call"   // assistant 发出的工具调用 JSON
 	KindToolResult = "tool_result" // 工具执行结果（role=user）
-	KindSummary   = "summary"  // 压缩生成的会话摘要（role=user）
+	KindSummary    = "summary"     // 压缩生成的会话摘要（role=user）
 )
 
 // Message 一条对话消息。
@@ -23,6 +23,7 @@ const (
 // 工具交换的**权威表达**是原生字段：
 //   - assistant 的调用：ToolCalls（含 ID/Name/Args），对应 OpenAI 的 tool_calls
 //   - 工具结果：ToolCallID（指向被回答的调用），编码为 role:"tool" + tool_call_id
+//
 // 这是 pi agent 的做法（全链用原生协议），也是模型训练时见过的唯一形态。
 // Content/ToolName/ToolArgs 仅用于人类可读展示与持久化的旧格式兼容。
 type Message struct {

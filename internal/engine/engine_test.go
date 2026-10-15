@@ -15,10 +15,10 @@ func mockHost() *HostFuncs {
 		JSONDecode: func(s string) (map[string]any, error) {
 			return map[string]any{"parsed": s}, nil
 		},
-		FSRead:  func(p string) (string, error) { return "file:" + p, nil },
-		FSWrite: func(p, c string) error { return nil },
+		FSRead:      func(p string) (string, error) { return "file:" + p, nil },
+		FSWrite:     func(p, c string) error { return nil },
 		DBExecBatch: DBExecBatchFn,
-		DBClose: DBCloseFn,
+		DBClose:     DBCloseFn,
 		LLMChat: func(messagesJSON string) (string, error) {
 			return "mock-llm-reply", nil
 		},
@@ -30,7 +30,7 @@ func mockHost() *HostFuncs {
 			onDelta(`{"content":"你好"}`)
 			return "你好", nil
 		},
-		Log: func(msg string) {},
+		Log:     func(msg string) {},
 		DBQuery: DBQueryFn,
 	}
 }

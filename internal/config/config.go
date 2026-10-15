@@ -47,9 +47,9 @@ type Config struct {
 
 // WebConfig Web UI 配置。
 type WebConfig struct {
-	Enabled  bool   `json:"enabled"`             // 是否启用 Web UI（-serve 下默认启用）
-	Username string `json:"username,omitempty"`  // 登录用户名（空=admin）
-	Password string `json:"password,omitempty"`  // 登录密码（空=首次启动随机生成并写回配置）
+	Enabled  bool   `json:"enabled"`            // 是否启用 Web UI（-serve 下默认启用）
+	Username string `json:"username,omitempty"` // 登录用户名（空=admin）
+	Password string `json:"password,omitempty"` // 登录密码（空=首次启动随机生成并写回配置）
 }
 
 // SkillInjectIsIndex 技能注入是否索引模式（默认 index；full = 全量正文）。

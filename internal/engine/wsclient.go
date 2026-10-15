@@ -4,10 +4,11 @@
 // 主动 connect 外部 WS 服务，收事件、发消息。
 //
 // JS 侧 API（host 注入，每个引擎一个桥）：
-//   ws_connect(url, headersJSON) -> connID (string)  // 建立连接（异步）
-//   ws_send(connID, data)                            // 发送文本
-//   ws_onmessage(connID, callbackJS)                 // 注册收消息回调
-//   ws_close(connID)                                 // 关闭连接
+//
+//	ws_connect(url, headersJSON) -> connID (string)  // 建立连接（异步）
+//	ws_send(connID, data)                            // 发送文本
+//	ws_onmessage(connID, callbackJS)                 // 注册收消息回调
+//	ws_close(connID)                                 // 关闭连接
 //
 // 回调签名：callback(messageText)  // 服务端推来的原始文本
 package engine

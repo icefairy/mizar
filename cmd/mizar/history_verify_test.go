@@ -14,13 +14,13 @@ func TestRecentUserMessagesFiltersOnly(t *testing.T) {
 	m := &tuiModel{
 		agent: &agent.Agent{
 			Initial: []agent.Message{
-				{Role: agent.RoleUser, Content: "最早的问题"},                       // 普通用户消息 → 应保留
-				{Role: agent.RoleAssistant, Content: "AI 回复一"},                   // AI 回复 → 排除
-				{Role: agent.RoleUser, Kind: agent.KindToolResult, Content: "工具结果: {...}"}, // 工具结果 → 排除
+				{Role: agent.RoleUser, Content: "最早的问题"},                                          // 普通用户消息 → 应保留
+				{Role: agent.RoleAssistant, Content: "AI 回复一"},                                    // AI 回复 → 排除
+				{Role: agent.RoleUser, Kind: agent.KindToolResult, Content: "工具结果: {...}"},        // 工具结果 → 排除
 				{Role: agent.RoleAssistant, Kind: agent.KindToolCall, Content: `{"tool":"bash"}`}, // 工具调用 → 排除
-				{Role: agent.RoleUser, Content: "第二次提问"},                       // 普通用户消息 → 保留
-				{Role: agent.RoleAssistant, Content: "AI 回复二"},                   // AI 回复 → 排除
-				{Role: agent.RoleUser, Content: "刚刚的问题"},                       // 最新普通用户消息 → 最前
+				{Role: agent.RoleUser, Content: "第二次提问"},                                          // 普通用户消息 → 保留
+				{Role: agent.RoleAssistant, Content: "AI 回复二"},                                    // AI 回复 → 排除
+				{Role: agent.RoleUser, Content: "刚刚的问题"},                                          // 最新普通用户消息 → 最前
 			},
 		},
 	}

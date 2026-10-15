@@ -553,6 +553,14 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logf("web agent.run: %s", truncateStr(body.Message, 80))
 
+	// 串行化 Agent.Run：避免并发请求互相覆盖 Initial/OnLLMStream。
+	// 忙时返回 409，前端会提示用户；steer/abort 仍可实时生效。
+	if !s.acquireRun() {
+		errJSON(w, http.StatusConflict, "agent 正在处理上一条消息，请稍候或发送纠正消息")
+		return
+	}
+	defer s.releaseRun()
+
 	// Agent 模式复用会话历史：把该会话的 user/assistant 消息注入 a.Initial，
 	// 使切换模式时上下文连续（修复"切 Agent 模式后列表无变化"的割裂感）。
 	if body.ConversationID != "" {
@@ -607,6 +615,8 @@ func (s *Server) handleWebAbort(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWebSteer POST /web/api/steer  { "content": "纠正消息" }
+// 响应 { ok, running }：running=false 表示当前没有活跃循环，该消息不会被消费，
+// 前端应改作新任务补发（避免用户刚发的纠正被静默丢弃）。
 func (s *Server) handleWebSteer(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Content string `json:"content"`
@@ -615,9 +625,14 @@ func (s *Server) handleWebSteer(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, http.StatusBadRequest, "content required")
 		return
 	}
-	s.agent.Steer(body.Content)
-	s.logf("web agent.steer: %s", truncateStr(body.Content, 80))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	running := s.agent.Running()
+	if running {
+		s.agent.Steer(body.Content)
+		s.logf("web agent.steer: %s", truncateStr(body.Content, 80))
+	} else {
+		s.logf("web agent.steer (no active run, deferred): %s", truncateStr(body.Content, 80))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "running": running})
 }
 
 // handleSettings GET/POST /web/api/settings → 模型 + 对话参数

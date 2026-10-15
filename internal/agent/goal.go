@@ -5,10 +5,14 @@
 package agent
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,11 +38,11 @@ const (
 
 // GoalContract 目标完成契约，定义"什么是 done"的客观标准。
 type GoalContract struct {
-	Outcome      string `json:"outcome"`       // 最终必须成立的状态
-	Verification string `json:"verification"`  // 证明完成的具体测试/命令/产物
-	Constraints  string `json:"constraints"`   // 不得破坏的约束
-	Boundaries   string `json:"boundaries"`    // 工作范围（文件/目录/工具）
-	StopWhen     string `json:"stop_when"`     // 遇到此条件应停止并请求人工输入
+	Outcome      string `json:"outcome"`      // 最终必须成立的状态
+	Verification string `json:"verification"` // 证明完成的具体测试/命令/产物
+	Constraints  string `json:"constraints"`  // 不得破坏的约束
+	Boundaries   string `json:"boundaries"`   // 工作范围（文件/目录/工具）
+	StopWhen     string `json:"stop_when"`    // 遇到此条件应停止并请求人工输入
 }
 
 // IsEmpty 返回 true 当所有字段均为空。
@@ -87,13 +91,13 @@ func (c *GoalContract) RenderBlock() string {
 
 // GoalGate 确定性 shell 命令，必须在 judge 宣布 done 之前通过。
 type GoalGate struct {
-	Command          string        `json:"command"`
-	TimeoutSeconds   int           `json:"timeout_seconds"`
-	MaxRetries       int           `json:"max_retries"`
-	Attempts         int           `json:"attempts"`
-	LastExitCode     *int          `json:"last_exit_code,omitempty"`
-	LastOutputTail   string        `json:"last_output_tail,omitempty"`
-	LastFailedFP     string        `json:"last_failed_fingerprint,omitempty"`
+	Command        string `json:"command"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+	MaxRetries     int    `json:"max_retries"`
+	Attempts       int    `json:"attempts"`
+	LastExitCode   *int   `json:"last_exit_code,omitempty"`
+	LastOutputTail string `json:"last_output_tail,omitempty"`
+	LastFailedFP   string `json:"last_failed_fingerprint,omitempty"`
 }
 
 const (
@@ -103,21 +107,39 @@ const (
 )
 
 // RunGate 执行门禁命令，返回 (passed, exitCode, outputTail)。
+// 命令受 TimeoutSeconds（默认 300s）限制，超时即判失败。
 func (g *GoalGate) RunGate(cwd string) (bool, int, string) {
+	return g.RunGateCtx(context.Background(), cwd)
+}
+
+// RunGateCtx 与 RunGate 相同，但支持外部传入 context（用于随 Run 取消）。
+func (g *GoalGate) RunGateCtx(ctx context.Context, cwd string) (bool, int, string) {
 	if g.Command == "" {
 		return true, 0, ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	timeout := g.TimeoutSeconds
 	if timeout <= 0 {
 		timeout = defaultGateTimeout
 	}
-	cmd := exec.CommandContext(nil, "sh", "-c", g.Command)
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(cctx, "sh", "-c", g.Command)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
+	// 独立进程组 + 整组 kill：否则 sh 的子进程会拖住 CombinedOutput 直到自然结束。
+	configureGateCmd(cmd)
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
 	tail := string(out)
 	if len(tail) > gateOutputTailChars {
 		tail = tail[len(tail)-gateOutputTailChars:]
+	}
+	if cctx.Err() == context.DeadlineExceeded {
+		return false, -1, tail + fmt.Sprintf("\n[gate timeout after %ds]", timeout)
 	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -128,26 +150,24 @@ func (g *GoalGate) RunGate(cwd string) (bool, int, string) {
 	return true, 0, tail
 }
 
-// WorkspaceFP cheap workspace fingerprint（git status + HEAD）。
+// WorkspaceFP 工作区指纹（git HEAD + status 的 SHA-256）。
+// 相同工作区状态得到相同指纹；非 git 目录返回空串。
 func WorkspaceFP(cwd string) string {
 	if cwd == "" {
 		cwd = "."
 	}
-	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd := exec.Command("git", "-C", cwd, "rev-parse", "HEAD")
 	headOut, headErr := headCmd.Output()
 	if headErr != nil {
 		return ""
 	}
-	statusCmd := exec.Command("git", "status", "--porcelain")
+	statusCmd := exec.Command("git", "-C", cwd, "status", "--porcelain")
 	statusOut, statusErr := statusCmd.Output()
 	if statusErr != nil {
 		return ""
 	}
-	data := string(headOut) + "\n" + string(statusOut)
-	h := time.Now().UnixNano() // 简化：不做 crypto hash，用时间戳区分
-	_ = h
-	_ = data
-	return fmt.Sprintf("%x", len(data)+len(string(headOut)))
+	sum := sha256.Sum256([]byte(strings.TrimSpace(string(headOut)) + "\n" + string(statusOut)))
+	return hex.EncodeToString(sum[:])
 }
 
 // ============================================================================
@@ -156,10 +176,10 @@ func WorkspaceFP(cwd string) string {
 
 // GoalJudgeResult judge 模型的判断结果。
 type GoalJudgeResult struct {
-	Verdict    string `json:"verdict"`    // "done" | "continue" | "wait"
-	Reason     string `json:"reason"`     // 原因说明
-	WaitPID    *int   `json:"wait_on_pid,omitempty"`
-	WaitSecs   *int   `json:"wait_for_seconds,omitempty"`
+	Verdict  string `json:"verdict"` // "done" | "continue" | "wait"
+	Reason   string `json:"reason"`  // 原因说明
+	WaitPID  *int   `json:"wait_on_pid,omitempty"`
+	WaitSecs *int   `json:"wait_for_seconds,omitempty"`
 }
 
 // ============================================================================
@@ -168,19 +188,19 @@ type GoalJudgeResult struct {
 
 // Goal 会话内单一长期目标。
 type Goal struct {
-	ID              string         `json:"id"`
-	Revision        int            `json:"revision"`
-	Objective       string         `json:"objective"`
-	Phase           GoalPhase      `json:"phase"`
-	RoundsStarted   int            `json:"roundsStarted"`
-	MaxGoalRounds   int            `json:"maxGoalRounds,omitempty"`
-	BlockedReason   string         `json:"blockedReason,omitempty"`
-	CreatedAt       time.Time      `json:"createdAt"`
-	UpdatedAt       time.Time      `json:"updatedAt"`
+	ID            string    `json:"id"`
+	Revision      int       `json:"revision"`
+	Objective     string    `json:"objective"`
+	Phase         GoalPhase `json:"phase"`
+	RoundsStarted int       `json:"roundsStarted"`
+	MaxGoalRounds int       `json:"maxGoalRounds,omitempty"`
+	BlockedReason string    `json:"blockedReason,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 	// 新增字段
-	Contract        *GoalContract  `json:"contract,omitempty"`
-	Gates           []*GoalGate    `json:"gates,omitempty"`
-	Subgoals        []string       `json:"subgoals,omitempty"`
+	Contract *GoalContract `json:"contract,omitempty"`
+	Gates    []*GoalGate   `json:"gates,omitempty"`
+	Subgoals []string      `json:"subgoals,omitempty"`
 }
 
 // ============================================================================
@@ -189,10 +209,10 @@ type Goal struct {
 
 // GoalService 会话目标服务（线程安全）。
 type GoalService struct {
-	mu               sync.RWMutex
-	goal             *Goal
-	humanTurnSince   atomic.Int64
-	blockThreshold   int
+	mu             sync.RWMutex
+	goal           *Goal
+	humanTurnSince atomic.Int64
+	blockThreshold int
 	// Judge 回调：调用辅助模型判断目标是否完成（nil = 不启用 judge）
 	JudgeFn func(goalText, lastResponse string, contract *GoalContract, subgoals []string) (*GoalJudgeResult, error)
 	// 连续 judge parse 失败计数
@@ -331,17 +351,17 @@ func (g *GoalService) Update(id, revisionStr, action, objective string, maxRound
 		}
 		// args 为 JSON: {command, timeout_seconds?, max_retries?}
 		var gate struct {
-			Command          string `json:"command"`
-			TimeoutSeconds   int    `json:"timeout_seconds"`
-			MaxRetries       int    `json:"max_retries"`
+			Command        string `json:"command"`
+			TimeoutSeconds int    `json:"timeout_seconds"`
+			MaxRetries     int    `json:"max_retries"`
 		}
 		if err := json.Unmarshal([]byte(objective), &gate); err != nil || gate.Command == "" {
 			return fmt.Errorf("goal: add_gate requires {command}")
 		}
 		gateObj := &GoalGate{
-			Command:          gate.Command,
-			TimeoutSeconds:   gate.TimeoutSeconds,
-			MaxRetries:       gate.MaxRetries,
+			Command:        gate.Command,
+			TimeoutSeconds: gate.TimeoutSeconds,
+			MaxRetries:     gate.MaxRetries,
 		}
 		if gateObj.TimeoutSeconds <= 0 {
 			gateObj.TimeoutSeconds = defaultGateTimeout
@@ -389,9 +409,9 @@ func (g *GoalService) AddGate(command string, timeoutSeconds, maxRetries int) er
 		return fmt.Errorf("goal: add_gate requires human authority")
 	}
 	gate := &GoalGate{
-		Command:          command,
-		TimeoutSeconds:   timeoutSeconds,
-		MaxRetries:       maxRetries,
+		Command:        command,
+		TimeoutSeconds: timeoutSeconds,
+		MaxRetries:     maxRetries,
 	}
 	g.goal.Gates = append(g.goal.Gates, gate)
 	return nil
@@ -442,18 +462,23 @@ func (g *GoalService) ClearSubgoals() error {
 	return nil
 }
 
-// EvaluateGates 运行所有门禁，返回 (allPassed, failedGateIndex, output)。
-func (g *GoalService) EvaluateGates(cwd string) (bool, int, string) {
+// EvaluateGates 运行所有门禁，返回 (allPassed, failedGateIndex, exitCode, output)。
+func (g *GoalService) EvaluateGates(cwd string) (bool, int, int, string) {
+	return g.EvaluateGatesCtx(context.Background(), cwd)
+}
+
+// EvaluateGatesCtx 与 EvaluateGates 相同，但支持外部传入 context（随 Run 取消/超时）。
+func (g *GoalService) EvaluateGatesCtx(ctx context.Context, cwd string) (bool, int, int, string) {
 	g.mu.RLock()
 	gates := g.goal.Gates
 	g.mu.RUnlock()
 	for i, gate := range gates {
-		passed, _, output := gate.RunGate(cwd)
+		passed, code, output := gate.RunGateCtx(ctx, cwd)
 		if !passed {
-			return false, i, output
+			return false, i, code, output
 		}
 	}
-	return true, -1, ""
+	return true, -1, 0, ""
 }
 
 // RenderJSON 渲染为目标 JSON。
