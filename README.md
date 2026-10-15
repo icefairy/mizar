@@ -76,6 +76,8 @@
 - **生命周期钩子**：`plugin_init` / `plugin_cleanup`，文件删除时自动卸载
 - **JS 插件免编译直跑**：`.js` 文件直接由 goja 解释执行
 - **LSP 插件扩展**：JS 插件可注册 Provider，支持诊断 / 定义跳转 / 引用查找 / 补全
+- **启用 / 禁用 / 重载**：`/list_plugins` 查看（✅ 已加载 / ⛔ 已禁用）、`/disable_plugin <名>` 卸载并持久化、`/enable_plugin <名>` 启用、`/reload_plugins` 重载全部。禁用状态存于 `~/.mizar/extensions/.disabled.json`，重启后保持。用于切换插件后端（如用自备的 HMEM 记忆插件替代内置 SQLite 版，与其它 agent 共用记忆）。
+- **内置资产自动释放**：常用插件（数据库 CRUD、图片识别、记忆）与技能（交接 / 记忆 / 数据库）用 `go:embed` 内嵌，**首次运行自动释放**到 `~/.mizar`，**只补缺不覆盖**（保护用户修改），`--no-assets` 可关闭。
 
 ### 5. 技能系统
 - SKILL.md 纯文本技能，frontmatter 解析后注入上下文
