@@ -20,9 +20,14 @@
   let convs = [];      // 会话摘要列表
   let streamBody = null;   // 当前流式正文目标
   let streamBuf = "";      // 流式正文累计
-  let thinkingEl = null;   // 当前思考块
-  let thinkingBuf = "";    // 思考累计
   let streamStep = -1;     // 当前流式 step
+  // 当前轮（turn）：用户提问 → 工作过程（折叠）→ 最终答复
+  let turnEl = null;       // 当前轮容器
+  let procEl = null;       // 当前轮「工作过程」<details>
+  let procBody = null;     // 工作过程内容区
+  let procCount = 0;       // 步骤计数
+  let thinkStepEl = null;  // 当前思考步骤
+  let thinkStepBuf = "";   // 思考累计
 
   // ---------- 主题 ----------
   function applyTheme(t) {
@@ -148,11 +153,109 @@
     const body = wrap.querySelector(".body");
     if (kind === "assistant" || kind === "error") body.innerHTML = md(text);
     else body.textContent = text;
-    log.appendChild(wrap);
-    log.scrollTop = log.scrollHeight;
+    turnHost().appendChild(wrap);
+    scrollLog();
     return body;
   }
   function clearLog() { log.innerHTML = ""; }
+
+  // ---------- 轮（turn）结构 ----------
+  // 一轮 = 用户提问 + 工作过程（思考/工具调用，可折叠）+ 最终答复。
+  // 过程默认折叠、紧凑单行；最终答复独立成气泡，便于快速定位。
+  function resetTurn() {
+    turnEl = null; procEl = null; procBody = null; procCount = 0;
+    thinkStepEl = null; thinkStepBuf = "";
+    streamBody = null; streamBuf = ""; streamStep = -1;
+  }
+  function newTurn() {
+    resetTurn();
+    turnEl = document.createElement("div");
+    turnEl.className = "turn";
+    log.appendChild(turnEl);
+    return turnEl;
+  }
+  function turnHost() { return turnEl || log; }
+  function scrollLog() { log.scrollTop = log.scrollHeight; }
+  function addUserMsg(text) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg user";
+    wrap.__raw = text == null ? "" : String(text);
+    wrap.innerHTML = '<div class="who">我</div><div class="body"></div>' +
+      '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
+    wrap.querySelector(".body").textContent = wrap.__raw;
+    turnHost().appendChild(wrap);
+    scrollLog();
+    return wrap;
+  }
+  // 确保「工作过程」分组存在（默认折叠）
+  function ensureProc() {
+    if (procBody) return procBody;
+    procEl = document.createElement("details");
+    procEl.className = "proc";
+    procEl.innerHTML = '<summary><span class="proc-caret">▸</span>' +
+      '<span class="proc-title">工作过程</span>' +
+      '<span class="proc-count">0 步</span></summary>' +
+      '<div class="proc-body"></div>';
+    procBody = procEl.querySelector(".proc-body");
+    turnHost().appendChild(procEl);
+    return procBody;
+  }
+  function bumpProc() {
+    procCount++;
+    const c = procEl && procEl.querySelector(".proc-count");
+    if (c) c.textContent = procCount + " 步";
+  }
+  // 确保最终答复气泡存在
+  function ensureReply() {
+    if (streamBody) return streamBody;
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    wrap.__raw = "";
+    wrap.innerHTML = '<div class="who">开阳</div><div class="body"></div>' +
+      '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
+    turnHost().appendChild(wrap);
+    streamBody = wrap.querySelector(".body");
+    streamBuf = "";
+    return streamBody;
+  }
+  // 把当前流式正文（中间文本）收进工作过程
+  function stashStreamIntoProc() {
+    if (!streamBody) return;
+    const wrap = streamBody.parentElement;
+    if (wrap && wrap.parentElement === turnHost()) {
+      wrap.classList.remove("cursor");
+      const txt = streamBuf || wrap.__raw || "";
+      if (txt.trim()) {
+        const pb = ensureProc();
+        const step = document.createElement("div");
+        step.className = "pstep pstep-text";
+        step.innerHTML = md(txt);
+        pb.appendChild(step);
+        bumpProc();
+      }
+      wrap.remove();
+    }
+    streamBody = null; streamBuf = "";
+  }
+  // 单行压缩：换行/多空格折叠，超长截断
+  function compact(s, n) {
+    const t = String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+    return t.length > n ? t.slice(0, n) + " …" : t;
+  }
+  // 收尾当前轮：过程为空则删除；保证「过程」在最终答复之前
+  function finalizeTurn() {
+    if (streamBody) streamBody.classList.remove("cursor");
+    if (thinkStepEl) thinkStepEl.classList.remove("cursor");
+    if (procEl) {
+      const empty = procBody && !procBody.hasChildNodes();
+      if (empty) { procEl.remove(); }
+      else if (streamBody && streamBody.parentElement === turnHost()) {
+        turnHost().insertBefore(procEl, streamBody.parentElement);
+      }
+      procEl.querySelector(".proc-caret") && (procEl.querySelector(".proc-caret").textContent = "▸");
+    }
+    scrollLog();
+  }
 
   // 复制（带降级）
   async function copyText(txt, btn) {
@@ -272,11 +375,34 @@
     renderConvList();
     collapseOnMobile();
     clearLog();
+    resetTurn();
     try {
       const j = await api("/web/api/conversation?id=" + encodeURIComponent(id));
       const c = j.conversation;
-      (c.messages || []).forEach((m) => addMsg(m.role === "user" ? "user" : "assistant",
-        m.role === "user" ? "我" : "开阳", m.content));
+      const msgs = c.messages || [];
+      // 回放历史：连续的用户消息各起一轮；assistant 作为最终答复；
+      // 其余（tool/sys/未知）归入当前轮的「工作过程」。
+      let curTurn = null;
+      msgs.forEach((m) => {
+        if (m.role === "user") {
+          newTurn();
+          addUserMsg(m.content);
+          curTurn = turnEl;
+        } else if (m.role === "assistant") {
+          if (!curTurn) { newTurn(); curTurn = turnEl; }
+          addMsg("assistant", "开阳", m.content);
+        } else {
+          // tool / sys / 其他：进工作过程（折叠）
+          if (!curTurn) { newTurn(); curTurn = turnEl; }
+          const pb = ensureProc();
+          const step = document.createElement("div");
+          step.className = "pstep";
+          step.textContent = compact(m.content, 300);
+          pb.appendChild(step);
+          bumpProc();
+        }
+      });
+      finalizeTurn();
       setMode(c.mode === "agent" ? "agent" : "chat");
     } catch (e) { addMsg("error", "错误", e.message); }
   }
@@ -290,6 +416,7 @@
       await loadConversations(false);
       renderConvList();
       clearLog();
+      resetTurn();
       collapseOnMobile();
       input.focus();
     } catch (e) { addMsg("error", "错误", e.message); }
@@ -325,10 +452,9 @@
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.type !== "event") return;
       if (m.event === "tool_call") {
-        finalizeStream();
-        addMsg("tool", "工具", "→ " + m.tool + "(" + (m.args || "") + ")");
+        onToolCall(m.tool, m.args);
       } else if (m.event === "tool_result") {
-        addMsg("tool", "结果", (m.result || "").slice(0, 2000));
+        onToolResult(m.tool, m.result);
       } else if (m.event === "stream") {
         handleStream(m.step, m.delta, m.kind);
       }
@@ -336,38 +462,64 @@
     ws.onclose = () => { ws = null; };
   }
 
-  // 流式：reply 进正文，thinking 进独立思考块（不再持续闪烁光标）
+  // 工具调用：先收尾正在流式的正文（它是中间文本），再往「工作过程」加一行紧凑条目
+  function onToolCall(tool, args) {
+    stashStreamIntoProc();
+    if (thinkStepEl) { thinkStepEl.classList.remove("cursor"); thinkStepEl = null; }
+    const pb = ensureProc();
+    const step = document.createElement("div");
+    step.className = "pstep pstep-tool";
+    const a = compact(args, 160);
+    step.innerHTML = '<span class="pico">🔧</span><span class="ptool">' + esc(tool) + '</span>' +
+      (a ? '<span class="pargs">' + esc(a) + '</span>' : "");
+    pb.appendChild(step);
+    bumpProc();
+    scrollLog();
+  }
+  // 工具结果：紧凑单行预览，挂在最近一次工具调用下方（空结果不再产生空气泡）
+  function onToolResult(tool, result) {
+    const r = compact(result, 200);
+    if (!r) return; // 空白结果直接丢弃
+    const pb = ensureProc();
+    const step = document.createElement("div");
+    step.className = "pstep pstep-res";
+    step.innerHTML = '<span class="pico">↳</span><span class="pres">' + esc(r) + '</span>';
+    pb.appendChild(step);
+    bumpProc();
+    scrollLog();
+  }
+
+  // 流式：thinking 进「工作过程」；正文进最终答复气泡（可被 stash 回过程）
   function handleStream(step, delta, kind) {
     if (!delta) return;
     if (kind === "thinking") {
-      if (!thinkingEl) {
-        thinkingEl = addMsg("sys", "思考", "");
-        thinkingBuf = "";
-        thinkingEl.classList.add("cursor");
+      if (!thinkStepEl) {
+        const pb = ensureProc();
+        thinkStepEl = document.createElement("div");
+        thinkStepEl.className = "pstep pstep-think cursor";
+        thinkStepEl.textContent = "";
+        pb.appendChild(thinkStepEl);
+        thinkStepBuf = "";
+        bumpProc();
       }
-      thinkingBuf += delta;
-      thinkingEl.textContent = thinkingBuf;
-      log.scrollTop = log.scrollHeight;
+      thinkStepBuf += delta;
+      thinkStepEl.textContent = thinkStepBuf;
+      scrollLog();
       return;
     }
-    // reply：一旦正文开始，思考块结束（移除闪烁光标）
-    if (thinkingEl) { thinkingEl.classList.remove("cursor"); }
-    if (step !== streamStep) {
-      streamStep = step;
-      streamBody = addMsg("assistant", "开阳", "");
-      streamBuf = "";
-    }
-    if (!streamBody) { streamBody = addMsg("assistant", "开阳", ""); streamBuf = ""; }
+    // reply：思考结束
+    if (thinkStepEl) { thinkStepEl.classList.remove("cursor"); thinkStepEl = null; }
+    const body = ensureReply();
     streamBuf += delta;
-    streamBody.__raw = streamBuf;
-    streamBody.innerHTML = md(streamBuf);
-    streamBody.classList.add("cursor");
-    log.scrollTop = log.scrollHeight;
+    body.__raw = streamBuf;
+    body.innerHTML = md(streamBuf);
+    body.classList.add("cursor");
+    scrollLog();
   }
   function finalizeStream() {
     if (streamBody) streamBody.classList.remove("cursor");
-    if (thinkingEl) thinkingEl.classList.remove("cursor");
-    streamBody = null; streamBuf = ""; thinkingEl = null; thinkingBuf = ""; streamStep = -1;
+    if (thinkStepEl) thinkStepEl.classList.remove("cursor");
+    streamBody = null; streamBuf = ""; thinkStepEl = null; thinkStepBuf = ""; streamStep = -1;
   }
 
   // ---------- 发送 ----------
@@ -375,12 +527,12 @@
     const text = input.value.trim();
     if (!text || busy) return;
     if (!curConv) await createConv();
-    addMsg("user", "我", text);
+    newTurn();
+    addUserMsg(text);
     input.value = "";
     autoGrow();
     busy = true; sendBtn.disabled = true;
     abortBtn.classList.remove("hidden");
-    finalizeStream();
     const item = convs.find((c) => c.id === curConv);
     if (item && (item.title === "新会话" || !item.title)) { item.title = text.slice(0, 24); renderConvList(); }
 
@@ -389,23 +541,22 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ conversation_id: curConv, message: text }),
       });
-      if (!streamBuf) {
-        if (streamBody) { streamBody.__raw = j.reply || ""; streamBody.innerHTML = md(j.reply || "(空)"); }
-        else addMsg("assistant", "开阳", j.reply || "(空)");
-      } else if (streamBody) {
-        streamBody.__raw = j.reply || streamBuf;
-        streamBody.innerHTML = md(j.reply || streamBuf);
-      }
+      // 用最终答复覆盖当前答复气泡（流式已渲染则替换为完整文本；否则补渲染）
+      const body = ensureReply();
+      body.__raw = j.reply || streamBuf || "";
+      body.innerHTML = md(j.reply || streamBuf || "(空)");
     } catch (e) {
-      if (streamBody) { streamBody.parentElement.className = "msg error"; streamBody.innerHTML = md("⚠ " + e.message); }
-      else addMsg("error", "错误", e.message);
+      const body = ensureReply();
+      const wrap = body.parentElement;
+      wrap.className = "msg error";
+      body.__raw = "⚠ " + e.message;
+      body.innerHTML = md("⚠ " + e.message);
     } finally { finish(); }
   }
   function finish() {
-    finalizeStream();
+    finalizeTurn();
     busy = false; sendBtn.disabled = false;
     abortBtn.classList.add("hidden");
-    log.scrollTop = log.scrollHeight;
     input.focus();
     api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
   }
