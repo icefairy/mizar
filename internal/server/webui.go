@@ -142,10 +142,11 @@ func (s *Server) webRoutes() {
 	// 会话 CRUD
 	s.mux.HandleFunc("/web/api/conversations", s.webAuth(s.handleConversations))
 	s.mux.HandleFunc("/web/api/conversation", s.webAuth(s.handleConversation))
-	// 对话 / Agent 运行 / 中止
+	// 对话 / Agent 运行 / 中止 / 纠正
 	s.mux.HandleFunc("/web/api/chat", s.webAuth(s.handleWebChat))
 	s.mux.HandleFunc("/web/api/run", s.webAuth(s.handleWebRun))
 	s.mux.HandleFunc("/web/api/abort", s.webAuth(s.handleWebAbort))
+	s.mux.HandleFunc("/web/api/steer", s.webAuth(s.handleWebSteer))
 	// 设置（模型 + 对话参数）
 	s.mux.HandleFunc("/web/api/settings", s.webAuth(s.handleSettings))
 	s.mux.HandleFunc("/web/api/models", s.webAuth(s.handleModelsList))
@@ -473,6 +474,20 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 // handleWebAbort POST /web/api/abort
 func (s *Server) handleWebAbort(w http.ResponseWriter, r *http.Request) {
 	s.agent.Abort()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleWebSteer POST /web/api/steer  { "content": "纠正消息" }
+func (s *Server) handleWebSteer(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Content) == "" {
+		errJSON(w, http.StatusBadRequest, "content required")
+		return
+	}
+	s.agent.Steer(body.Content)
+	s.logf("web agent.steer: %s", truncateStr(body.Content, 80))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

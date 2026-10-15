@@ -53,6 +53,12 @@
     <main id="log" class="log"></main>
 
     <footer class="composer">
+      <div id="steerRow" class="steer-row hidden">
+        <div class="steer-label">⚡ 纠偏中...</div>
+        <textarea id="steerInput" rows="2" placeholder="输入纠正消息（Enter 发送 / Shift+Enter 换行）"></textarea>
+        <button id="steerSend" type="button">纠正</button>
+        <button id="steerDone" type="button" class="ghost">完成纠偏</button>
+      </div>
       <!-- 快捷参数行：模型 + 思考等级 -->
       <div class="quickbar">
         <label class="qk">

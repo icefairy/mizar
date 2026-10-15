@@ -7,6 +7,7 @@
   const loginForm = $("loginForm"), loginBtn = $("loginBtn"), loginErr = $("loginErr");
   const modeChat = $("modeChat"), modeAgent = $("modeAgent");
   const abortBtn = $("abortBtn"), logoutBtn = $("logoutBtn"), modelTag = $("modelTag");
+  const steerRow = $("steerRow"), steerInput = $("steerInput"), steerSend = $("steerSend"), steerDone = $("steerDone");
   const convList = $("convList"), newConvBtn = $("newConvBtn"), sidebar = $("sidebar"), menuBtn = $("menuBtn");
   const pinBtn = $("pinBtn"), themeBtn = $("themeBtn");
   const settingsBtn = $("settingsBtn"), settingsModal = $("settings"), settingsClose = $("settingsClose");
@@ -18,14 +19,12 @@
   let ws = null;
   let curConv = null;  // 当前会话 id
   let convs = [];      // 会话摘要列表
-  let streamBody = null;   // 当前流式正文目标
+  let streamBody = null;   // 当前流式正文目标（.《text》）
   let streamBuf = "";      // 流式正文累计
   let streamStep = -1;     // 当前流式 step
-  // 当前轮（turn）：用户提问 → 工作过程（折叠）→ 最终答复
+  let stepsBody = null;    // 答复框内的步骤容器（.《steps》）
+  // 当前轮（turn）：用户提问 → 最终答复（内含 .steps 过程 + .text 正文）
   let turnEl = null;       // 当前轮容器
-  let procEl = null;       // 当前轮「工作过程」<details>
-  let procBody = null;     // 工作过程内容区
-  let procCount = 0;       // 步骤计数
   let thinkStepEl = null;  // 当前思考步骤
   let thinkStepBuf = "";   // 思考累计
 
@@ -246,9 +245,8 @@
   // 一轮 = 用户提问 + 工作过程（思考/工具调用，可折叠）+ 最终答复。
   // 过程默认折叠、紧凑单行；最终答复独立成气泡，便于快速定位。
   function resetTurn() {
-    turnEl = null; procEl = null; procBody = null; procCount = 0;
-    thinkStepEl = null; thinkStepBuf = "";
-    streamBody = null; streamBuf = ""; streamStep = -1;
+    turnEl = null; thinkStepEl = null; thinkStepBuf = "";
+    streamBody = null; streamBuf = ""; streamStep = -1; stepsBody = null;
   }
   function newTurn() {
     resetTurn();
@@ -270,55 +268,29 @@
     scrollLog();
     return wrap;
   }
-  // 确保「工作过程」分组存在（默认折叠）
-  function ensureProc() {
-    if (procBody) return procBody;
-    procEl = document.createElement("details");
-    procEl.className = "proc";
-    procEl.innerHTML = '<summary><span class="proc-caret">▸</span>' +
-      '<span class="proc-title">工作过程</span>' +
-      '<span class="proc-count">0 步</span></summary>' +
-      '<div class="proc-body"></div>';
-    procBody = procEl.querySelector(".proc-body");
-    turnHost().appendChild(procEl);
-    return procBody;
-  }
-  function bumpProc() {
-    procCount++;
-    const c = procEl && procEl.querySelector(".proc-count");
-    if (c) c.textContent = procCount + " 步";
-  }
-  // 确保最终答复气泡存在
+  // bumpProc 已改为空操作：步骤直接累加进答复框 .steps，不再独立计数展示
+  function bumpProc() {}
+  // 确保最终答复气泡存在：body 内含 steps（过程步骤）+ text（markdown 正文），两者独立容器避免互相覆盖
   function ensureReply() {
     if (streamBody) return streamBody;
     const wrap = document.createElement("div");
     wrap.className = "msg assistant";
     wrap.__raw = "";
-    wrap.innerHTML = '<div class="who">开阳</div><div class="body"></div>' +
+    wrap.innerHTML = '<div class="who">开阳</div><div class="body">' +
+      '<div class="steps"></div><div class="text"></div></div>' +
       '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
     turnHost().appendChild(wrap);
-    streamBody = wrap.querySelector(".body");
+    stepsBody = wrap.querySelector(".steps");
+    streamBody = wrap.querySelector(".text");
     streamBuf = "";
     return streamBody;
   }
-  // 把当前流式正文（中间文本）收进工作过程
-  function stashStreamIntoProc() {
-    if (!streamBody) return;
-    const wrap = streamBody.parentElement;
-    if (wrap && wrap.parentElement === turnHost()) {
-      wrap.classList.remove("cursor");
-      const txt = streamBuf || wrap.__raw || "";
-      if (txt.trim()) {
-        const pb = ensureProc();
-        const step = document.createElement("div");
-        step.className = "pstep pstep-text";
-        step.innerHTML = md(txt);
-        pb.appendChild(step);
-        bumpProc();
-      }
-      wrap.remove();
-    }
-    streamBody = null; streamBuf = "";
+  // 确保步骤容器存在（供 onToolCall/onToolResult/thinking 追加）
+  function ensureSteps() {
+    if (stepsBody) return stepsBody;
+    if (streamBody) { stepsBody = streamBody.parentElement.querySelector(".steps"); }
+    if (!stepsBody) { const b = ensureReply(); stepsBody = b.parentElement.querySelector(".steps"); }
+    return stepsBody;
   }
   // 单行压缩：换行/多空格折叠，超长截断
   function compact(s, n) {
@@ -329,14 +301,6 @@
   function finalizeTurn() {
     if (streamBody) streamBody.classList.remove("cursor");
     if (thinkStepEl) thinkStepEl.classList.remove("cursor");
-    if (procEl) {
-      const empty = procBody && !procBody.hasChildNodes();
-      if (empty) { procEl.remove(); }
-      else if (streamBody && streamBody.parentElement === turnHost()) {
-        turnHost().insertBefore(procEl, streamBody.parentElement);
-      }
-      procEl.querySelector(".proc-caret") && (procEl.querySelector(".proc-caret").textContent = "▸");
-    }
     scrollLog();
   }
 
@@ -473,15 +437,18 @@
           curTurn = turnEl;
         } else if (m.role === "assistant") {
           if (!curTurn) { newTurn(); curTurn = turnEl; }
-          addMsg("assistant", "开阳", m.content);
+          const textEl = ensureReply();
+          const wrap = textEl.parentElement.parentElement;
+          wrap.__raw = m.content;
+          textEl.innerHTML = md(m.content);
         } else {
-          // tool / sys / 其他：进工作过程（折叠）
+          // tool / sys / 其他：进答复框步骤容器（累加可见）
           if (!curTurn) { newTurn(); curTurn = turnEl; }
-          const pb = ensureProc();
+          const sb = ensureSteps();
           const step = document.createElement("div");
           step.className = "pstep";
           step.textContent = compact(m.content, 300);
-          pb.appendChild(step);
+          sb.appendChild(step);
           bumpProc();
         }
       });
@@ -545,44 +512,43 @@
     ws.onclose = () => { ws = null; };
   }
 
-  // 工具调用：先收尾正在流式的正文（它是中间文本），再往「工作过程」加一行紧凑条目
+  // 工具调用：追加到答复框的步骤容器（累加可见）
   function onToolCall(tool, args) {
-    stashStreamIntoProc();
     if (thinkStepEl) { thinkStepEl.classList.remove("cursor"); thinkStepEl = null; }
-    const pb = ensureProc();
+    const sb = ensureSteps();
+    const a = compact(args, 160);
     const step = document.createElement("div");
     step.className = "pstep pstep-tool";
-    const a = compact(args, 160);
     step.innerHTML = '<span class="pico">🔧</span><span class="ptool">' + esc(tool) + '</span>' +
       (a ? '<span class="pargs">' + esc(a) + '</span>' : "");
-    pb.appendChild(step);
+    sb.appendChild(step);
     bumpProc();
     scrollLog();
   }
-  // 工具结果：紧凑单行预览，挂在最近一次工具调用下方（空结果不再产生空气泡）
+  // 工具结果：追加到步骤容器（可见）
   function onToolResult(tool, result) {
     const r = compact(result, 200);
-    if (!r) return; // 空白结果直接丢弃
-    const pb = ensureProc();
+    if (!r) return;
+    const sb = ensureSteps();
     const step = document.createElement("div");
     step.className = "pstep pstep-res";
     step.innerHTML = '<span class="pico">↳</span><span class="pres">' + esc(r) + '</span>';
-    pb.appendChild(step);
+    sb.appendChild(step);
     bumpProc();
     scrollLog();
   }
 
-  // 流式：thinking 进「工作过程」；正文进最终答复气泡（可被 stash 回过程）
+  // 流式：thinking 与 reply 都累加到最终答复框
   function handleStream(step, delta, kind) {
     if (!delta) return;
     if (kind === "thinking") {
+      const sb = ensureSteps();
       if (!thinkStepEl) {
-        const pb = ensureProc();
         thinkStepEl = document.createElement("div");
         thinkStepEl.className = "pstep pstep-think cursor";
         thinkStepEl.textContent = "";
-        pb.appendChild(thinkStepEl);
         thinkStepBuf = "";
+        sb.appendChild(thinkStepEl);
         bumpProc();
       }
       thinkStepBuf += delta;
@@ -594,7 +560,7 @@
     if (thinkStepEl) { thinkStepEl.classList.remove("cursor"); thinkStepEl = null; }
     const body = ensureReply();
     streamBuf += delta;
-    body.__raw = streamBuf;
+    body.parentElement.parentElement.__raw = streamBuf;
     body.innerHTML = md(streamBuf);
     body.classList.add("cursor");
     scrollLog();
@@ -602,7 +568,7 @@
   function finalizeStream() {
     if (streamBody) streamBody.classList.remove("cursor");
     if (thinkStepEl) thinkStepEl.classList.remove("cursor");
-    streamBody = null; streamBuf = ""; thinkStepEl = null; thinkStepBuf = ""; streamStep = -1;
+    streamBody = null; streamBuf = ""; thinkStepEl = null; thinkStepBuf = ""; streamStep = -1; stepsBody = null;
   }
 
   // ---------- 发送 ----------
@@ -616,6 +582,7 @@
     autoGrow();
     busy = true; sendBtn.disabled = true;
     abortBtn.classList.remove("hidden");
+    steerRow.classList.remove("hidden");
     const item = convs.find((c) => c.id === curConv);
     if (item && (item.title === "新会话" || !item.title)) { item.title = text.slice(0, 24); renderConvList(); }
 
@@ -624,15 +591,16 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ conversation_id: curConv, message: text }),
       });
-      // 用最终答复覆盖当前答复气泡（流式已渲染则替换为完整文本；否则补渲染）
-      const body = ensureReply();
-      body.__raw = j.reply || streamBuf || "";
-      body.innerHTML = md(j.reply || streamBuf || "(空)");
+      // 最终答复覆盖 .text 容器：步骤保持，仅替换正文
+      const textEl = streamBody || ensureReply();
+      const wrap = textEl.parentElement.parentElement;
+      wrap.__raw = j.reply || streamBuf || "";
+      textEl.innerHTML = md(j.reply || streamBuf || "(空)");
     } catch (e) {
       const body = ensureReply();
-      const wrap = body.parentElement;
+      const wrap = body.parentElement.parentElement;
       wrap.className = "msg error";
-      body.__raw = "⚠ " + e.message;
+      wrap.__raw = "⚠ " + e.message;
       body.innerHTML = md("⚠ " + e.message);
     } finally { finish(); }
   }
@@ -640,6 +608,7 @@
     finalizeTurn();
     busy = false; sendBtn.disabled = false;
     abortBtn.classList.add("hidden");
+    steerRow.classList.add("hidden");
     input.focus();
     api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
   }
@@ -650,6 +619,20 @@
   abortBtn.addEventListener("click", async () => {
     await fetch("/web/api/abort", { method: "POST", credentials: "same-origin" }).catch(() => {});
   });
+  steerSend.addEventListener("click", doSteer);
+  steerInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSteer(); }
+  });
+  steerDone.addEventListener("click", () => { steerRow.classList.add("hidden"); });
+  async function doSteer() {
+    const text = steerInput.value.trim();
+    if (!text || busy) return;
+    steerInput.value = "";
+    await api("/web/api/steer", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: text }),
+    });
+  }
   function autoGrow() {
     // 固定 5 行高度（由 CSS min-height 控制），超过则纵向滚动
     input.style.height = "";

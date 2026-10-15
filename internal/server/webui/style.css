@@ -190,6 +190,11 @@ button { font-family: inherit; cursor: pointer; }
 .pstep-think { color: var(--text-dim); font-style: italic; display: block; }
 .pstep-text { display: block; color: var(--text-dim); }
 .pstep-text p { margin: .3em 0; }
+/* 步骤追加入最终答复框时同样套用紧凑样式（不依赖工作过程容器） */
+.msg.assistant .steps { border-left: 2px solid var(--border); padding-left: 10px; margin-bottom: 8px; }
+.msg.assistant .steps:empty { display: none; }
+.msg.assistant .pstep { padding: 3px 0; border: none; }
+.msg.assistant .pstep + .pstep { border-top: 1px dashed var(--border); margin-top: 5px; padding-top: 5px; }
 .pstep.cursor::after { content: "▋"; animation: blink 1s steps(2, start) infinite; color: var(--accent); margin-left: 1px; }
 
 /* markdown 渲染 */
@@ -248,6 +253,12 @@ button { font-family: inherit; cursor: pointer; }
 
 /* ---------- 输入区 ---------- */
 .composer { border-top: 1px solid var(--border); background: var(--bg-panel); padding: 8px 16px 12px; }
+.steer-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 8px 10px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent); }
+.steer-label { font-size: 12px; color: var(--accent); font-weight: 600; white-space: nowrap; }
+#steerInput { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-input); color: var(--text); font-family: inherit; font-size: 13px; min-height: 0; resize: none; }
+#steerInput:focus { outline: none; border-color: var(--accent); }
+#steerSend { padding: 8px 14px; border: none; border-radius: 8px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; }
+#steerDone { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text-dim); font-size: 13px; }
 .quickbar { display: flex; align-items: center; gap: 12px; margin-bottom: 7px; flex-wrap: wrap; }
 .qk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
 .qk span { white-space: nowrap; }
