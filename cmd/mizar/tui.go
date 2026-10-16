@@ -189,6 +189,10 @@ type tuiModel struct {
 	askMu      sync.Mutex
 	askPending *askPending // nil = 无待处理问题
 
+	// modelPickerActive：/model 弹出的 ↑↓ 模型选择器是否激活（nil = 未激活）。
+	// 激活期间 ↑/↓/Enter/Esc 被选择器接管，聊天区暂切换为清单视图（同拷贝模式套路）。
+	modelPickerActive *modelPicker
+
 	// canceling：ESC 已请求取消、旧任务 goroutine 尚未完全退出。
 	// 期间新输入一律排队，防止新任务的 Run→resetAbort() 清掉旧任务的
 	// abort 标志（否则旧任务“复活”继续跑）及两个 Run 并发争用 Agent 状态。
@@ -235,6 +239,11 @@ func (m *tuiModel) renderAllDirect() {
 	// 拷贝模式：切换到拷贝视图渲染（不在这里重建普通视图，避免覆盖选区/滚动位置）
 	if m.copyMode {
 		m.renderCopyMode()
+		return
+	}
+	// 模型选择器：同样接管聊天区（渲染清单 + 光标）
+	if m.modelPickerActive != nil {
+		m.renderModelPicker()
 		return
 	}
 	var sb strings.Builder
@@ -1101,6 +1110,32 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			m.addChatLine(chatLine{role: "err", content: "任务已取消（当前步骤结束后停止）", ts: time.Now()})
 			return nil
 		}
+		// 模型选择器：接管 ↑↓ / j·k / Enter / Esc/q。
+		// 必须放在历史浏览与 PgUp/PgDn 之前，否则 ↑↓ 会被历史浏览先吃掉。
+		if m.modelPickerActive != nil {
+			switch {
+			case event.Key() == tcell.KeyUp:
+				m.modelPickerActive.Move(-1)
+			case event.Key() == tcell.KeyDown:
+				m.modelPickerActive.Move(1)
+			case event.Key() == tcell.KeyRune && event.Rune() == 'k':
+				m.modelPickerActive.Move(-1)
+			case event.Key() == tcell.KeyRune && event.Rune() == 'j':
+				m.modelPickerActive.Move(1)
+			case event.Key() == tcell.KeyEnter:
+				m.confirmModelPicker()
+				return nil
+			case event.Key() == tcell.KeyEsc,
+				event.Key() == tcell.KeyRune && event.Rune() == 'q':
+				m.closeModelPicker()
+				return nil
+			default:
+				return event // 其余按键交回输入框（仍可正常打字/取消）
+			}
+			m.renderModelPicker()
+			return nil
+		}
+
 		// Ctrl+C 不退出：清空输入框并退出历史浏览
 		if event.Key() == tcell.KeyCtrlC {
 			m.histIdx = -1
@@ -1540,6 +1575,19 @@ func (m *tuiModel) submitInput(s string) {
 			m.app.Stop()
 			return
 		}
+		// /model（无参数）：TUI 下不打印清单，而是直接弹 ↑↓ 选择器，
+		// 省掉「看到清单后还要再手打一遍模型名」的一步。
+		// 带参数的 /model <name> 仍走命令（保留直接指定任意模型名的能力）。
+		if s == "/model" {
+			// 任务运行中不开选择器：此时 Esc 已被「取消任务」占用（它在按键处理里
+			// 排在选择器分支之前），否则用户按 Esc 想取消选择却把任务杀了。
+			if m.loading || m.canceling.Load() {
+				m.addChatLine(chatLine{role: "err", content: "任务运行中无法切换模型，请先 Esc 取消或等任务结束", ts: time.Now()})
+				return
+			}
+			m.openModelPicker()
+			return
+		}
 		// 异步执行命令，避免网络IO（如 /model）阻塞主线程
 		ch := m.agent.Commands.DispatchAsync(s, 5*time.Second)
 		go func() {
@@ -1823,6 +1871,131 @@ func (m *tuiModel) renderCopyMode() {
 	m.textView.ScrollTo(m.copyCursor, 0)
 	// 状态栏提示
 	m.statusBar.SetText(sgrColor("yellow", "〔拷贝模式〕↑↓ 移动 · v/空格 标记 · y 复制 · q/Esc 退出"))
+}
+
+// =============================================================================
+// 模型选择器（/model 弹出，↑↓ 选择）
+//
+// 背景：旧 /model 只打印清单，用户还得手打一遍模型全名；弱模型/长名字（qwen3-235b-a22b）
+// 手打易错，错一个字符就是 404 或静默换了别的模型。本选择器让用户直接上下选 + 回车确认。
+//
+// 键位：
+//   ↑/↓ 或 k/j   移动光标
+//   Enter        确认切换（写入配置，与 /model <name> 同一条路径）
+//   Esc 或 q     取消
+//
+// 实现沿用拷贝模式的套路：接管聊天区 TextView 渲染，不引入 tview.Modal，
+// 以免与现有 InputCapture / 粘贴防护 / 鼠标捕获逻辑打架。
+// =============================================================================
+
+// openModelPicker 拉取清单并进入选择器（在事件循环内调用）。
+// 拉取失败或无模型时不开选择器，直接给出提示——选择器在空清单下无意义。
+func (m *tuiModel) openModelPicker() {
+	// 网络拉取放到后台：TUI 事件循环绝不能阻塞在 HTTP 上
+	// （旧版 /model 正是为此才走 DispatchAsync）。
+	m.addChatLine(chatLine{role: "system", content: "正在获取模型清单…", ts: time.Now()})
+	go func() {
+		baseURL, apiKey := m.agent.LLMInfo()
+		models, err := config.ListModels(baseURL, apiKey)
+		m.app.QueueUpdateDraw(func() {
+			if err != nil {
+				m.addChatLine(chatLine{role: "err", content: fmt.Sprintf("获取模型清单失败: %v（可 /model <名称> 直接指定）", err), ts: time.Now()})
+				return
+			}
+			if len(models) == 0 {
+				m.addChatLine(chatLine{role: "err", content: "供应商未返回可用模型（可 /model <名称> 直接指定）", ts: time.Now()})
+				return
+			}
+			// 可见行数取聊天区可用高度（减去标题/提示/状态栏），回退默认
+			rows := defaultPickerRows
+			if _, _, _, h := m.textView.GetInnerRect(); h > 6 {
+				rows = h - 3
+			}
+			m.modelPickerActive = newModelPicker(models, m.agent.Model(), rows)
+			m.inputField.SetText("", true)
+			m.renderModelPicker()
+		})
+	}()
+}
+
+// closeModelPicker 退出选择器并恢复普通视图。
+func (m *tuiModel) closeModelPicker() {
+	m.modelPickerActive = nil
+	m.renderAllDirect()
+}
+
+// confirmModelPicker 确认选择：切换模型并退出选择器。
+// 切换逻辑复用 /model <name> 命令（持久化、清单校验单一份），但必须放在 goroutine：
+// 命令内部会再拉一次清单（网络 IO），在事件循环里同步执行会卡住界面
+// （这正是旧版 /model 走 DispatchAsync 的原因）。
+func (m *tuiModel) confirmModelPicker() {
+	p := m.modelPickerActive
+	if p == nil {
+		return
+	}
+	name, ok := p.Selected()
+	m.modelPickerActive = nil
+	m.inputField.SetText("", true)
+	if !ok {
+		m.renderAllDirect()
+		return
+	}
+	m.addChatLine(chatLine{role: "system", content: "正在切换到 " + name + " …", ts: time.Now()})
+	go func() {
+		_, out, err := m.agent.Commands.Dispatch("/model " + name)
+		m.app.QueueUpdateDraw(func() {
+			if err != nil {
+				m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})
+			} else if out != "" {
+				m.addChatLine(chatLine{role: "bot", content: out, ts: time.Now()})
+			}
+			// 模型名变化时重置统计（与 submitInput 的命令分支一致）
+			prev := m.stats.ModelName
+			m.stats.ModelName = m.agent.Model()
+			if prev != "" && prev != m.agent.Model() {
+				m.stats.ResetModelStats()
+			}
+			m.statusBarDirect()
+		})
+	}()
+}
+
+// renderModelPicker 把清单渲染进聊天区（光标行高亮）。
+func (m *tuiModel) renderModelPicker() {
+	p := m.modelPickerActive
+	if p == nil {
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString(sgrColor("yellow", "〔模型选择〕↑↓/j·k 移动 · Enter 确认 · Esc/q 取消\n\n"))
+	lo, hi := p.Lines()
+	if lo > 0 {
+		sb.WriteString(sgrColor("gray", fmt.Sprintf("  ↑ 还有 %d 个\n", lo)))
+	}
+	for i := lo; i < hi; i++ {
+		name := p.models[i]
+		mark := "  "
+		if name == m.agent.Model() {
+			mark = "* "
+		}
+		line := fmt.Sprintf("  %s%s", mark, name)
+		if i == p.cursor {
+			sb.WriteString(sgrColor("black:white", "▸ "+line+" ") + "\n")
+		} else {
+			sb.WriteString(sgrColor("white", "  "+line) + "\n")
+		}
+	}
+	if hi < len(p.models) {
+		sb.WriteString(sgrColor("gray", fmt.Sprintf("  ↓ 还有 %d 个\n", len(p.models)-hi)))
+	}
+	m.textView.SetText(sb.String()).SetDynamicColors(true)
+	// 让选中行尽量居中：把光标行滚到视口中部
+	if offset := p.cursor - (hi-lo)/2; offset > 0 {
+		m.textView.ScrollTo(offset, 0)
+	} else {
+		m.textView.ScrollTo(0, 0)
+	}
+	m.statusBar.SetText(sgrColor("yellow", "〔模型选择〕↑↓ 移动 · Enter 确认 · Esc 取消"))
 }
 
 func truncateArgs(s string) string {

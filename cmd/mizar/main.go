@@ -662,36 +662,15 @@ func main() {
 			return fmt.Sprintf("✓ 供应商已切换: %s → %s", oldURL, baseURL), nil
 		},
 	})
-	// 内置 /model 命令：查看/切换模型；无参数时从供应商拉取可用模型清单（/v1/models）
-	a.Commands.Register(agent.Command{
-		Name:        "model",
-		Description: "查看/列出模型（/model 列出供应商可用模型）或切换（/model <name>）",
-		Run: func(args string) (string, error) {
-			args = strings.TrimSpace(args)
-			// 拉取供应商模型清单（网络失败不阻断，仅提示）
-			models, listErr := config.ListModels(client.BaseURL, client.APIKey)
-			if args == "" {
-				var sb strings.Builder
-				fmt.Fprintf(&sb, "当前模型: %s\n", client.Model)
-				if listErr == nil && len(models) > 0 {
-					fmt.Fprintf(&sb, "供应商可用模型（%s，共 %d 个，* 为当前）：\n", client.BaseURL, len(models))
-					for _, m := range models {
-						mark := " "
-						if m == client.Model {
-							mark = "*"
-						}
-						fmt.Fprintf(&sb, "  %s %s\n", mark, m)
-					}
-					sb.WriteString("切换: /model <名称>")
-				} else if listErr != nil {
-					fmt.Fprintf(&sb, "获取模型清单失败: %v\n可 /model <名字> 直接指定模型名（不依赖清单）", listErr)
-				} else {
-					sb.WriteString("供应商未返回可用模型，可 /model <名字> 直接指定模型名")
-				}
-				return sb.String(), nil
-			}
+	// 内置 /model 命令：查看/切换模型（实现见 modelcmd.go）。
+	// TUI 下输入 /model 会额外弹出 ↑↓ 选择器（见 tui.go 的 modelPickerActive 分支）。
+	a.Commands.Register(newModelCommand(
+		"查看/列出模型（/model 列出供应商可用模型，TUI 下可 ↑↓ 选择）或切换（/model <name>）",
+		func() ([]string, error) { return config.ListModels(client.BaseURL, client.APIKey) },
+		func() string { return client.Model },
+		func(name string) (string, error) {
 			old := client.Model
-			client.Model = args
+			client.Model = name
 			// 持久化到 config.json
 			cfg, _ := config.Load(config.DefaultPath())
 			cfg.BaseURL = client.BaseURL
@@ -701,24 +680,11 @@ func main() {
 			cfg.ThinkingLevel = client.ThinkingEnabled()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/model 持久化失败: %v", err)
+				return "", fmt.Errorf("模型已切换为 %s 但写入配置失败: %w", name, err)
 			}
-			out := fmt.Sprintf("✓ 模型已切换: %s → %s", old, args)
-			// 清单可获取但目标不在内：警告不阻断（网关代理场景可能接受任意名）
-			if listErr == nil && len(models) > 0 {
-				found := false
-				for _, m := range models {
-					if m == args {
-						found = true
-						break
-					}
-				}
-				if !found {
-					out += fmt.Sprintf("\n⚠ 模型 %q 不在供应商清单中（可执行 /model 查看可用清单）", args)
-				}
-			}
-			return out, nil
+			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, name), nil
 		},
-	})
+	))
 	// 内置 /apikey 命令：查看/设置 API Key（与 /provider 配合使用）
 	a.Commands.Register(agent.Command{
 		Name:        "apikey",
