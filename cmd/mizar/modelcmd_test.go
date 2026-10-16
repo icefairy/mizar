@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gdamore/tcell/v2"
+
 	"mizar/internal/agent"
 	"mizar/internal/config"
 )
@@ -298,5 +300,97 @@ func TestModelCommandIntegrationWithRealProvider(t *testing.T) {
 	}
 	if strings.Contains(out, "不在供应商清单中") {
 		t.Fatalf("清单内模型不应告警:\n%s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 选择器按键优先级（回归 2026-10-16：按回车后清单不消失）
+// ---------------------------------------------------------------------------
+
+// TestModelPickerEnterHandledBeforeSend 选择器打开时 Enter 必须被选择器接管。
+// 回归：旧实现把选择器判断放在「Enter 发送」之后，且选择器打开时输入框已清空，
+// submitInput("") 直接 return → Enter 既不确认也不关闭清单（用户看到「按回车没反应」）。
+func TestModelPickerEnterHandledBeforeSend(t *testing.T) {
+	m := newTUIForQueueTest()
+	m.agent.LLM = modelStub("m1")
+	m.modelPickerActive = newModelPicker([]string{"m1", "m2"}, "m1", 10)
+
+	handled, ret := m.handleModelPickerKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+	if !handled {
+		t.Fatal("选择器打开时 Enter 必须被接管（否则会落到发送分支）")
+	}
+	if ret != nil {
+		t.Fatalf("确认后事件应被吞掉, got %v", ret)
+	}
+	if m.modelPickerActive != nil {
+		t.Fatal("确认后 modelPickerActive 应为 nil（清单消失）")
+	}
+}
+
+// TestModelPickerMoveKeysHandled 选择器打开时 ↑↓/j·k 由选择器消费（不被历史浏览吃掉）。
+func TestModelPickerMoveKeysHandled(t *testing.T) {
+	m := newTUIForQueueTest()
+	m.agent.LLM = modelStub("m1")
+	m.modelPickerActive = newModelPicker([]string{"m1", "m2", "m3"}, "m1", 10)
+
+	if handled, _ := m.handleModelPickerKey(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone)); !handled {
+		t.Fatal("↓ 应被选择器接管")
+	}
+	if got, _ := m.modelPickerActive.Selected(); got != "m2" {
+		t.Fatalf("↓ 后选中 = %q, want m2", got)
+	}
+	if handled, _ := m.handleModelPickerKey(tcell.NewEventKey(tcell.KeyRune, 'k', tcell.ModNone)); !handled {
+		t.Fatal("k 应被选择器接管")
+	}
+	if got, _ := m.modelPickerActive.Selected(); got != "m1" {
+		t.Fatalf("k 后选中 = %q, want m1", got)
+	}
+}
+
+// TestModelPickerEscAndQClose 取消键应关闭选择器并恢复普通视图。
+func TestModelPickerEscAndQClose(t *testing.T) {
+	for _, key := range []*tcell.EventKey{
+		tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone),
+	} {
+		m := newTUIForQueueTest()
+		m.agent.LLM = modelStub("m1")
+		m.lines = append(m.lines, chatLine{role: "bot", content: "历史回复"})
+		m.modelPickerActive = newModelPicker([]string{"m1", "m2"}, "m1", 10)
+		handled, ret := m.handleModelPickerKey(key)
+		if !handled || ret != nil {
+			t.Fatalf("取消键应被吞掉: handled=%v ret=%v", handled, ret)
+		}
+		if m.modelPickerActive != nil {
+			t.Fatalf("取消后应为 nil（key=%v）", key)
+		}
+		if text := m.textView.GetText(true); !strings.Contains(text, "历史回复") {
+			t.Fatalf("取消后应恢复普通视图:\n%s", text)
+		}
+	}
+}
+
+// TestModelPickerOtherKeysPassThrough 其他按键应原样交回（否则输入框无法打字）。
+func TestModelPickerOtherKeysPassThrough(t *testing.T) {
+	m := newTUIForQueueTest()
+	m.agent.LLM = modelStub("m1")
+	m.modelPickerActive = newModelPicker([]string{"m1", "m2"}, "m1", 10)
+	key := tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModNone)
+	handled, ret := m.handleModelPickerKey(key)
+	if !handled {
+		t.Fatal("其他按键也应标记为已处理（选择器激活时不再走后续分支）")
+	}
+	if ret != key {
+		t.Fatalf("其他按键应原样交回, got %v", ret)
+	}
+}
+
+// TestModelPickerInactivePassThrough 未激活时不得拦截任何按键。
+func TestModelPickerInactivePassThrough(t *testing.T) {
+	m := newTUIForQueueTest()
+	key := tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)
+	handled, ret := m.handleModelPickerKey(key)
+	if handled || ret != key {
+		t.Fatalf("未激活时应原样放行: handled=%v ret=%v", handled, ret)
 	}
 }

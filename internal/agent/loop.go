@@ -811,7 +811,11 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		text := respondText(c.Args)
 		if text == "" {
 			msg := "⚠️ respond 工具调用缺少 text 参数。请重新调用 respond，并在 text 参数中填入你要说的内容。"
-			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+			// ⚠ 不得标 KindToolCall：该消息没有 ToolCalls 字段，也没有对应的工具结果。
+			// encodeMessages 见到 KindToolCall 会从 Content 回退出一个 tool_call（合成 ID），
+			// 而后续只有一条普通 user 纠正提示 → 发出「有 tool_calls 无 role:tool 结果」的
+			// 非法序列，上游报 400「tool calls and tool results do not match」（2026-10-16 实测）。
+			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: msg})
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
@@ -831,7 +835,9 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 	if trimmedArgs == "" || trimmedArgs == "{}" {
 		q.EndOperation("tool:" + c.Tool)
 		msg := fmt.Sprintf("⚠️ 工具 %s 调用缺少参数（args 为空）。请重新调用，并在 args 中传入正确的 JSON 参数。", c.Tool)
-		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply, Kind: KindToolCall})
+		// ⚠ 同 respond 分支：无 ToolCalls、无工具结果，标 KindToolCall 会让编码层回退出
+		// 孤儿 tool_calls → 上游 400（详见上方注释）。
+		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
 		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil

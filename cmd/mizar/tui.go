@@ -1058,6 +1058,16 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		// 注意：本函数返回 nil 表示事件被吞掉（InputCapture 语义），与 MouseCapture 相反。
 		now := time.Now()
 		defer func() { m.lastKeyAt = now }()
+		// 模型选择器：接管 ↑↓ / j·k / Enter / Esc/q。
+		// ⚠ 必须放在所有 Enter/↑↓ 处理之前：
+		//   - Enter：选择器打开时输入框已被清空，若落到「发送」分支，
+		//     submitInput("") 直接 return，既不确认也不关选择器
+		//     （2026-10-16 实测：按回车后清单不消失）。
+		//   - Enter：若先过 pasteGuard，连按回车会被当成粘贴换行插入 "\n"。
+		//   - ↑↓：会被历史浏览先吃掉。
+		if handled, ret := m.handleModelPickerKey(event); handled {
+			return ret
+		}
 		if m.pasteGuard && event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModAlt == 0 {
 			if isPasteNewline(now, m.lastKeyAt) || isPasteNewline(now, m.lastNewlineAt) {
 				m.lastNewlineAt = now
@@ -1118,32 +1128,6 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			m.addChatLine(chatLine{role: "err", content: "任务已取消（当前步骤结束后停止）", ts: time.Now()})
 			return nil
 		}
-		// 模型选择器：接管 ↑↓ / j·k / Enter / Esc/q。
-		// 必须放在历史浏览与 PgUp/PgDn 之前，否则 ↑↓ 会被历史浏览先吃掉。
-		if m.modelPickerActive != nil {
-			switch {
-			case event.Key() == tcell.KeyUp:
-				m.modelPickerActive.Move(-1)
-			case event.Key() == tcell.KeyDown:
-				m.modelPickerActive.Move(1)
-			case event.Key() == tcell.KeyRune && event.Rune() == 'k':
-				m.modelPickerActive.Move(-1)
-			case event.Key() == tcell.KeyRune && event.Rune() == 'j':
-				m.modelPickerActive.Move(1)
-			case event.Key() == tcell.KeyEnter:
-				m.confirmModelPicker()
-				return nil
-			case event.Key() == tcell.KeyEsc,
-				event.Key() == tcell.KeyRune && event.Rune() == 'q':
-				m.closeModelPicker()
-				return nil
-			default:
-				return event // 其余按键交回输入框（仍可正常打字/取消）
-			}
-			m.renderModelPicker()
-			return nil
-		}
-
 		// Ctrl+C 不退出：清空输入框并退出历史浏览
 		if event.Key() == tcell.KeyCtrlC {
 			m.histIdx = -1
@@ -1587,8 +1571,10 @@ func (m *tuiModel) submitInput(s string) {
 		// 省掉「看到清单后还要再手打一遍模型名」的一步。
 		// 带参数的 /model <name> 仍走命令（保留直接指定任意模型名的能力）。
 		if s == "/model" {
-			// 任务运行中不开选择器：此时 Esc 已被「取消任务」占用（它在按键处理里
-			// 排在选择器分支之前），否则用户按 Esc 想取消选择却把任务杀了。
+			// 任务运行中不开选择器：loading 时 Esc 已被「取消任务」占用。
+			// 选择器打开后 Esc 会被 handleModelPickerKey 优先接管（它在 InputCapture
+			// 最前面），不会误杀任务；但为免用户在「以为要取消任务」时误开选择器，
+			// 仍在任务期间直接拒绝。
 			if m.loading || m.canceling.Load() {
 				m.addChatLine(chatLine{role: "err", content: "任务运行中无法切换模型，请先 Esc 取消或等任务结束", ts: time.Now()})
 				return
@@ -1928,6 +1914,40 @@ func (m *tuiModel) openModelPicker() {
 	}()
 }
 
+// handleModelPickerKey 处理模型选择器打开时的按键。
+// 返回 (handled, ret)：handled=true 时调用方应立即 return ret（nil 表示事件已吞）。
+//
+// ⚠ 调用位置必须在 InputCapture 的**所有** Enter/↑↓ 处理之前（含 pasteGuard、
+// Enter 发送、历史浏览）：选择器打开时输入框已被清空，一旦 Enter 落到「发送」
+// 分支，submitInput("") 会直接 return，既不确认也不关选择器
+// （2026-10-16 实测：按回车后清单不消失）。同理 ↑↓ 会被历史浏览先吃掉。
+func (m *tuiModel) handleModelPickerKey(event *tcell.EventKey) (bool, *tcell.EventKey) {
+	if m.modelPickerActive == nil {
+		return false, event
+	}
+	switch {
+	case event.Key() == tcell.KeyUp:
+		m.modelPickerActive.Move(-1)
+	case event.Key() == tcell.KeyDown:
+		m.modelPickerActive.Move(1)
+	case event.Key() == tcell.KeyRune && event.Rune() == 'k':
+		m.modelPickerActive.Move(-1)
+	case event.Key() == tcell.KeyRune && event.Rune() == 'j':
+		m.modelPickerActive.Move(1)
+	case event.Key() == tcell.KeyEnter:
+		m.confirmModelPicker()
+		return true, nil
+	case event.Key() == tcell.KeyEsc,
+		event.Key() == tcell.KeyRune && event.Rune() == 'q':
+		m.closeModelPicker()
+		return true, nil
+	default:
+		return true, event // 其余按键交回输入框（仍可正常打字/取消）
+	}
+	m.renderModelPicker()
+	return true, nil
+}
+
 // closeModelPicker 退出选择器并恢复普通视图。
 func (m *tuiModel) closeModelPicker() {
 	m.modelPickerActive = nil
@@ -1951,8 +1971,13 @@ func (m *tuiModel) confirmModelPicker() {
 		return
 	}
 	m.addChatLine(chatLine{role: "system", content: "正在切换到 " + name + " …", ts: time.Now()})
+	cmds := m.agent.Commands
+	if cmds == nil {
+		m.addChatLine(chatLine{role: "err", content: "命令注册表不可用，无法切换模型", ts: time.Now()})
+		return
+	}
 	go func() {
-		_, out, err := m.agent.Commands.Dispatch("/model " + name)
+		_, out, err := cmds.Dispatch("/model " + name)
 		m.app.QueueUpdateDraw(func() {
 			if err != nil {
 				m.addChatLine(chatLine{role: "err", content: err.Error(), ts: time.Now()})

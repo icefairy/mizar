@@ -420,30 +420,32 @@ func wrapReplyJSON(content string) string {
 //   - KindToolResult            → role:"tool" + tool_call_id + 结果正文
 func encodeMessages(msgs []agent.Message) []chatMsg {
 	out := make([]chatMsg, 0, len(msgs))
-	// openCalls 记录尚未配对的 tool_call id（来自前面的 assistant tool_calls）。
-	// OpenAI 严格要求 role:"tool" 必须回应前面的 tool_calls，否则报 400
-	// （“messages with role 'tool' must be a response to a preceding message
-	// with 'tool_calls'”）。
-	// 两种会产生孤儿的情形：
-	//   ① 历史被截断（-history N）开头正好落在一条工具结果上
-	//   ② 旧会话缺 ToolCallID 字段
-	// 这时代码把孤儿结果**降级为普通 user 文本**而不是丢弃——保留信息，又不会让 API 报错。
-	openCalls := map[string]bool{}
+	// OpenAI 严格要求 role:"tool" 必须回应前面的 tool_calls，且一个 tool_call 只能被
+	// 回应一次；反向地，发出了 tool_calls 就必须有结果，否则报 400
+	// 「tool calls and tool results do not match」（2026-10-16 实测 codebuddy）。
+	// 因此两个方向都要对齐，用同一套配对规则（见 pairCalls）：
+	//   - 孤儿结果（历史被截断 / 旧会话缺 ID）→ 降级为普通 user 文本（保留信息）
+	//   - 孤儿调用（结果从未落盘 / 尾部被截断）→ 不声明（见 encodeToolCallMsg）
+	paired := pairedCallIDs(msgs)
+	// open 为未配对调用的 FIFO 队列：旧格式（tool_result 无 ToolCallID）按顺序回退配对。
+	var open []string
 	for _, m := range msgs {
 		switch m.Kind {
 		case agent.KindToolCall:
-			encoded := encodeToolCallMsg(m)
+			encoded, ok := encodeToolCallMsg(m, paired)
+			if !ok {
+				continue // 所有调用都无结果回应：丢弃（避免发出孤儿 tool_calls）
+			}
 			for _, tc := range encoded.ToolCalls {
-				openCalls[tc.ID] = true
+				open = append(open, tc.ID)
 			}
 			out = append(out, encoded)
 		case agent.KindToolResult:
-			if m.ToolCallID != "" && openCalls[m.ToolCallID] {
-				delete(openCalls, m.ToolCallID)
+			if id, ok := takePaired(&open, m.ToolCallID); ok {
 				out = append(out, chatMsg{
 					Role:       "tool",
 					Content:    toolResultBody(m.Content),
-					ToolCallID: m.ToolCallID,
+					ToolCallID: id,
 				})
 				continue
 			}
@@ -456,30 +458,92 @@ func encodeMessages(msgs []agent.Message) []chatMsg {
 	return out
 }
 
+// takePaired 从待配对队列中取出被回应的 call id。
+// want 非空时精确匹配（新格式）；want 为空时取队首（旧格式 tool_result 缺 ToolCallID，
+// 按出现顺序回退配对——工具交换在历史里总是成对按序出现的）。
+// 返回 ok=false 表示无对应调用（孤儿结果，调用方降级为普通文本）。
+func takePaired(open *[]string, want string) (string, bool) {
+	q := *open
+	if len(q) == 0 {
+		return "", false
+	}
+	if want == "" {
+		*open = q[1:]
+		return q[0], true
+	}
+	for i, id := range q {
+		if id == want {
+			*open = append(q[:i:i], q[i+1:]...)
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// pairedCallIDs 预扫描消息列表，返回「会收到工具结果回应」的 tool_call id 集合。
+//
+// 语义与 encodeMessages 的配对逻辑完全一致（同一 id 只允许被回应一次，按出现顺序
+// 配对，旧格式缺 ID 的结果按队首回退），因此可用它决定某个 tool_call 是否该被写入请求。
+func pairedCallIDs(msgs []agent.Message) map[string]bool {
+	paired := map[string]bool{}
+	var open []string
+	for _, m := range msgs {
+		switch m.Kind {
+		case agent.KindToolCall:
+			for _, c := range toolCallRefs(m) {
+				if c.ID != "" {
+					open = append(open, c.ID)
+				}
+			}
+		case agent.KindToolResult:
+			if id, ok := takePaired(&open, m.ToolCallID); ok {
+				paired[id] = true
+			}
+		}
+	}
+	return paired
+}
+
+// toolCallRefs 还原一条 tool_call 消息声明的调用列表：
+// 优先原生 ToolCalls 字段；旧会话回退到 ToolName/ToolArgs 或 Content 里的控制 JSON。
+// 无法还原时返回 nil。ID 缺失时用 fallbackCallID 合成（与会话内结果配对保持一致）。
+func toolCallRefs(m agent.Message) []agent.ToolCallRef {
+	if len(m.ToolCalls) > 0 {
+		return m.ToolCalls
+	}
+	name, args := m.ToolName, m.ToolArgs
+	if name == "" {
+		var req struct {
+			Tool string `json:"tool"`
+			Args string `json:"args"`
+		}
+		if json.Unmarshal([]byte(m.Content), &req) == nil {
+			name, args = req.Tool, req.Args
+		}
+	}
+	if name == "" {
+		return nil
+	}
+	return []agent.ToolCallRef{{ID: fallbackCallID(m), Name: name, Args: args}}
+}
+
 // encodeToolCallMsg 把工具调用消息编码为 assistant + tool_calls。
 // Content 只放模型的前导说明文字（没有则为空），不再塞整个控制 JSON。
-func encodeToolCallMsg(m agent.Message) chatMsg {
-	calls := m.ToolCalls
+//
+// paired 为「会收到结果回应」的 call id 集合（见 pairedCallIDs）：只保留其中
+// 的调用 —— 发出无结果的 tool_calls 会让上游 400。过滤后若一个调用都不剩，
+// 返回 ok=false，由调用方丢弃该消息（它已无任何可表达的内容）。
+func encodeToolCallMsg(m agent.Message, paired map[string]bool) (chatMsg, bool) {
+	calls := toolCallRefs(m)
 	if len(calls) == 0 {
-		// 旧会话无 ToolCalls 字段：从 ToolName/ToolArgs（或 Content 里的 JSON）回退
-		name, args := m.ToolName, m.ToolArgs
-		if name == "" {
-			var req struct {
-				Tool string `json:"tool"`
-				Args string `json:"args"`
-			}
-			if json.Unmarshal([]byte(m.Content), &req) == nil {
-				name, args = req.Tool, req.Args
-			}
-		}
-		if name == "" {
-			// 实在无法还原：降级为普通文本（保证不丢上下文）
-			return chatMsg{Role: agent.RoleAssistant, Content: m.Content}
-		}
-		calls = []agent.ToolCallRef{{ID: fallbackCallID(m), Name: name, Args: args}}
+		// 连调用名都无法还原：消息本身只是文本，降级为普通 assistant 文本。
+		return chatMsg{Role: agent.RoleAssistant, Content: m.Content}, true
 	}
 	wires := make([]wireToolCall, 0, len(calls))
 	for _, c := range calls {
+		if !paired[c.ID] {
+			continue // 该调用没有对应结果：不得声明
+		}
 		var w wireToolCall
 		w.ID = c.ID
 		w.Type = "function"
@@ -487,11 +551,19 @@ func encodeToolCallMsg(m agent.Message) chatMsg {
 		w.Function.Arguments = c.Args
 		wires = append(wires, w)
 	}
+	if len(wires) == 0 {
+		// 没有任何调用可声明（无结果回应 / 无法还原）：降级为普通 assistant 文本。
+		// 空文本（或纯控制 JSON）降级后无信息量，丢弃（ok=false）。
+		if body := m.Content; body != "" && !isControlJSON(body) {
+			return chatMsg{Role: agent.RoleAssistant, Content: body}, true
+		}
+		return chatMsg{}, false
+	}
 	body := m.Content
 	if isControlJSON(body) {
 		body = "" // 控制 JSON 不是给人/模型看的说明文字，不必回灌
 	}
-	return chatMsg{Role: agent.RoleAssistant, Content: body, ToolCalls: wires}
+	return chatMsg{Role: agent.RoleAssistant, Content: body, ToolCalls: wires}, true
 }
 
 // fallbackCallID 为旧会话里缺 ID 的调用生成稳定 ID（同一会话重复启动保持一致）。
