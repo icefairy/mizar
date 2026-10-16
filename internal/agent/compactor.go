@@ -38,8 +38,10 @@ func DefaultCompactor(summarize func([]Message) (string, error)) *Compactor {
 	}
 }
 
-// EstimateTokens 估算消息 token 数（保守启发式：中文按字符，其他按 4 字符/token）。
-// 参照 pi 的 estimateTokens + chars/4 启发式，对中文更保守。
+// EstimateTokens 估算消息 token 数（保守启发式：中文按字符，其他按 3.5 字符/token）。
+// 参照 pi 的 estimateTokens：非 ASCII 按 3.5 字符/token（pi 1.1 从 4 降到 3.5）。
+// 4 会低估 ASCII 密集内容（日志/JSON/源码）的 token，导致压缩触发偏晚而请求超限。
+// 3.5 用 (n*2+6)/7 实现上取整除法，避免引入浮点。
 func EstimateTokens(m Message) int {
 	if m.Content == "" {
 		return 0
@@ -52,7 +54,7 @@ func EstimateTokens(m Message) int {
 		}
 	}
 	nonCJK := chars - cjk
-	return cjk + (nonCJK+3)/4
+	return cjk + (nonCJK*2+6)/7
 }
 
 // EstimateMessages 估算消息列表总 token。

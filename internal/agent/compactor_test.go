@@ -19,7 +19,7 @@ func buildMsgs(n int) []Message {
 }
 
 func TestEstimateTokens(t *testing.T) {
-	// 中文按字符 1 token，英文按 4 字符 1 token
+	// 中文按字符 1 token，英文按 3.5 字符 1 token（上取整）
 	m := Message{Role: RoleUser, Content: "你好世界"}
 	if got := EstimateTokens(m); got != 4 {
 		t.Errorf("EstimateTokens(你好世界) = %d, want 4", got)
@@ -27,6 +27,16 @@ func TestEstimateTokens(t *testing.T) {
 	m2 := Message{Role: RoleUser, Content: "abc"}
 	if got := EstimateTokens(m2); got != 1 {
 		t.Errorf("EstimateTokens(abc) = %d, want 1", got)
+	}
+	// 40 个 ASCII 字符：4 字符/token 会算成 10（偏低），3.5 应为 12
+	m3 := Message{Role: RoleUser, Content: strings.Repeat("x", 40)}
+	if got := EstimateTokens(m3); got != 12 {
+		t.Errorf("EstimateTokens(40 x) = %d, want 12", got)
+	}
+	// 中英混合：4 中文 + 7 ASCII → 4 + 2 = 6
+	m4 := Message{Role: RoleUser, Content: "你好世界" + strings.Repeat("x", 7)}
+	if got := EstimateTokens(m4); got != 6 {
+		t.Errorf("EstimateTokens(4中文+7x) = %d, want 6", got)
 	}
 }
 
