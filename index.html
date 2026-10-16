@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.5.0</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.5.1</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -140,6 +140,10 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.5.1 · /model 上下键选择器 + 渲染修复</h3>
+          <p>TUI 下 <code>/model</code> 直接弹出模型清单，<strong>↑↓ 选择、Enter 确认</strong>，不再手打模型全名；修复 /help 换行被合并、末尾行丢色（含 <code>[</code> 被当颜色标签）、非法色名导致工具行/状态栏一直是默认色。</p>
+        </div>
         <div class="card">
           <h3>v0.5.0 · 插件启用/禁用/重载 + 记忆双后端</h3>
           <p>新增 <code>/list_plugins</code>、<code>/enable_plugin</code>、<code>/disable_plugin</code>、<code>/reload_plugins</code>，可切换插件后端；内置两个记忆插件——本地 SQLite 版开箱即用，<a href="https://github.com/icefairy/hmem_hermes_agent" target="_blank" rel="noopener">HMEM 服务端版</a>（向量检索 / 反思引擎 / 知识图谱）可与其它 agent 共用一套记忆，默认禁用、一键切换。</p>
