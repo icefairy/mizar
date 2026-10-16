@@ -29,7 +29,7 @@ import (
 // =============================================================================
 
 type chatLine struct {
-	role    string // "system" / "user" / "bot" / "err" / "tool"
+	role    string // "system" / "user" / "bot" / "err" / "tool" / "cmd"
 	content string
 	ts      time.Time
 }
@@ -253,11 +253,19 @@ func (m *tuiModel) renderAllDirect() {
 	}
 	for _, l := range m.lines[start:] {
 		t := l.ts.Format("15:04")
+		// 正文统一 Escape：用户输入/命令输出/模型回复里可能含 [...]，
+		// 不转义会被 tview 当颜色标签吞掉，并把后续内容打回默认色。
+		// 只转义「来自外部的内容」，自己拼的 sgrColor 标签不受影响。
 		switch l.role {
 		case "system":
 			sb.WriteString(l.content + "\n")
+		case "cmd":
+			// 命令输出（/help /config /provider …）：纯文本清单，不是 markdown。
+			// 不走 glamour——它会把多行当段落重排（合并换行）、把 <name> 当 HTML
+			// 标签吃掉、把 _/# 当 markdown 语法，这正是 /help 丢换行的根因。
+			sb.WriteString(sgrColor(m.aiColor, tview.Escape(l.content)) + "\n\n")
 		case "user":
-			sb.WriteString(sgrColor(m.userColor, fmt.Sprintf("▶ [%s] %s", t, l.content)) + "\n\n")
+			sb.WriteString(sgrColor(m.userColor, fmt.Sprintf("▶ [%s] %s", t, tview.Escape(l.content))) + "\n\n")
 		case "bot":
 			sb.WriteString(sgrColor(m.aiColor, fmt.Sprintf("▲ [%s]", t)) + "\n")
 			// 使用 glamour 渲染 Markdown（处理 \n 换行、列表、代码块等）
@@ -266,17 +274,17 @@ func (m *tuiModel) renderAllDirect() {
 			if m.renderer != nil {
 				rendered, err := m.renderer.Render(l.content)
 				if err == nil && rendered != "" {
-					sb.WriteString(sgrColor(m.aiColor, ansi.Strip(rendered)) + "\n\n")
+					sb.WriteString(sgrColor(m.aiColor, tview.Escape(ansi.Strip(rendered))) + "\n\n")
 				} else {
-					sb.WriteString(sgrColor(m.aiColor, l.content) + "\n\n")
+					sb.WriteString(sgrColor(m.aiColor, tview.Escape(l.content)) + "\n\n")
 				}
 			} else {
-				sb.WriteString(sgrColor(m.aiColor, l.content) + "\n\n")
+				sb.WriteString(sgrColor(m.aiColor, tview.Escape(l.content)) + "\n\n")
 			}
 		case "err":
-			sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, l.content)) + "\n")
+			sb.WriteString(sgrColor("red", fmt.Sprintf("✗ [%s] %s", t, tview.Escape(l.content))) + "\n")
 		case "tool":
-			sb.WriteString(sgrColor("cyan", fmt.Sprintf("🔧 [%s] %s", t, l.content)) + "\n")
+			sb.WriteString(sgrColor("teal", fmt.Sprintf("🔧 [%s] %s", t, tview.Escape(l.content))) + "\n")
 		}
 	}
 
@@ -296,8 +304,8 @@ func (m *tuiModel) renderAllDirect() {
 	bashLive, bashOn := m.bashLive, m.bashLiveOn
 	m.bashMu.Unlock()
 	if bashOn && bashLive != "" {
-		sb.WriteString(sgrColor("cyan", "⌛ 命令执行中（实时输出）：\n"))
-		sb.WriteString(sgrColor("cyan", tailLines(bashLive, bashLiveTailLines)))
+		sb.WriteString(sgrColor("teal", "⌛ 命令执行中（实时输出）：\n"))
+		sb.WriteString(sgrColor("teal", tailLines(bashLive, bashLiveTailLines)))
 		sb.WriteString("\n")
 	}
 
@@ -350,20 +358,20 @@ func (m *tuiModel) statusBarDirect() {
 		line := spinnerLines[int(m.spinnerLine.Load())%len(spinnerLines)]
 		secs := int((time.Now().UnixNano() - m.spinnerSet.Load()) / int64(time.Second))
 		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%s %s 已等待 %d 秒 ", frame, line, secs)))
-		sb.WriteString(sgrColor("magenta", "| "))
+		sb.WriteString(sgrColor("fuchsia", "| "))
 	}
 
-	sb.WriteString(sgrColor("magenta", "tokens: "))
+	sb.WriteString(sgrColor("fuchsia", "tokens: "))
 	sb.WriteString(formatTokens(s.CumulativeTotalTokens))
-	sb.WriteString(sgrColor("magenta", "(in:"))
+	sb.WriteString(sgrColor("fuchsia", "(in:"))
 	sb.WriteString(formatTokens(s.CumulativePromptTokens))
-	sb.WriteString(sgrColor("magenta", " out:"))
+	sb.WriteString(sgrColor("fuchsia", " out:"))
 	sb.WriteString(formatTokens(s.CumulativeCompletionTokens))
-	sb.WriteString(sgrColor("magenta", ")"))
+	sb.WriteString(sgrColor("fuchsia", ")"))
 	// 流式回复中：追加本步实时（输入来自 loop 首次分片附带的估算，
 	// 输出为流式 Thinking+Content 实际内容的增量估算；服务端下发 usage 分片后排精确值）
 	if streaming && (streamPromptEst > 0 || havingOut) {
-		sb.WriteString(sgrColor("cyan", fmt.Sprintf(" 本步 in≈%d out≈%d", streamPromptEst, streamOutTok)))
+		sb.WriteString(sgrColor("teal", fmt.Sprintf(" 本步 in≈%d out≈%d", streamPromptEst, streamOutTok)))
 	}
 
 	if a := m.agent; a != nil && a.Compactor != nil {
@@ -383,46 +391,46 @@ func (m *tuiModel) statusBarDirect() {
 			} else if pct > 60 {
 				color = "yellow"
 			}
-			sb.WriteString(sgrColor("magenta", " | "))
+			sb.WriteString(sgrColor("fuchsia", " | "))
 			sb.WriteString(sgrColor(color, fmt.Sprintf("上下文: %.0f%%", pct)))
 		}
 	}
 
 	if s.CumulativeCachedTokens > 0 && s.CumulativePromptTokens > 0 {
 		hit := float64(s.CumulativeCachedTokens) / float64(s.CumulativePromptTokens) * 100
-		sb.WriteString(sgrColor("magenta", " | "))
-		sb.WriteString(sgrColor("magenta", fmt.Sprintf("缓存: %.0f%%", hit)))
+		sb.WriteString(sgrColor("fuchsia", " | "))
+		sb.WriteString(sgrColor("fuchsia", fmt.Sprintf("缓存: %.0f%%", hit)))
 	} else {
-		sb.WriteString(sgrColor("magenta", " | "))
-		sb.WriteString(sgrColor("magenta", "缓存: -"))
+		sb.WriteString(sgrColor("fuchsia", " | "))
+		sb.WriteString(sgrColor("fuchsia", "缓存: -"))
 	}
 
 	// 展示当前模型会话级平滑平均速度（累计输出 / 累计耗时），切换模型时自动清零。
 	if s.ModelAvgTokPerSec > 0 {
-		sb.WriteString(sgrColor("magenta", " | "))
+		sb.WriteString(sgrColor("fuchsia", " | "))
 		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%.0f tok/s", s.ModelAvgTokPerSec)))
 	} else {
-		sb.WriteString(sgrColor("magenta", " | "))
-		sb.WriteString(sgrColor("magenta", ". tok/s"))
+		sb.WriteString(sgrColor("fuchsia", " | "))
+		sb.WriteString(sgrColor("fuchsia", ". tok/s"))
 	}
 
 	level := s.ThinkingLevel
 	if level == "" {
 		level = "auto"
 	}
-	sb.WriteString(sgrColor("magenta", " | "))
+	sb.WriteString(sgrColor("fuchsia", " | "))
 	model := s.ModelName
 	if model == "" {
 		model = m.agent.Model()
 	}
-	sb.WriteString(sgrColor("cyan", model))
+	sb.WriteString(sgrColor("teal", model))
 
-	sb.WriteString(sgrColor("magenta", " | "))
-	sb.WriteString(sgrColor("magenta", "思考: "))
+	sb.WriteString(sgrColor("fuchsia", " | "))
+	sb.WriteString(sgrColor("fuchsia", "思考: "))
 	if level == "off" {
 		sb.WriteString(sgrColor("grey", level))
 	} else {
-		sb.WriteString(sgrColor("magenta", level))
+		sb.WriteString(sgrColor("fuchsia", level))
 	}
 
 	m.statusBar.SetText(sb.String()).SetDynamicColors(true)
@@ -565,7 +573,7 @@ func (m *tuiModel) renderQueue() {
 			content = content[:57] + "..."
 		}
 		sb.WriteString("\n")
-		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%d: %s", i+1, content)))
+		sb.WriteString(sgrColor("yellow", fmt.Sprintf("%d: %s", i+1, tview.Escape(content))))
 		shown++
 	}
 	m.queueView.SetText(sb.String()).SetDynamicColors(true)
@@ -1597,7 +1605,9 @@ func (m *tuiModel) submitInput(s string) {
 					m.addChatLine(chatLine{role: "err", content: result.Err.Error(), ts: time.Now()})
 				}
 				if result.Out != "" {
-					m.addChatLine(chatLine{role: "bot", content: result.Out, ts: time.Now()})
+					// 命令输出是给人看的纯文本清单，不是 markdown：用 cmd 角色
+					// 渲染（保留换行、不重排），见 renderAllDirect 的注释。
+					m.addChatLine(chatLine{role: "cmd", content: result.Out, ts: time.Now()})
 				}
 				prevModel := m.stats.ModelName
 				m.stats.ModelName = m.agent.Model()
