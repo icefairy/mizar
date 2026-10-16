@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.5.1</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.5.2</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -140,6 +140,10 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.5.2 · 工具调用配对修复 + /model 选择器回车修复</h3>
+          <p>修复长会话中途上游报 <code>tool calls and tool results do not match</code>（部分上游严格要求每个工具调用都有结果回应）：纠正提示不再被误标为工具调用，编码层只发出<strong>确实会收到结果的调用</strong>，存量会话无需重建即可续接；修复 <code>/model</code> 选择器<strong>按 Enter 无反应、清单不消失</strong>（按键判断排在发送分支之后被吞掉）。</p>
+        </div>
         <div class="card">
           <h3>v0.5.1 · /model 上下键选择器 + 渲染修复</h3>
           <p>TUI 下 <code>/model</code> 直接弹出模型清单，<strong>↑↓ 选择、Enter 确认</strong>，不再手打模型全名；修复 /help 换行被合并、末尾行丢色（含 <code>[</code> 被当颜色标签）、非法色名导致工具行/状态栏一直是默认色。</p>
