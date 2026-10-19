@@ -11,3 +11,6 @@ sqrt.go
 sqrt_test.go
 throttle.js
 workerpool.go
+
+# 本地临时材料(不纳入版本管理)
+/docs/innovation-*
