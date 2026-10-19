@@ -46,10 +46,11 @@
 
 ### 1. 交互式 TUI
 基于 tview 构建的终端界面，支持：
-- 鼠标滚轮滚动 + 点击不窃取焦点
+- 鼠标滚轮滚动 + 点击不窃取焦点（Windows 下鼠标上报默认关闭，见 `platform_input.go`）
 - 状态栏显示模型名、思考等级等信息
 - 输入框多行编辑 + Tab 自动补全
-- 执行中消息排队，Alt+↑ 取回，PgUp/PgDn 滚动历史
+- 执行中消息排队，Alt+↑ 取回
+- 聊天区翻页：`PgUp`/`PgDn`，vim 风格 `Ctrl+U`/`Ctrl+D`、`Alt+K`/`Alt+J`（上/下 10 行）、`Alt+G`/`Alt+Shift+G`（到顶/底）
 - 流式输出 + 等待进度指示（LLM SSE → Agent 流式回调 → TUI/Server 增量渲染）
 
 ### 2. 内置工具（11+ 个）

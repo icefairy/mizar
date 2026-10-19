@@ -461,6 +461,18 @@ func main() {
 	a.WorkDir = wd
 	// 默认启用弱模型宽容策略：死循环检测 + 解析失败降级 + LLM 故障重试
 	a.Tuner = agent.DefaultTuner()
+	// 完成度自检：模型在待办清单还有未完成项时就说「完成了」结束本轮，
+	// 这里拦一下并注入提醒继续跑（修「没做完就停，必须手打继续」）。
+	// Pending 注入而非在 agent 包里直接读 builtins，避免双向依赖。
+	a.Completeness = agent.NewCompletenessGate(func() []string {
+		var pending []string
+		for _, t := range builtins.PiTodoList() {
+			if !t.Done {
+				pending = append(pending, t.Text)
+			}
+		}
+		return pending
+	})
 	// 从配置读取重试参数（0 = 保持默认）
 	if cfg, err := config.Load(config.DefaultPath()); err == nil {
 		a.Tuner.WithRetryConfig(cfg.RetryMaxRetries, cfg.RetryBaseDelayMs)

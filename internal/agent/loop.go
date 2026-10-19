@@ -127,6 +127,12 @@ type Agent struct {
 	BgReview     *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
 	StatsData    *StatsDataRef     // 会话统计（nil = 不启用）
 
+	// Completeness 完成度自检闸门（nil = 不启用）。
+	// 解决的问题：reply 在循环里语义写死为「任务结束」，模型只要说一句话就结束本轮，
+	// 于是「干了一半、说句『好，接下来…』」= 任务静默停止，用户必须手打「继续」。
+	// 闸门只在存在客观未完成项（待办清单）时拦一下，注入提醒后继续跑。
+	Completeness *CompletenessGate
+
 	// CurrentTask 最近/正在执行的任务（Run 开始时记录）。
 	// 为何需要：a.Initial 只在 Run 结束后才追加本次对话，因此运行中执行
 	// /handoff 时无从得知「当前在做什么」——而交接文档最该写的恰恰是这个。
@@ -310,6 +316,12 @@ const replyFormatSection = `
 - 要动手就先把当前这一步的工具调用发出去（可在同一轮先写一句说明）；
 - respond 只用于：回答提问、或**任务真的已完成**时交付结果；
 - 多步骤/长时间任务：持续调工具直到真正做完，不要逐步汇报、不要等用户催。
+
+## 多步骤任务先列待办
+任务需要 3 步以上、或会跨多轮工具调用时，**先用 todo 工具把步骤写下来**（action=add），
+每完成一步就 toggle 掉；收尾前用 action=list 核对一遍。
+为什么必须这样做：系统会在你调用 respond 收尾时核对待办清单，只要还有未完成项，
+这次收尾会被拦下并提醒你继续——“干到一半就说做完了”是最常见的失败模式。
 `
 
 // SystemPrompt 构建三层系统提示：stable（identity+基础指令）→ context（SOUL+AGENTS+工作目录）→ volatile（工具+插件）。
@@ -458,6 +470,9 @@ func (a *Agent) Run(task string) (string, error) {
 	}
 	if a.Guard != nil {
 		a.Guard.Reset()
+	}
+	if a.Completeness != nil {
+		a.Completeness.Reset()
 	}
 	q := lifecycle.NewQuery("cli")
 	runCtx := &HookContext{
@@ -681,6 +696,20 @@ func (a *Agent) Run(task string) (string, error) {
 		}
 
 		if req.Action == "reply" {
+			// 完成度自检：模型声称收尾但存在客观未完成项（待办清单里的未完成项）时，
+			// 不把回复当终点，而是注入提醒让它继续——修「明明没做完就停了，
+			// 必须用户手打『继续』」这个结构性问题（reply 与「结束任务」是同一个动作位）。
+			if a.Completeness != nil {
+				if nudge, stop := a.Completeness.ShouldContinue(); stop {
+					diag.Logf("agent", "完成度闸门拦下收尾: step=%d 未完成项=%d", qc.Step, strings.Count(nudge, "\n- "))
+					a.log("%s", q.FormatLog("completeness_nudge", "step=", fmt.Sprintf("%d", qc.Step)))
+					msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
+					msgs = append(msgs, Message{Role: RoleUser, Content: nudge})
+					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+					step++
+					continue
+				}
+			}
 			q.Complete(nil)
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
 			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text}, a.logf)

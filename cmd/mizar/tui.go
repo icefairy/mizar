@@ -1197,29 +1197,46 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			m.renderQueue()
 			return nil
 		}
+		// vim 风格滚动聊天历史（统一走 scrollChat）
+		//   Ctrl+U / Ctrl+Y / Alt+K  上滚 10 行
+		//   Ctrl+D / Alt+J           下滚 10 行
+		//   Alt+G / Alt+Shift+G      跳到顶部 / 底部（Shift+G 即大写 G）
+		// 为什么不做裸 gg：g 是常用字母，吞掉首个 g 会让「git/google…」少一个键，
+		// 而不吞又无法区分 gg 与普通文本，得不偿失，改用无歧义的 Alt+G。
+		if event.Key() == tcell.KeyCtrlU || event.Key() == tcell.KeyCtrlY {
+			m.scrollChat(-10)
+			return nil
+		}
+		if event.Key() == tcell.KeyCtrlD {
+			m.scrollChat(10)
+			return nil
+		}
+		if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModAlt != 0 {
+			switch event.Rune() {
+			case 'k':
+				m.scrollChat(-10)
+				return nil
+			case 'j':
+				m.scrollChat(10)
+				return nil
+			case 'g':
+				m.scrollChat(-1 << 20)
+				return nil
+			case 'G':
+				m.scrollChat(1 << 20)
+				return nil
+			}
+		}
+
 		// PgUp/PgDn 滚动聊天历史
 		if event.Key() == tcell.KeyPgUp {
-			m.userScrolledUp = true
-			row, _ := m.textView.GetScrollOffset()
-			if row >= 10 {
-				m.textView.ScrollTo(row-10, 0)
-			} else {
-				m.textView.ScrollToBeginning()
-			}
+			m.scrollChat(-10)
 			return nil
 		}
 		if event.Key() == tcell.KeyPgDn {
-			row, _ := m.textView.GetScrollOffset()
-			total := m.textView.GetWrappedLineCount()
-			if row+10 < total {
-				m.textView.ScrollTo(row+10, 0)
-			} else {
-				m.userScrolledUp = false
-				m.textView.ScrollToEnd()
-			}
+			m.scrollChat(10)
 			return nil
 		}
-
 		// ---- 拷贝模式与剪贴板快捷键（Alt 系，避免与输入文本冲突） ----
 		// Alt+L：一键复制最近一条 AI 回复到剪贴板
 		if event.Key() == tcell.KeyRune && event.Rune() == 'l' && event.Modifiers()&tcell.ModAlt != 0 {
@@ -1259,9 +1276,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 				m.copyMove(-1)
 			case event.Key() == tcell.KeyDown:
 				m.copyMove(1)
-			case event.Key() == tcell.KeyPgUp:
+			case event.Key() == tcell.KeyPgUp, event.Key() == tcell.KeyCtrlU:
 				m.copyMove(-10)
-			case event.Key() == tcell.KeyPgDn:
+			case event.Key() == tcell.KeyPgDn, event.Key() == tcell.KeyCtrlD:
 				m.copyMove(10)
 			case event.Key() == tcell.KeyEnd:
 				m.copyMoveToEnd()
@@ -1690,6 +1707,29 @@ func (m *tuiModel) Run() error {
 	return err
 }
 
+// scrollChat 按行滚动聊天区：delta>0 向下、delta<0 向上；量级足够大时等价于跳到底/顶。
+// 所有滚动键位（PgUp/PgDn、Ctrl+U/D、Alt+K/J、gg/G）统一走这里，避免多份偏移逻辑。
+// userScrolledUp 的语义：向上滚不改变它（可能本来就在翻历史），滚到底则恢复自动跟随。
+func (m *tuiModel) scrollChat(delta int) {
+	row, _ := m.textView.GetScrollOffset()
+	total := m.textView.GetWrappedLineCount()
+	if delta < 0 {
+		m.userScrolledUp = true
+		if row+delta < 0 {
+			m.textView.ScrollToBeginning()
+			return
+		}
+		m.textView.ScrollTo(row+delta, 0)
+		return
+	}
+	if row+delta >= total {
+		m.userScrolledUp = false
+		m.textView.ScrollToEnd()
+		return
+	}
+	m.textView.ScrollTo(row+delta, 0)
+}
+
 // =============================================================================
 // 拷贝模式（任意区域选择复制）
 //
@@ -1698,9 +1738,9 @@ func (m *tuiModel) Run() error {
 // 成可滚动的选择视图，用键盘移动光标标记选区，复制到剪贴板（内部缓冲 + OSC52 + X11）。
 //
 // 键位：
-//   Alt+C           进入/退出拷贝模式
-//   ↑/↓             移动光标 / 扩展选区
-//   PgUp/PgDn       大范围移动
+//   Alt+C                 进入/退出拷贝模式
+//   ↑/↓                   移动光标 / 扩展选区
+//   PgUp/PgDn、Ctrl+U/D   大范围移动
 //   v 或 空格        标记选区起点（再次按＝取消选区）
 //   y               复制选中文本到剪贴板
 //   q 或 Esc         退出

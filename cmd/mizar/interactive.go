@@ -36,12 +36,23 @@ func banner() string {
   ◆ TUI 模式：Enter 发送 / Alt+Enter 换行 / Esc 取消 / Ctrl+T 思考等级
   ◆ 复制粘贴：Alt+C 拷贝模式(任意区域) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+V/右键粘贴
   ◆ 命令行模式：Enter 发送 ｜ 多行粘贴自动合并 ｜ /send 手动提交
-  ◆ 鼠标：Shift+拖拽 选择复制 ｜ 滚轮滚动 ｜ PgUp/PgDn 翻页
-`, version)
+%s`, version, scrollHint())
 	if startupHint != "" {
 		b += startupHint + "\n"
 	}
 	return b
+}
+
+// scrollHint 生成「怎么看已经滚上去的内容」提示行。
+// 鼠标是否可用随平台不同（Windows 下鼠标上报被主动关闭，见 platform_input.go），
+// 提示行必须跟着变，否则 Windows 用户会以为滚轮只是刚好坏了。
+func scrollHint() string {
+	scroll := "  ◆ 翻页：PgUp/PgDn ｜ vim 风格 Ctrl+U/Ctrl+D、Alt+K/Alt+J 上/下 10 行，Alt+G/Alt+Shift+G 到顶/底\n"
+	if shouldEnableMouse() {
+		return scroll + "  ◆ 鼠标：Shift+拖拽 选择复制 ｜ 滚轮滚动 ｜ PgUp/PgDn 翻页\n"
+	}
+	return scroll + "  ◆ 鼠标：本平台滚轮不用于滚动（ConPTY 会把它误编码成字符，故禁用鼠标上报）；" +
+		"复制改用终端原生拖选 + Ctrl+Shift+C/V，或 Alt+C 拷贝模式\n"
 }
 
 // interactive 运行交互式对话（readline 支持：退格删除 / 历史上下键 / Tab 补全）。
