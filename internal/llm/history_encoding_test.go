@@ -97,13 +97,18 @@ func TestEncodedJSONShape(t *testing.T) {
 
 // 旧会话（无 ToolCalls 字段）必须能回退：从 ToolName/ToolArgs 还原，
 // 保证历史会话仍可用，不会因为缺字段而丢上下文。
+// 结果侧同样无 ToolCallID（旧格式），按出现顺序回退配对。
 func TestEncodeMessagesFallbackForLegacySession(t *testing.T) {
 	msgs := []agent.Message{
 		{Role: agent.RoleAssistant, Kind: agent.KindToolCall, ToolName: "bash", ToolArgs: `{"command":"ls"}`,
 			Content: `{"action":"tool","tool":"bash","args":"{\"command\":\"ls\"}"}`},
+		{Role: agent.RoleUser, Kind: agent.KindToolResult,
+			Content: `工具结果: {"tool_name":"bash","output":"a b"}`},
 		// 旧数据可能连 ToolName 都没有，只有 Content 里的 JSON
 		{Role: agent.RoleAssistant, Kind: agent.KindToolCall,
 			Content: `{"action":"tool","tool":"read","args":"{\"path\":\"y\"}"}`},
+		{Role: agent.RoleUser, Kind: agent.KindToolResult,
+			Content: `工具结果: {"tool_name":"read","output":"body"}`},
 	}
 	got := encodeMessages(msgs)
 	if len(got[0].ToolCalls) != 1 || got[0].ToolCalls[0].Function.Name != "bash" {
@@ -112,8 +117,14 @@ func TestEncodeMessagesFallbackForLegacySession(t *testing.T) {
 	if got[0].ToolCalls[0].ID == "" {
 		t.Fatal("回退生成的调用必须有合成 ID（供 tool 结果配对）")
 	}
-	if len(got[1].ToolCalls) != 1 || got[1].ToolCalls[0].Function.Name != "read" {
-		t.Fatalf("应从 Content JSON 回退: %+v", got[1].ToolCalls)
+	if got[1].Role != "tool" || got[1].ToolCallID != got[0].ToolCalls[0].ID {
+		t.Fatalf("旧格式结果应按顺序配对回退: %+v", got[1])
+	}
+	if len(got[2].ToolCalls) != 1 || got[2].ToolCalls[0].Function.Name != "read" {
+		t.Fatalf("应从 Content JSON 回退: %+v", got[2].ToolCalls)
+	}
+	if got[3].Role != "tool" || got[3].ToolCallID != got[2].ToolCalls[0].ID {
+		t.Fatalf("第二条旧格式结果也应配对: %+v", got[3])
 	}
 }
 

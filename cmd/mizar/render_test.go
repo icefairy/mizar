@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -146,11 +147,19 @@ func TestUserAndToolTextEscapeBrackets(t *testing.T) {
 	if !strings.Contains(text, "[config]") || !strings.Contains(text, "[plugins.toml]") {
 		t.Fatalf("方括号内容应原样显示:\n%s", text)
 	}
-	// 第 1 行 user 色（默认 white）、第 2 行 tool 色（cyan=teal），一行都不能丢
+	// 第 1 行 user 色（默认 white）、第 2 行 tool 色（cyan=teal），一行都不能丢。
+	// ⚠ 必须按行号升序取色：drawAndRowColors 返回 map，直接 range 的顺序随机
+	// （曾偶发把 tool 的 teal 当成第 0 行颜色而误报）。
 	want := []tcell.Color{tcell.ColorWhite, tcell.ColorTeal}
-	got := []tcell.Color{}
-	for _, fg := range drawAndRowColors(t, m) {
-		got = append(got, fg)
+	rows := drawAndRowColors(t, m)
+	keys := make([]int, 0, len(rows))
+	for row := range rows {
+		keys = append(keys, row)
+	}
+	slices.Sort(keys)
+	got := make([]tcell.Color, 0, len(keys))
+	for _, row := range keys {
+		got = append(got, rows[row])
 	}
 	if len(got) != len(want) {
 		t.Fatalf("可见行数 = %d, want %d:\n%s", len(got), len(want), text)
