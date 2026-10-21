@@ -256,11 +256,27 @@
   }
   function turnHost() { return turnEl || log; }
   function scrollLog() { log.scrollTop = log.scrollHeight; }
-  function addUserMsg(text) {
+  // 消息时间：RFC3339 → HH:MM（跨天带日期），解析失败则原样展示
+  function fmtTs(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts);
+    const pad = (n) => String(n).padStart(2, "0");
+    const hm = pad(d.getHours()) + ":" + pad(d.getMinutes());
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    return sameDay ? hm : (pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + hm);
+  }
+  // 构建 who 行（角色名 + 可选时间）
+  function whoHtml(name, ts) {
+    const t = fmtTs(ts);
+    return '<div class="who">' + esc(name) + (t ? '<span class="ts">' + esc(t) + '</span>' : '') + '</div>';
+  }
+  function addUserMsg(text, ts) {
     const wrap = document.createElement("div");
     wrap.className = "msg user";
     wrap.__raw = text == null ? "" : String(text);
-    wrap.innerHTML = '<div class="who">我</div><div class="body"></div>' +
+    wrap.innerHTML = whoHtml("我", ts) + '<div class="body"></div>' +
       '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
     wrap.querySelector(".body").textContent = wrap.__raw;
     turnHost().appendChild(wrap);
@@ -270,12 +286,12 @@
   // bumpProc 已改为空操作：步骤直接累加进答复框 .steps，不再独立计数展示
   function bumpProc() {}
   // 确保最终答复气泡存在：body 内含 steps（过程步骤）+ text（markdown 正文），两者独立容器避免互相覆盖
-  function ensureReply() {
+  function ensureReply(ts) {
     if (streamBody) return streamBody;
     const wrap = document.createElement("div");
     wrap.className = "msg assistant";
     wrap.__raw = "";
-    wrap.innerHTML = '<div class="who">开阳</div><div class="body">' +
+    wrap.innerHTML = whoHtml("开阳", ts) + '<div class="body">' +
       '<div class="steps"></div><div class="text"></div></div>' +
       '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
     turnHost().appendChild(wrap);
@@ -432,11 +448,11 @@
       msgs.forEach((m) => {
         if (m.role === "user") {
           newTurn();
-          addUserMsg(m.content);
+          addUserMsg(m.content, m.ts);
           curTurn = turnEl;
         } else if (m.role === "assistant") {
           if (!curTurn) { newTurn(); curTurn = turnEl; }
-          const textEl = ensureReply();
+          const textEl = ensureReply(m.ts);
           const wrap = textEl.parentElement.parentElement;
           wrap.__raw = m.content;
           textEl.innerHTML = md(m.content);

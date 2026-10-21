@@ -1,5 +1,7 @@
 package agent
 
+import "time"
+
 // 消息角色（与 OpenAI 协议对齐，但工具结果用 Kind 区分——我们使用文本 JSON 调用协议，
 // 不依赖原生 tool role；用 Kind 标记是为了压缩切点识别与缓存前缀管理）。
 const (
@@ -39,6 +41,24 @@ type Message struct {
 	ToolCalls []ToolCallRef `json:"toolCalls,omitempty"`
 	// ToolCallID 工具结果所属的调用 ID（KindToolResult 时用于配对）。
 	ToolCallID string `json:"toolCallId,omitempty"`
+
+	// Timestamp 消息创建时间（RFC3339，毫秒精度）。
+	// 由 session.Store.Append 落盘时自动补写（未设置才填），
+	// 因此内存中的 Initial 内容（会被回灌给 LLM）保持干净——这里刻意不做
+	// json:"-"：它是一个持久化字段，只是不进 LLM 请求编码。
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+// nowTimestamp 返回当前时间的 RFC3339 毫秒串（本地时区）。
+func nowTimestamp() string { return time.Now().Format("2006-01-02T15:04:05.000-07:00") }
+
+// EnsureTimestamp 未设置时间戳时补写当前时间，返回是否发生写入。
+func (m *Message) EnsureTimestamp() bool {
+	if m.Timestamp != "" {
+		return false
+	}
+	m.Timestamp = nowTimestamp()
+	return true
 }
 
 // ToolCallRef 一次工具调用的引用（对应 OpenAI tool_calls[] 的 id/name/arguments）。
