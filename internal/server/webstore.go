@@ -19,6 +19,8 @@ import (
 type convMessage struct {
 	Role    string `json:"role"` // user | assistant
 	Content string `json:"content"`
+	// Ts 消息时间（RFC3339）。旧数据为空，加载时继承 createdAt 兼容。
+	Ts string `json:"ts,omitempty"`
 }
 
 // conversation 一个独立会话。
@@ -71,6 +73,14 @@ func (s *webStore) load() {
 	s.Convs = tmp.Convs
 	if tmp.Set != nil {
 		s.Set = tmp.Set
+	}
+	// 兼容旧数据：历史消息无时间戳时继承会话创建时间，避免界面出现空时间。
+	for _, c := range s.Convs {
+		for i := range c.Messages {
+			if c.Messages[i].Ts == "" && !c.CreatedAt.IsZero() {
+				c.Messages[i].Ts = c.CreatedAt.Format(time.RFC3339)
+			}
+		}
 	}
 }
 
@@ -164,6 +174,9 @@ func (s *webStore) appendMsg(id string, m convMessage) {
 	defer s.mu.Unlock()
 	for _, c := range s.Convs {
 		if c.ID == id {
+			if m.Ts == "" {
+				m.Ts = time.Now().Format(time.RFC3339)
+			}
 			c.Messages = append(c.Messages, m)
 			c.UpdatedAt = time.Now()
 			if m.Role == "user" && (c.Title == "新会话" || c.Title == "") {

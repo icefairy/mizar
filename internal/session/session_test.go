@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mizar/internal/agent"
 )
@@ -27,6 +28,38 @@ func TestSessionAppendAndLoad(t *testing.T) {
 	}
 	if msgs[0].Content != "你好" || msgs[1].Role != agent.RoleAssistant {
 		t.Fatalf("msgs: %+v", msgs)
+	}
+}
+
+func TestSessionAppendWritesTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	// 调用方不关心时间戳：Append 自动补写
+	if err := s.Append("ts", agent.Message{Role: agent.RoleUser, Content: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := s.Load("ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Timestamp == "" {
+		t.Fatalf("expected timestamp, got %+v", msgs)
+	}
+	if _, err := time.Parse(time.RFC3339, msgs[0].Timestamp); err != nil {
+		t.Fatalf("timestamp not RFC3339: %q (%v)", msgs[0].Timestamp, err)
+	}
+}
+
+func TestSessionAppendKeepsGivenTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	fixed := "2020-01-02T03:04:05.000+08:00"
+	if err := s.Append("ts2", agent.Message{Role: agent.RoleUser, Content: "hi", Timestamp: fixed}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := s.Load("ts2")
+	if len(msgs) != 1 || msgs[0].Timestamp != fixed {
+		t.Fatalf("timestamp overwritten: %+v", msgs)
 	}
 }
 

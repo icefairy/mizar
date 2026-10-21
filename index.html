@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.5.2</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.5.3</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -133,6 +133,7 @@
         <div class="card"><h3>🌐 Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 三种接入方式，另含浏览器 Web UI 与管理接口。API 详见 <a href="docs/api.md">docs/api.md</a>。</p></div>
         <div class="card"><h3>🖥️ Web UI</h3><p>内嵌式浏览器界面：多会话管理、模型/参数设置、流式输出、暗黑主题、完整 Markdown 渲染（表格/代码块/任务列表）；Agent 过程默认折叠分组，回复一目了然。</p></div>
         <div class="card"><h3>📦 内置插件与技能</h3><p>常用插件（数据库增删改查、图片识别）与技能（交接、记忆、数据库）随二进制发布，首次运行自动释放到 <code>~/.mizar</code>，只补缺不覆盖。</p></div>
+        <div class="card"><h3>⏱️ 时间感知</h3><p>会话消息自带时间戳；每轮注入当前实时时间，隔超 1 小时再续接时显式提示「已过去多久」，模型不再把隔天对话当成刚聊完，自动重新核实文件/进程状态。</p></div>
         <div class="card"><h3>🔍 诊断日志</h3><p>关键事件落盘 <code>~/.mizar/logs</code>（TUI/Agent/LLM/panic），三步定位「任务莫名中止/卡死」：看 RUN 边界、ESC 取消、finish_reason。</p></div>
       </div>
     </section>
@@ -140,6 +141,10 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.5.3 · 时间感知 + 消息时间戳</h3>
+          <p>会话文件每条消息带 <code>timestamp</code>；模型现在能知道<strong>两轮对话间隔了多久</strong>——每轮注入当前实时时间，隔超 1 小时再续接时显式提示「已过去 3 天 2 小时」，并提示不要假定上下文连贯、涉及时效先重新核实。<strong>隔天回来接着聊，不再被当成刚才的连续对话。</strong></p>
+        </div>
         <div class="card">
           <h3>v0.5.2 · 工具调用配对修复 + /model 选择器回车修复</h3>
           <p>修复长会话中途上游报 <code>tool calls and tool results do not match</code>（部分上游严格要求每个工具调用都有结果回应）：纠正提示不再被误标为工具调用，编码层只发出<strong>确实会收到结果的调用</strong>，存量会话无需重建即可续接；修复 <code>/model</code> 选择器<strong>按 Enter 无反应、清单不消失</strong>（按键判断排在发送分支之后被吞掉）。</p>

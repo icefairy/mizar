@@ -66,6 +66,8 @@ func (s *Store) Append(id string, msg agent.Message) error {
 		return err
 	}
 	defer f.Close()
+	// 落盘时补写时间戳（未设置才填）：所有调用方无需关心，单条消息一个时间点。
+	msg.EnsureTimestamp()
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return err

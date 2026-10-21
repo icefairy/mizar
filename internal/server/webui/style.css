@@ -138,6 +138,7 @@ button { font-family: inherit; cursor: pointer; }
 .turn { display: flex; flex-direction: column; gap: 8px; }
 .msg { display: flex; flex-direction: column; max-width: 78%; }
 .msg .who { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; padding: 0 4px; }
+.msg .who .ts { margin-left: 8px; opacity: .75; font-variant-numeric: tabular-nums; }
 /* 我（用户）→ 靠右；开阳（AI）→ 靠左 */
 .msg.user { align-self: flex-end; align-items: flex-end; }
 .msg.assistant, .msg.sys, .msg.tool, .msg.error { align-self: flex-start; align-items: flex-start; }
