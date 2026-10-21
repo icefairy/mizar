@@ -469,6 +469,17 @@ func (a *Agent) Run(task string) (string, error) {
 	msgs := []Message{
 		{Role: RoleSystem, Content: a.SystemPrompt()},
 	}
+	// 时间感知：历史消息可能隔了几天（用户随时回来继续）。
+	// ① 每轮都告知当前实时时间，避免模型用旧上下文推断“现在”；
+	// ② 距上一条消息超过阈值时插一条时间提示，显式打破“上下文连贯”的错觉。
+	// 两者都作为增量追加在 system 之后 / 历史之前，不污染 Initial（调用方后续仍会追加消息），
+	// 也保留 system 前缀缓存（只动其后的内容）。
+	if tc := TimeContext(nowTimestamp()); tc != "" {
+		msgs = append(msgs, Message{Role: RoleSystem, Content: tc})
+	}
+	if notice := HistoryTimeNotice(a.Initial, TimeNow()); notice != "" {
+		msgs = append(msgs, Message{Role: RoleUser, Kind: KindSummary, Content: "【时间提示】" + notice})
+	}
 	msgs = append(msgs, a.Initial...)
 	msgs = append(msgs, Message{Role: RoleUser, Content: task})
 	// 标记人类直接消息（用于 goal create/edit/pause/resume 权限校验）

@@ -55,9 +55,10 @@ func TestHooksLLMRequestCanModifyMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// system + task + 注入 = 3
-	if got != 3 {
-		t.Fatalf("llm saw %d messages, want 3 (hook injection)", got)
+	// system + 时间感知 system + task + 注入 = 4
+	// （第二条 system 是 Run 注入的「当前实时时间」，见 loop.go 时间感知段）
+	if got != 4 {
+		t.Fatalf("llm saw %d messages, want 4 (hook injection)", got)
 	}
 }
 
