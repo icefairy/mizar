@@ -148,6 +148,14 @@ type Agent struct {
 	// 典型用途：TUI/CLI 把工具调用+结果持久化到会话文件，会话恢复后模型能看到之前试过什么。
 	OnToolExchange func(tool, args, reason, out string, err error)
 
+	// OnCompact 可选：会话压缩成功后回调（供调用方持久化压缩记录）。
+	// summary 为生成的摘要文本；droppedCount 是被摘要掉的消息条数（按会话消息计数，
+	// 不含 system 前缀与时间提示）；tokensBefore 为压缩前估算。
+	//
+	// 调用方应把它作为一条追加记录落盘（不改写历史），下次 Load 时重建为
+	// 「summary + 保留范围」—— 对齐 pi 的 CompactionEntry，避免跨进程丢失压缩成果。
+	OnCompact func(summary string, droppedCount, tokensBefore int)
+
 	// 工具调用解析策略
 	callParser func(text string) (*callRequest, error)
 
@@ -158,6 +166,19 @@ type Agent struct {
 
 	// cacheStats 系统提示词缓存命中率统计
 	cacheStats *CacheStats
+
+	// 自愈（上下文溢出应急裁剪）状态，随每次 Run 重置。
+	// emergencyAttempts 已尝试的递进档数；lastEmergencyPct 最后一档的裁剪比例。
+	// 供调用方（TUI/CLI）在 Run 结束后落盘降级记录。
+	emergencyAttempts int
+	lastEmergencyPct  int
+	// overflowCount 本次 Run 内累计的上下文溢出次数，用于推进三级降级策略。
+	overflowCount int
+
+	// OnEmergencyTrim 可选：应急裁剪发生时的回调（供调用方持久化降级记录）。
+	// pct 为裁剪比例，keptMsgs 为裁剪后保留的消息数。
+	// 持久化后，用户退出再进入会直接以裁剪后的上下文开始，不用重新撞 400。
+	OnEmergencyTrim func(pct, keptMsgs int)
 
 	// 快速插入（steer/abort，见 steer.go）
 	steerMu  sync.Mutex // 保护 steer 槽位
@@ -459,6 +480,10 @@ func (a *Agent) Run(task string) (string, error) {
 	if a.Guard != nil {
 		a.Guard.Reset()
 	}
+	// 重置自愈状态：每次 Run 重新计数递进档位。
+	a.emergencyAttempts = 0
+	a.lastEmergencyPct = 0
+	a.overflowCount = 0
 	q := lifecycle.NewQuery("cli")
 	runCtx := &HookContext{
 		RunID:     string(q.QueryID()),
@@ -481,6 +506,9 @@ func (a *Agent) Run(task string) (string, error) {
 		msgs = append(msgs, Message{Role: RoleUser, Kind: KindSummary, Content: "【时间提示】" + notice})
 	}
 	msgs = append(msgs, a.Initial...)
+	// histLen 记录「会话消息」在 msgs 中的结束位置（前缀 + Initial 之后），
+	// 供压缩回调把切点换算成会话消息条数。
+	histEnd := len(msgs)
 	msgs = append(msgs, Message{Role: RoleUser, Content: task})
 	// 标记人类直接消息（用于 goal create/edit/pause/resume 权限校验）
 	if a.GoalService != nil {
@@ -533,12 +561,26 @@ func (a *Agent) Run(task string) (string, error) {
 			if a.Compactor.ShouldCompact(est) {
 				a.log("%s", q.FormatLog("compact", "est=", fmt.Sprintf("%d", est), " step=", fmt.Sprintf("%d", qc.Step)))
 				a.Hooks.fireCompactionBefore(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, EstTokens: est, Messages: msgs}, a.logf)
+				// 先算切点（纯函数，与 Compact 内部一致），供落盘记录保留边界。
+				cut := a.Compactor.FindCutPoint(msgs)
 				var err error
 				msgs, err = a.Compactor.Compact(msgs)
 				if err != nil {
 					a.log("%s", q.FormatLog("compact_fail", "err=", err.Error()))
 				} else {
 					a.log("%s", q.FormatLog("compact", "result=", fmt.Sprintf("%d msgs, %d tokens", len(msgs), EstimateMessages(msgs))))
+					// 真正瘦身了才落盘压缩记录（cut<=0 时 Compact 原样返回，不算压缩）。
+					if a.OnCompact != nil && cut > 0 && len(msgs) > 0 {
+						// cut 是 msgs 下标；换算成「被摘要掉的会话消息条数」：
+						// 只有落在会话消息区间（≤histEnd）的部分才计入文件位置。
+						dropped := cut
+						if dropped > histEnd {
+							dropped = histEnd
+						}
+						if dropped > 0 {
+							a.OnCompact(summaryOf(msgs), dropped, est)
+						}
+					}
 				}
 				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Compacted: true, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
 			}
@@ -611,25 +653,51 @@ func (a *Agent) Run(task string) (string, error) {
 			// 曾导致「服务端说 500K、本地估算才 100K」→ 不压缩 → 任务直接失败。
 			if isContextOverflow(llmErr) {
 				a.log("%s", q.FormatLog("llm_overflow", "err=", truncate(llmErr.Error(), 100)))
+				a.overflowCount++
 				if a.Compactor != nil {
 					est := EstimateMessages(msgs)
-					a.log("%s", q.FormatLog("compact_force", "est=", fmt.Sprintf("%d", est)))
-					// 强制压缩：保留最近约一半（KeepRecentTokens/2），摘要输入超限自动降级。
-					msgs2, compErr := a.Compactor.CompactForce(msgs, a.Compactor.KeepRecentTokens/2)
-					if compErr == nil && len(msgs2) < len(msgs) {
-						msgs = msgs2
-						a.log("%s", q.FormatLog("compact_force_result", "msgs=", fmt.Sprintf("%d", len(msgs))))
-						continue // 压缩后继续下一轮 LLM 调用
+					// 三级降级，按「同一轮 Run 内的溢出次数」推进，避免第一步反复
+					// continue 成功但实际仍超限、导致后面更狠的手段永远轮不到：
+					//   第 1 次溢出 → 强制压缩（保留最近约一半）
+					//   第 2 次溢出 → 按窗口 1/4 硬截断
+					//   第 3 次起   → 递进自愈 10%/20%/40%/60%
+					if a.overflowCount == 1 {
+						a.log("%s", q.FormatLog("compact_force", "est=", fmt.Sprintf("%d", est)))
+						msgs2, compErr := a.Compactor.CompactForce(msgs, a.Compactor.KeepRecentTokens/2)
+						if compErr == nil && len(msgs2) < len(msgs) {
+							msgs = msgs2
+							a.log("%s", q.FormatLog("compact_force_result", "msgs=", fmt.Sprintf("%d", len(msgs))))
+							continue
+						}
+						if compErr != nil {
+							a.log("%s", q.FormatLog("compact_force_fail", "err=", compErr.Error()))
+						}
+					} else if a.overflowCount == 2 {
+						if tr := hardTrimOnOverflow(msgs, a.Compactor.ContextWindow/4); len(tr) < len(msgs) {
+							msgs = tr
+							a.log("%s", q.FormatLog("compact_hardtrim", "msgs=", fmt.Sprintf("%d", len(msgs))))
+							continue
+						}
 					}
-					if compErr != nil {
-						a.log("%s", q.FormatLog("compact_force_fail", "err=", compErr.Error()))
-					}
-					// 兜底：压缩失败或未瘦身时，仍按预算硬截断（丢弃最早消息），
-					// 至少让请求变小，避免直接失败。
-					if tr := hardTrimOnOverflow(msgs, a.Compactor.ContextWindow/4); len(tr) < len(msgs) {
-						msgs = tr
-						a.log("%s", q.FormatLog("compact_hardtrim", "msgs=", fmt.Sprintf("%d", len(msgs))))
-						continue
+				}
+				// 自愈：压缩与硬截断都没解决问题（典型场景：context_window 配得比模型
+				// 真实上限大，本地估算无从判断），逐步递进裁剪后重试。
+				// 步长 10% → 20% → 40% → 60%，每试一档重发一次请求。
+				steps := emergencyTrimSteps()
+				if a.emergencyAttempts < len(steps) {
+					pct := steps[a.emergencyAttempts]
+					a.emergencyAttempts++
+					trimmed := emergencyTrim(msgs, pct)
+					if EmergencyChanged(msgs, trimmed) {
+						msgs = trimmed
+						a.lastEmergencyPct = pct
+						a.log("%s", q.FormatLog("emergency_trim",
+							"pct=", fmt.Sprintf("%d", pct),
+							"msgs=", fmt.Sprintf("%d", len(msgs)),
+							"est=", fmt.Sprintf("%d", EstimateMessages(msgs))))
+						// 告知用户：已进入降级模式（不能静默“失忆”）。
+						a.notifyEmergency(pct, len(msgs))
+						continue // 裁剪后重试
 					}
 				}
 				// 无压缩器：当作普通错误处理
@@ -949,6 +1017,17 @@ func summaryOf(msgs []Message) string {
 }
 
 // logf 适配 fire 挂载点的日志回调签名。
+// notifyEmergency 应急裁剪的用户可见提示（日志 + 回调）。
+//
+// 不能静默裁剪：模型对旧对话“失忆”必须让用户知道，否则会以为 agent 出了 bug。
+func (a *Agent) notifyEmergency(pct, keptMsgs int) {
+	msg := fmt.Sprintf("⚠ 上下文超限：已临时裁剪 %d%% 历史消息（保留 %d 条），原始记录仍完整保存在会话文件中", pct, keptMsgs)
+	a.logf(msg)
+	if a.OnEmergencyTrim != nil {
+		a.OnEmergencyTrim(pct, keptMsgs)
+	}
+}
+
 func (a *Agent) logf(msg string) {
 	a.log("%s", msg)
 }
@@ -1443,6 +1522,97 @@ func isContextOverflow(err error) bool {
 		strings.Contains(s, "context length") ||
 		strings.Contains(s, "超出上下文") ||
 		strings.Contains(s, "上下文溢出")
+}
+
+// emergencyTrimSteps 递进裁剪的步长（%，每次尝试一档）。
+// 递进而非累加：第 4 次尝试直接砍 60%，覆盖「窗口设错得离谱」的场景。
+func emergencyTrimSteps() []int {
+	return []int{10, 20, 40, 60}
+}
+
+// hugeToolResultTokens 超大工具结果的阈值：超过即优先剔除。
+// 工具输出常是几十 KB 的日志/JSON，一条顶几十条聊天，按条数裁剪既低效又伤对话连贯。
+const hugeToolResultTokens = 4000
+
+// emergencyTrim 上下文溢出时的应急裁剪（自愈）。
+//
+// 策略（按优先级）：
+//  1. 剔除超大工具结果（> hugeToolResultTokens），它们最占 token 但价值最低
+//  2. 从最老的消息开始丢弃，直到达到目标削减量
+//
+// pct 为目标削减比例（%）：10/20/40/60 递进尝试，应对「context_window 配置
+// 超过模型真实上限」而本地估算无法可靠判断的场景。
+//
+// 保证：[system] 与最新一条消息永远保留；tool_call/tool_result 不会因裁剪而失去配对。
+func emergencyTrim(msgs []Message, pct int) []Message {
+	if len(msgs) <= 2 {
+		return msgs
+	}
+	// 拆出 system 前缀（可能是多条 system：主提示词 + 时间上下文）。
+	sysEnd := 0
+	for sysEnd < len(msgs) && msgs[sysEnd].Role == RoleSystem {
+		sysEnd++
+	}
+	body := msgs[sysEnd:]
+	if len(body) <= 1 {
+		return msgs
+	}
+
+	// 第一步：剔除超大工具结果（保留占位，维持 tool_call/tool_result 配对）。
+	out := make([]Message, 0, len(body))
+	droppedHuge := false
+	for _, m := range body {
+		if m.Kind == KindToolResult && EstimateTokens(m) > hugeToolResultTokens {
+			placeholder := m
+			placeholder.Content = "[工具结果过大，已因上下文超限被省略]"
+			out = append(out, placeholder)
+			droppedHuge = true
+			continue
+		}
+		out = append(out, m)
+	}
+	if pct <= 0 {
+		res := append([]Message{}, msgs[:sysEnd]...)
+		return append(res, out...)
+	}
+
+	// 第二步：从最老开始丢弃整条消息，直到达到目标削减量。
+	// 以「估算 token 总量」为基准，而非消息条数（长消息应多减）。
+	total := 0
+	for _, m := range out {
+		total += EstimateTokens(m)
+	}
+	target := total * pct / 100
+	dropped := 0
+	i := 0
+	// 保留最后一条（当前任务/最新消息）
+	for i < len(out)-1 && dropped < target {
+		dropped += EstimateTokens(out[i])
+		i++
+	}
+	keep := out[i:]
+	if len(keep) == 0 && len(out) > 0 {
+		keep = out[len(out)-1:]
+	}
+	_ = droppedHuge // 占位剔除已生效，记录供调用方日志
+
+	res := make([]Message, 0, sysEnd+len(keep))
+	res = append(res, msgs[:sysEnd]...)
+	res = append(res, keep...)
+	return res
+}
+
+// EmergencyChanged 判断应急裁剪是否真的改变了消息（用于避免空转重试）。
+func EmergencyChanged(before, after []Message) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for i := range before {
+		if before[i].Content != after[i].Content || before[i].Kind != after[i].Kind {
+			return true
+		}
+	}
+	return false
 }
 
 // hardTrimOnOverflow 上下文溢出的最后兜底：强制压缩失败时，按 token 预算从

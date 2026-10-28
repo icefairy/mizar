@@ -1,4 +1,3 @@
-// Package session 提供 JSONL 会话持久化：每个会话一个 .jsonl 文件，逐行追加。
 package session
 
 import (
@@ -13,6 +12,41 @@ import (
 
 	"mizar/internal/agent"
 )
+
+// entryType 会话文件条目的类型标识。
+//
+// 文件仍是「一行一个 JSON」的 JSONL。为了向后兼容，消息行不带 type 字段
+// （旧文件原样可读），新增的元记录才带 type。
+const (
+	entryTypeMessage    = "message"    // 普通消息（旧文件缺省即此类型）
+	entryTypeCompaction = "compaction" // 压缩记录（追加式，不改写历史）
+)
+
+// envelope 仅用于取出一行的 type 字段，决定后续按哪种结构解析。
+type envelope struct {
+	Type string `json:"type,omitempty"`
+}
+
+// Compaction 一次压缩的记录（对齐 pi 的 CompactionEntry）。
+//
+// 设计要点：压缩是「追加一条记录」，原始消息一行不删。
+// 加载时若存在压缩记录，重建为 summary + 从 FirstKeptIndex 起的所有消息，
+// 从而保证跨进程续接仍享受压缩成果，且 TUI/导出可看完整历史。
+type Compaction struct {
+	// Summary 被摘要掉的那段历史的摘要文本。
+	Summary string `json:"summary"`
+	// FirstKeptIndex 从第几条消息开始保留（按消息在文件中的出现顺序计数）。
+	// 等于消息总数表示不保留任何前置消息（retain-none）。
+	FirstKeptIndex int `json:"first_kept_index"`
+	// TokensBefore 压缩前的估算 token 数（诊断用）。
+	TokensBefore int `json:"tokens_before,omitempty"`
+	// Emergency 标记这是一条「自愈」裁剪记录（上下文溢出应急降级）。
+	// 与常规压缩同一套加载逻辑（summary + FirstKeptIndex 起保留），
+	// 区别仅在于 Emergency 没有 LLM 摘要，Summary 通常为空（纯截断）。
+	Emergency bool `json:"emergency,omitempty"`
+	// EmergencyPct 应急裁剪的比例（%），仅 Emergency 时有效（诊断用）。
+	EmergencyPct int `json:"emergency_pct,omitempty"`
+}
 
 // Store 会话存储。
 type Store struct {
@@ -51,57 +85,176 @@ func (s *Store) sessionDir() string {
 	return s.dir
 }
 
-// Append 追加一条消息。
-func (s *Store) Append(id string, msg agent.Message) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// validateID 校验会话 ID（防路径穿越）。
+func validateID(id string) error {
 	if strings.Contains(id, "/") || strings.Contains(id, "..") {
 		return fmt.Errorf("invalid session id: %q", id)
 	}
-	if err := os.MkdirAll(s.sessionDir(), 0o755); err != nil {
-		return err
-	}
+	return nil
+}
+
+// appendLine 追加一行原始 JSON（调用方需自行加锁/建目录）。
+func (s *Store) appendLine(id string, b []byte) error {
 	f, err := os.OpenFile(s.sessionFile(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	// 落盘时补写时间戳（未设置才填）：所有调用方无需关心，单条消息一个时间点。
-	msg.EnsureTimestamp()
-	b, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
 	_, err = f.Write(append(b, '\n'))
 	return err
 }
 
-// Load 读取整个会话。
-func (s *Store) Load(id string) ([]agent.Message, error) {
+// Append 追加一条消息。
+func (s *Store) Append(id string, msg agent.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := validateID(id); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.sessionDir(), 0o755); err != nil {
+		return err
+	}
+	// 落盘时补写时间戳（未设置才填）：所有调用方无需关心，单条消息一个时间点。
+	msg.EnsureTimestamp()
+	// 消息行不写 type 字段，保持旧格式（旧版本 mizar 仍能读）。
+	b, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return s.appendLine(id, b)
+}
+
+// AppendCompaction 追加一条压缩记录（追加式，不改写已有历史）。
+//
+// firstKeptIndex 是「保留起点」在消息序列中的下标；等于消息总数表示不保留前置消息。
+// 调用方（压缩发生处）已知切点，直接传入即可。
+func (s *Store) AppendCompaction(id, summary string, firstKeptIndex, tokensBefore int) error {
+	return s.appendCompactionRecord(id, Compaction{
+		Summary:        summary,
+		FirstKeptIndex: firstKeptIndex,
+		TokensBefore:   tokensBefore,
+	})
+}
+
+// AppendEmergencyTrim 追加一条「自愈」裁剪记录（上下文溢出应急降级）。
+//
+// 与 AppendCompaction 共用加载逻辑：下次 Load 时从 firstKeptIndex 开始保留。
+// 持久化的意义：用户退出会话再进来时，不会再重新撞一次 400。
+func (s *Store) AppendEmergencyTrim(id string, firstKeptIndex, tokensBefore, pct int) error {
+	return s.appendCompactionRecord(id, Compaction{
+		FirstKeptIndex: firstKeptIndex,
+		TokensBefore:   tokensBefore,
+		Emergency:      true,
+		EmergencyPct:   pct,
+	})
+}
+
+// appendCompactionRecord 追加一条压缩/应急记录（两者格式同构）。
+func (s *Store) appendCompactionRecord(id string, rec Compaction) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := validateID(id); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.sessionDir(), 0o755); err != nil {
+		return err
+	}
+	if rec.FirstKeptIndex < 0 {
+		rec.FirstKeptIndex = 0
+	}
+	// 平铺字段：{"type":"compaction","summary":...,"first_kept_index":...}
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return err
+	}
+	m["type"] = entryTypeCompaction
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return s.appendLine(id, b)
+}
+
+// readEntries 读取文件并按类型拆分消息与压缩记录（保持消息的原始顺序）。
+func (s *Store) readEntries(id string) (msgs []agent.Message, comps []Compaction, err error) {
 	f, err := os.Open(s.sessionFile(id))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("session %q not found", id)
+			return nil, nil, fmt.Errorf("session %q not found", id)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
-	var msgs []agent.Message
 	sc := bufio.NewScanner(f)
+	// 单行可能是长工具输出，放宽扫描上限（默认 64KB 太小）。
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
-		var m agent.Message
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
+		var env envelope
+		if err := json.Unmarshal([]byte(line), &env); err != nil {
 			continue // 跳过坏行
 		}
-		msgs = append(msgs, m)
+		switch env.Type {
+		case entryTypeCompaction:
+			var c Compaction
+			if err := json.Unmarshal([]byte(line), &c); err == nil {
+				comps = append(comps, c)
+			}
+		default: // 空 type、message 或未知类型（容错当作消息）
+			var m agent.Message
+			if err := json.Unmarshal([]byte(line), &m); err == nil {
+				msgs = append(msgs, m)
+			}
+		}
 	}
-	return msgs, sc.Err()
+	return msgs, comps, sc.Err()
+}
+
+// Load 读取会话（应用压缩：返回 summary + 保留范围 + 压缩后新增的消息）。
+func (s *Store) Load(id string) ([]agent.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs, comps, err := s.readEntries(id)
+	if err != nil {
+		return nil, err
+	}
+	if len(comps) == 0 {
+		return msgs, nil
+	}
+	// 只取最新一条压缩记录生效（与 pi 一致）。
+	latest := comps[len(comps)-1]
+	idx := latest.FirstKeptIndex
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > len(msgs) {
+		idx = len(msgs)
+	}
+	out := make([]agent.Message, 0, 1+len(msgs)-idx)
+	if strings.TrimSpace(latest.Summary) != "" {
+		out = append(out, agent.Message{
+			Role:    agent.RoleUser,
+			Kind:    agent.KindSummary,
+			Content: latest.Summary,
+		})
+	}
+	out = append(out, msgs[idx:]...)
+	return out, nil
+}
+
+// LoadRaw 读取会话的原始消息（忽略压缩记录，供导出/诊断使用）。
+func (s *Store) LoadRaw(id string) ([]agent.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs, _, err := s.readEntries(id)
+	return msgs, err
 }
 
 // List 列出当前作用域（路径）下的会话 ID。
