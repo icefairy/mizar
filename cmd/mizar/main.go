@@ -38,7 +38,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.5.5"
+var version = "v0.5.6"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -1181,6 +1181,15 @@ func main() {
 		},
 	})
 	// 内置 /config 命令：查看/修改运行配置（对齐 pi 的 /config）
+	a.Commands.Register(agent.Command{
+		Name:        "checkupdate",
+		Description: "检查是否有新版本（/checkupdate，只提醒不自动更新）",
+		Timeout:     45 * time.Second,
+		Run: func(args string) (string, error) {
+			info, err := fetchSiteInfo(updateSiteURL, 20*time.Second)
+			return formatUpdateReport(version, info, err), nil
+		},
+	})
 	a.Commands.Register(agent.Command{
 		Name:        "chat",
 		Description: "裸聊：不注入任何提示词直接问模型（/chat <内容>，不带会话历史、不落盘）",

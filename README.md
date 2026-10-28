@@ -194,6 +194,27 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 
 实测可以验证注入确实为零：问「你知道自己是什么系统吗」，模型回答的是它自己的原生身份，而不是 Mizar。
 
+#### 7.5 版本检查（`/checkupdate`）
+
+```
+/checkupdate
+```
+
+从项目主页读取最新版本与更新内容，与当前版本比对：
+
+```
+🔔 发现新版本: v0.5.6（当前 v0.5.3）
+
+  更新内容: 版本检查 + 压缩三修
+  ...
+  本命令不会自动更新。请自行获取新版本后替换二进制：
+    详情/下载: https://icefairy.github.io/mizar/
+```
+
+- **只提醒，不自动更新**：命令不下载、不改任何文件，是否升级由你决定
+- **三种结论**：发现新版 / 已是最新 / 本地版本更新（开发中会比站点新）
+- **失败不打扰**：网络不可达或站点改版，给出提示并附站点地址，不影响使用
+
 ### 8. LSP 支持
 - **作为客户端**：通过 stdio 启动语言服务器（gopls/tsserver），提供 `lsp_diagnostics` / `lsp_definition` / `lsp_references` / `lsp_completion` 工具
 - **作为服务器**：`--lsp-server` 模式，通过 stdio 接收 JSON-RPC 请求

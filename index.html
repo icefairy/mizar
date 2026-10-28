@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.5.5</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.5.6</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -135,6 +135,7 @@
         <div class="card"><h3>📦 内置插件与技能</h3><p>常用插件（数据库增删改查、图片识别）与技能（交接、记忆、数据库）随二进制发布，首次运行自动释放到 <code>~/.mizar</code>，只补缺不覆盖。</p></div>
         <div class="card"><h3>⏱️ 时间感知</h3><p>会话消息自带时间戳；每轮注入当前实时时间，隔超 1 小时再续接时显式提示「已过去多久」，模型不再把隔天对话当成刚聊完，自动重新核实文件/进程状态。</p></div>
         <div class="card"><h3>🛡️ 上下文自愈</h3><p>窗口配大了不必删会话：撞上 400 超限后按 <strong>10% → 20% → 40% → 60%</strong> 递进裁剪并自动重试，优先剔除超大工具结果、再从最老的消息开始丢，<code>system</code> 与最新消息永远保留；裁剪结果<strong>落盘</strong>，退出再进不会重撞。</p></div>
+        <div class="card"><h3>🔄 版本检查 <code>/checkupdate</code></h3><p>一条命令读取主页最新版本与更新内容，与当前版本比对：发现新版、已是最新、本地版更新，三种情况都给出明确结论。<strong>只提醒不自动更新</strong>，升级与否由你决定；网络不通也只会友好提示，不打扰使用。</p></div>
         <div class="card"><h3>💬 裸聊 <code>/chat</code></h3><p>不注入任何提示词——系统提示、工具、技能、会话历史全部跳过，只把一句话直接发给当前模型（沿用当前思考等级）。纯旁路不落盘，适合临时问答与对照「无提示词」下的原始回答。</p></div>
         <div class="card"><h3>🔍 诊断日志</h3><p>关键事件落盘 <code>~/.mizar/logs</code>（TUI/Agent/LLM/panic），三步定位「任务莫名中止/卡死」：看 RUN 边界、ESC 取消、finish_reason。</p></div>
       </div>
@@ -143,6 +144,10 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.5.6 · <code>/checkupdate</code> 版本检查 + 压缩三修</h3>
+          <p>新增 <code>/checkupdate</code>：读取主页最新版本与更新内容，与当前版本比对，<strong>只提醒不自动更新</strong>。同时修掉压缩的三种「假成功」——切点无效却谎报压缩成功、摘要为空却照写记录（等于静默丢历史）、压缩后 token 反而变大。<strong>现在压缩必须真的变小，否则宁可放弃。</strong></p>
+        </div>
         <div class="card">
           <h3>v0.5.5 · <code>/chat</code> 裸聊</h3>
           <p>新增 <code>/chat &lt;内容&gt;</code>：<strong>不注入系统提示词、工具、技能、会话历史</strong>，只把这句话直接发给当前模型，沿用当前模型与思考等级。纯旁路不落盘，聊完即忘。问它「你知道自己是什么系统吗」，回答的是模型自己的原生身份——<strong>注入确实为零</strong>。</p>
