@@ -105,6 +105,9 @@ func formatTokens(v int) string {
 // 两个调用点（流内 usage / 任务结束补记）共用，保证检测器每请求只观测一次。
 func (m *tuiModel) recordUsage(u *agent.Usage, dur time.Duration) string {
 	m.stats.AddUsage(u, dur)
+	if !m.cacheMissEnabled.Load() {
+		return ""
+	}
 	if m.cacheMiss == nil {
 		m.cacheMiss = agent.NewCacheMissDetector()
 	}
@@ -127,6 +130,7 @@ type tuiModel struct {
 	histSnapshot     string                   // 浏览历史时保存的输入框快照
 	numpadState      int                      // 小键盘状态机：0=等待\x1b, 1=看到\x1bO, 2=收到\x1bOx
 	cacheMiss        *agent.CacheMissDetector // 显著缓存未命中提示（懒初始化）
+	cacheMissEnabled atomic.Bool              // 缓存命中率下跌提示开关（默认关闭，可在设置中开启）
 	numpadWait       rune                     // 小键盘状态机：存储第一个字符
 	app              *tview.Application
 	textView         *tview.TextView
@@ -942,6 +946,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		}
 		if cfg.AiColor != "" {
 			m.aiColor = cfg.AiColor
+		}
+		if cfg.CacheMissNotice != nil && *cfg.CacheMissNotice {
+			m.cacheMissEnabled.Store(true)
 		}
 	}
 	// 若有加载的历史消息，渲染到聊天区

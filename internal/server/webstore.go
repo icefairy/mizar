@@ -35,13 +35,14 @@ type conversation struct {
 
 // webSettings 对话参数设置（进程级，全局生效）。
 type webSettings struct {
-	Model       string   `json:"model,omitempty"`
-	Temperature *float64 `json:"temperature,omitempty"`
-	TopP        *float64 `json:"top_p,omitempty"`
-	MaxTokens   int      `json:"max_tokens,omitempty"`
-	System      string   `json:"system,omitempty"`
-	Thinking    string   `json:"thinking,omitempty"`    // auto/off/low/medium/high
-	MaxHistory  int      `json:"max_history,omitempty"` // 普通对话模式最多发送的历史消息条数（默认 50；agent 模式不生效）
+	Model         string   `json:"model,omitempty"`
+	Temperature   *float64 `json:"temperature,omitempty"`
+	TopP          *float64 `json:"top_p,omitempty"`
+	MaxTokens     int      `json:"max_tokens,omitempty"`
+	System        string   `json:"system,omitempty"`
+	Thinking      string   `json:"thinking,omitempty"`      // auto/off/low/medium/high
+	MaxHistory    int      `json:"max_history,omitempty"`   // 普通对话模式最多发送的历史消息条数（默认 50；agent 模式不生效）
+	ShowCacheMiss bool     `json:"show_cache_miss,omitempty"` // 是否显示缓存命中率下跌提示（默认关闭）
 }
 
 // webStore 会话 + 设置存储（带文件持久化）。

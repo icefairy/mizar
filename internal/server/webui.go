@@ -662,6 +662,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		st.saveSettings(v)
 		// 应用到 LLM 客户端
 		s.applySettings(v)
+		// 应用缓存命中率提示开关（进程级）
+		s.setCacheMissEnabled(v.ShowCacheMiss)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": v, "model": s.agent.Model()})
 	default:
 		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -723,6 +725,12 @@ func (s *Server) ApplyStoredSettings() {
 		return
 	}
 	s.applySettings(s.web.store.getSettings())
+}
+
+// setCacheMissEnabled 设置缓存命中率下跌提示开关（进程级）。
+// TUI 模式下通过 config.json 的 CacheMissNotice 控制，Server 模式下此处暂为空操作。
+func (s *Server) setCacheMissEnabled(v bool) {
+	_ = v
 }
 
 // errString 简单 error 包装。

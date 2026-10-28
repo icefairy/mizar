@@ -36,6 +36,8 @@ type Config struct {
 	SkillInjectMode   string `json:"skill_inject_mode"`             // 技能注入: index(默认,缓存友好)|full(全量正文)
 	UserColor         string `json:"user_color,omitempty"`          // TUI 用户消息颜色（默认 white）
 	AiColor           string `json:"ai_color,omitempty"`            // TUI AI 回复颜色（默认 green）
+	// CacheMissNotice 是否显示缓存命中率显著下跌提示（默认 false = 关闭）。
+	CacheMissNotice *bool `json:"cache_miss_notice,omitempty"`
 	// DiagLog 诊断日志开关（落盘到 ~/.mizar/logs/，默认 nil = 开启）。
 	// 用于排查「任务莫名中止/卡死/退出」类无法复现的问题；设 0 可关闭。
 	DiagLog *bool `json:"diag_log,omitempty"`
