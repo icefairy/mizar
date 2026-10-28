@@ -1598,6 +1598,8 @@ func (m *tuiModel) submitInput(s string) {
 	}
 
 	if strings.HasPrefix(s, "/") {
+		// 在会话里先显示用户输入的斜杠命令
+		m.addChatLine(chatLine{role: "user", content: s, ts: time.Now()})
 		// /quit 与 /exit 在命令分发之前拦截：先把续接提示渲染进对话列表，
 		// 再优雅退出（旧实现走命令注册表的 quit→os.Exit(0)，进程直接终结，
 		// runTUI 退出后的续接提示永远不会打印）。

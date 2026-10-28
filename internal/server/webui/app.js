@@ -16,6 +16,9 @@
   let mode = "chat";   // chat | agent
   let busy = false;
   let ws = null;
+  let history = [];      // 输入历史
+  let historyIndex = 0;  // 历史指针
+  let historySaved = "";  // 历史导航前的临时内容
   let curConv = null;  // 当前会话 id
   let convs = [];      // 会话摘要列表
   let streamBody = null;   // 当前流式正文目标（.《text》）
@@ -599,6 +602,9 @@
   async function send() {
     const text = input.value.trim();
     if (!text) return;
+    history.push(text);
+    historyIndex = history.length;
+    historySaved = "";
     input.value = "";
     autoGrow();
     if (busy) {
@@ -669,7 +675,24 @@
   }
   sendBtn.addEventListener("click", send);
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); return; }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (historyIndex > 0) {
+        historySaved = input.value;
+        historyIndex--;
+        input.value = history[historyIndex] || "";
+        autoGrow();
+      }
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (historyIndex < history.length) {
+        historyIndex++;
+        if (historyIndex >= history.length) input.value = historySaved;
+        else input.value = history[historyIndex] || "";
+        autoGrow();
+      }
+    }
   });
   abortBtn.addEventListener("click", async () => {
     await fetch("/web/api/abort", { method: "POST", credentials: "same-origin" }).catch(() => {});

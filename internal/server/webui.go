@@ -332,7 +332,12 @@ func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// 斜杠命令拦截：/compact、/list_plugins 等由命令注册表处理，不发给 LLM。
 	if out, ok := s.dispatchWebCommand(body.Message, body.ConversationID); ok {
-		writeJSON(w, http.StatusOK, map[string]any{"reply": out, "command": true})
+		if body.ConversationID != "" {
+			s.web.store.appendMsg(body.ConversationID, convMessage{Role: "user", Content: body.Message})
+			s.web.store.appendMsg(body.ConversationID, convMessage{Role: "assistant", Content: out})
+			s.web.store.setMode(body.ConversationID, "chat")
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"reply": out, "command": true, "command_display": true})
 		return
 	}
 	reply, err := s.chatOnce(body.ConversationID, body.Message)
@@ -548,7 +553,7 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	// 斜杠命令拦截：/compact、/list_plugins 等由命令注册表处理，不进入 Agent 循环。
 	if out, ok := s.dispatchWebCommand(body.Message, body.ConversationID); ok {
 		s.logf("web command: %s", truncateStr(body.Message, 80))
-		writeJSON(w, http.StatusOK, map[string]any{"reply": out, "command": true})
+		writeJSON(w, http.StatusOK, map[string]any{"reply": out, "command": true, "command_display": true})
 		return
 	}
 	s.logf("web agent.run: %s", truncateStr(body.Message, 80))
