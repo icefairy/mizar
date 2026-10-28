@@ -91,6 +91,28 @@ func completeAtRaw(after string, cmdNames []string, toolNames []string) []string
 	return nil
 }
 
+// commonPrefix 返回字符串列表的公共最长前缀。
+func commonPrefix(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	min := ss[0]
+	for _, s := range ss[1:] {
+		if len(s) < len(min) {
+			min = s
+		}
+	}
+	for i := 0; i < len(min); i++ {
+		c := min[i]
+		for _, s := range ss {
+			if s[i] != c {
+				return min[:i]
+			}
+		}
+	}
+	return min
+}
+
 // completeAtPath 文件路径补全。
 // 当 prefix 以 / 结尾时，列出目录下的所有条目（供用户浏览）。
 // 否则按文件名前缀过滤。返回最多 100 个候选。

@@ -53,7 +53,7 @@
 - 聊天区翻页：`PgUp`/`PgDn`，vim 风格 `Ctrl+U`/`Ctrl+D`、`Alt+K`/`Alt+J`（上/下 10 行）、`Alt+G`/`Alt+Shift+G`（到顶/底）
 - 流式输出 + 等待进度指示（LLM SSE → Agent 流式回调 → TUI/Server 增量渲染）
 
-### 2. 内置工具（11+ 个）
+### 2. 内置工具（30+ 个）
 基础工具 `bash` / `grep` / `find` / `read` / `write` / `edit` / `ls` / `skill_manage`，+ dsh 复刻新增：
 - **`todo`**：会话待办清单（动作式 API：list / add / toggle / clear）。状态随会话持久化——内嵌在工具返回文本的标记段中，会话恢复/分支时按历史回放重建（对齐 pi 的 `examples/extensions/todo.ts`）；用 `/todos` 查看
 - **`ask_user_question`**：向用户提问并等待回答。问题以文本编号选项呈现，用户回复编号即完成选择（TUI / 经典 / `-task` 模式均可用，多选 `1,3`）；无交互界面时自动降级为「选项写进正文 + 用户下一条回编号」
@@ -147,6 +147,85 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
          进程/服务状态等，先重新核实再作答。
 ```
 
+#### 7.2 会话压缩与持久化（Compaction）
+
+上下文接近窗口上限时自动压缩旧消息为结构化摘要（Goal / Progress / Decisions / Next Steps），释放上下文但保留关键信息。
+
+- **压缩记录落盘**：压缩发生时向会话文件追加一条 `{"type":"compaction","summary":...,"first_kept_index":N}` 记录（对齐 pi 的 `CompactionEntry`）。加载时重建为「摘要 + 保留范围 + 压缩后新增消息」——压缩成果跨进程有效，不会每次续接都重新压一遍。
+- **原始对话不丢**：压缩是**追加记录**而非改写历史，JSONL 每一行原始消息都保留。导出/查看仍是完整历史，`Store.LoadRaw()` 可取全量。
+- **摘要输出预算跟随模型**：取模型 output limit 的一半（默认 1500、封顶 8000），避免推理型模型把预算耗在 reasoning 上导致摘要失败（`generation hit the token cap`）。
+- **旧会话兼容**：无 `type` 字段的行按普通消息解析，存量会话无需迁移。
+
+**压缩必须真的有效**——三种「假成功」都已堵掉，宁可放弃也不写有害记录：
+
+| 情况 | 以前 | 现在 |
+|---|---|---|
+| 无合法切点（保留预算内全是不可切消息） | 原样返回，日志仍打 `result=` 且钩子报 `Compacted:true`，token 完全没变 | 报 `compact_skip reason=no-cut-point`，`Compacted` 如实为 `false` |
+| 摘要为空（模型只产出 reasoning 或被输出上限截断） | 压缩记录照写，加载后等于**静默丢弃前面所有消息**且无摘要补偿 | 直接报错放弃本次压缩 |
+| 压缩后 token 反而变大（小窗口下 `keep` 与固定开销叠加所致） | 照写记录，白花一次 LLM 调用 | 校验「压缩后必须变小」，退化即放弃 |
+
+> 判据不是「保留了多少 token」，而是**压缩后是否真的变小**——任何比例启发式在小窗口或大 system prompt 场景都会失效，结果校验才是可靠的不变量。
+
+#### 7.3 上下文自愈（Self-Healing）
+
+最常见的故障是 `context_window` 配得比模型真实上限大（比如配 128000 但模型实际只支持 32K）。此时本地估算看不出问题，但**发任何消息都会持续撞 400**（最大上下文超限），此前只能手工删会话。
+
+现在会自动自愈：
+
+| 阶段 | 动作 |
+|---|---|
+| 1 | 强制压缩（`CompactForce`），保留最近约一半历史 |
+| 2 | 仍失败 → 按窗口 1/4 硬截断 |
+| 3 | 仍失败 → **递进裁剪**：10% → 20% → 40% → 60%，每档重发一次请求 |
+
+裁剪优先级：
+
+1. **超大工具结果**（>4000 token）—— 一条日志顶几十条聊天，置占位符保留调用配对
+2. **最老的消息** —— 从头部按需丢弃
+3. `system` 与**最新消息永远保留**
+
+裁剪结果**落盘**（`{"type":"compaction","emergency":true,...}`），用户退出再进来直接从保留起点重建，不会重新撞 400。界面上明确提示：
+
+```
+⚠ 上下文超限：已临时裁剪 40% 历史消息（保留 12 条），原始记录仍完整保存在会话文件中
+```
+
+#### 7.4 裸聊（`/chat`）
+
+有时你只想直接问模型一句话，不想要系统提示词、工具定义、技能索引、会话历史任何干扰：
+
+```
+/chat 你好，用一句话介绍你自己
+```
+
+- **零注入**：不注入 system prompt / 工具 / 技能 / 历史，只发这一句话
+- **沿用当前设置**：模型与思考等级与你平时用的完全一致
+- **纯旁路**：不走 Agent 主循环、不读写会话历史、不落盘，聊完即忘
+- **典型用途**：临时问答、模型自检、对照「有无提示词」时的原始回答差异
+
+实测可以验证注入确实为零：问「你知道自己是什么系统吗」，模型回答的是它自己的原生身份，而不是 Mizar。
+
+#### 7.5 版本检查（`/checkupdate`）
+
+```
+/checkupdate
+```
+
+从项目主页读取最新版本与更新内容，与当前版本比对：
+
+```
+🔔 发现新版本: v0.5.6（当前 v0.5.3）
+
+  更新内容: 版本检查 + 压缩三修
+  ...
+  本命令不会自动更新。请自行获取新版本后替换二进制：
+    详情/下载: https://icefairy.github.io/mizar/
+```
+
+- **只提醒，不自动更新**：命令不下载、不改任何文件，是否升级由你决定
+- **三种结论**：发现新版 / 已是最新 / 本地版本更新（开发中会比站点新）
+- **失败不打扰**：网络不可达或站点改版，给出提示并附站点地址，不影响使用
+
 ### 8. LSP 支持
 - **作为客户端**：通过 stdio 启动语言服务器（gopls/tsserver），提供 `lsp_diagnostics` / `lsp_definition` / `lsp_references` / `lsp_completion` 工具
 - **作为服务器**：`--lsp-server` 模式，通过 stdio 接收 JSON-RPC 请求
@@ -194,7 +273,10 @@ chmod +x mizar
   # /provider <baseURL> <apiKey>   一次设置 base URL 与 API Key（自动保存到 ~/.mizar/config.json）
   # /model <name>                   切换模型（自动列出供应商可用模型）
   # /think <level>                  设置思考等级（auto/off/low/medium/high）
-  # /config 查看当前配置
+  # /config                        查看当前配置
+  # /compact                       立即压缩上下文（可附摘要指引）
+  # /chat <内容>                    裸聊：不注入任何提示词直接问模型
+  # /checkupdate                   检查是否有新版本（只提醒，不自动更新）
 
 # 也可通过命令行 flag 一次性指定（跳过交互配置）
 ./mizar -base-url http://127.0.0.1:3002/v1 -api-key sk-xxxx -model deepseek-v4-flash
@@ -240,17 +322,27 @@ ws.send(json.dumps({
 mizar/
 ├── cmd/mizar/              # 入口
 ├── internal/
-│   ├── agent/              # Agent 循环（任务规划/工具调用/错误修复）
+│   ├── agent/              # Agent 循环（任务规划/工具调用/错误修复/压缩自愈）
+│   ├── assets/             # go:embed 内置插件与技能（首次运行自动释放）
+│   ├── builtins/           # 内置工具实现（文件/搜索/任务/goal/schedule/GUI）
+│   ├── config/             # 配置加载（~/.mizar/config.json）
+│   ├── context/            # 上下文估算与裁剪
+│   ├── diag/               # 诊断日志（query.* 结构化事件）
 │   ├── engine/             # goja 内嵌 JS 引擎 + esbuild 编译管线
-│   ├── plugins/            # 插件加载器（扫描 .ts → 编译 → 注册工具）
-│   ├── skills/             # SKILL.md 加载器（解析 frontmatter → 注入上下文）
-│   ├── mcp/                # MCP 客户端（stdio/HTTP）
+│   ├── jobs/               # 后台任务管理（job_list / job_output / job_kill）
+│   ├── lifecycle/          # 生命周期钩子管理
 │   ├── llm/                # LLM 客户端（OpenAI 兼容协议）
-│   ├── shell/              # 安全命令执行
 │   ├── lsp/                # LSP 客户端 + 服务器
+│   ├── mcp/                # MCP 客户端（stdio/HTTP）
+│   ├── needle/             # needle 协议支持
+│   ├── plugins/            # 插件加载器（扫描 .ts → 编译 → 注册工具）
+│   ├── prompts/            # Prompt 模板加载与展开
+│   ├── repo/               # 仓库地图（repo_map 工具）
+│   ├── schedule/           # 定时提醒
 │   ├── server/             # HTTP/RPC/WebSocket 服务器
-│   ├── session/            # 会话管理（JSONL 持久化）
-│   └── lifecycle/          # 生命周期钩子管理
+│   ├── session/            # 会话管理（JSONL 持久化 + 压缩记录）
+│   ├── skills/             # SKILL.md 加载器（解析 frontmatter → 注入上下文）
+│   └── utils/              # 通用工具函数
 ├── extensions/             # 插件目录（Agent 自写的 .ts 文件）
 ├── skills/                 # 技能目录（SKILL.md）
 ├── scenarios/              # 验证场景（开发 70 / 运维 30）

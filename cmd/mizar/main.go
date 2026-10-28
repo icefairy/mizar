@@ -38,7 +38,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.5.3"
+var version = "v0.5.6"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -77,6 +77,7 @@ func main() {
 		history   = flag.Int("history", 50, "会话恢复的最大历史消息数")
 		ctxWindow = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
 		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
+		noMCP     = flag.Bool("no-mcp", false, "禁用 MCP（不初始化 mcp_call 宿主函数）")
 		task      = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer   = flag.Bool("version", false, "显示版本")
 		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
@@ -206,7 +207,9 @@ func main() {
 	engine.StartDBReaper()
 	// MCPCall：外部 MCP server 长尾能力（Redis/Kafka/MongoDB 等），插件 mcp_call() 直达
 	mcpReg := engine.NewMCPRegistry(nil)
-	if cfg, err := config.Load(config.DefaultPath()); err == nil && len(cfg.MCPServers) > 0 {
+	if *noMCP {
+		log.Printf("已禁用 MCP（--no-mcp）: mcp_call 不可用")
+	} else if cfg, err := config.Load(config.DefaultPath()); err == nil && len(cfg.MCPServers) > 0 {
 		mcpReg = engine.NewMCPRegistry(cfg.MCPServers)
 		log.Printf("MCP server 配置 %d 个: %s", len(cfg.MCPServers), mcpNames(cfg.MCPServers))
 	} else if err != nil {
@@ -1191,6 +1194,34 @@ func main() {
 	})
 	// 内置 /config 命令：查看/修改运行配置（对齐 pi 的 /config）
 	a.Commands.Register(agent.Command{
+		Name:        "checkupdate",
+		Description: "检查是否有新版本（/checkupdate，只提醒不自动更新）",
+		Timeout:     45 * time.Second,
+		Run: func(args string) (string, error) {
+			info, err := fetchSiteInfo(updateSiteURL, 20*time.Second)
+			return formatUpdateReport(version, info, err), nil
+		},
+	})
+	a.Commands.Register(agent.Command{
+		Name:        "chat",
+		Description: "裸聊：不注入任何提示词直接问模型（/chat <内容>，不带会话历史、不落盘）",
+		Timeout:     10 * time.Minute,
+		Run: func(args string) (string, error) {
+			q := strings.TrimSpace(args)
+			if q == "" {
+				return "用法: /chat <内容>\n\n不注入系统提示词/工具/技能/会话历史，只把这句话直接发给当前模型（沿用当前思考等级）。\n适合临时问答、模型自检、对照「无提示词」下的原始回答。", nil
+			}
+			reply, err := client.AIChat(llm.AIChatRequest{
+				Messages: []llm.AIChatMsg{{Role: "user", Content: q}},
+			})
+			if err != nil {
+				return "", fmt.Errorf("裸聊请求失败: %w", err)
+			}
+			return strings.TrimSpace(reply), nil
+		},
+	})
+	// 内置 /config 命令：查看/修改运行配置
+	a.Commands.Register(agent.Command{
 		Name:        "config",
 		Description: "查看/修改运行配置（/config 查看 ｜ /config max_steps 30 设置）",
 		Run: func(args string) (string, error) {
@@ -1488,9 +1519,17 @@ func main() {
 	})
 	if !*noCompact {
 		client2 := client // SummarizeMessages 用同一客户端
+		// 摘要输出预算：跟随模型 output limit（配置可选手填），未知时回退 1500。
+		// 对齐 pi 1.4.0：固定小上限会让推理模型报 "generation hit the token cap"。
+		modelMaxOutput := 0
+		if cfg, err := config.Load(config.DefaultPath()); err == nil {
+			modelMaxOutput = cfg.MaxOutput
+		}
+		summaryTokens := agent.EffectiveSummaryTokens(modelMaxOutput, 0)
 		a.Compactor = agent.DefaultCompactor(func(msgs []agent.Message) (string, error) {
-			return client2.SummarizeMessages(msgs, 1500)
+			return client2.SummarizeMessages(msgs, summaryTokens)
 		})
+		a.Compactor.MaxSummaryTokens = summaryTokens
 		a.Compactor.ContextWindow = *ctxWindow
 		// 小窗口兜底（参照 auto_offload 教训）：reserve/keep 不能超过窗口的合理比例，
 		// 否则压缩恒触发或永不触发。
@@ -1564,6 +1603,36 @@ func main() {
 		var exchanges []agent.Message
 		a.OnToolExchange = func(tool, args, reason, out string, err error) {
 			exchanges = append(exchanges, agent.ToolExchangeMessages(tool, args, reason, out, err)...)
+		}
+		// 压缩记录：追加式落盘（不改写历史），下次续接时重建为 summary + 保留范围。
+		// 对齐 pi 的 CompactionEntry —— 否则压缩成果只活在内存，跨进程续接会重复压缩。
+		if *sessionID != "" {
+			a.OnCompact = func(summary string, dropped, tokensBefore int) {
+				if err := st.AppendCompaction(*sessionID, summary, dropped, tokensBefore); err != nil {
+					log.Printf("压缩记录落盘失败: %v", err)
+					return
+				}
+				log.Printf("压缩记录已落盘: 摘要掉 %d 条消息（压缩前约 %d token）", dropped, tokensBefore)
+			}
+			// 自愈降级落盘：上下文溢出被应急裁剪后，把「保留起点」写进会话，
+			// 否则用户退出再进来会重新加载全量历史、再撞一次 400。
+			a.OnEmergencyTrim = func(pct, keptMsgs int) {
+				// 保留起点 = 已落盘的消息数 - 本轮保留数（裁剪只发生在历史段内）。
+				raw, err := st.LoadRaw(*sessionID)
+				if err != nil {
+					log.Printf("自愈记录落盘失败（读取会话）: %v", err)
+					return
+				}
+				firstKept := len(raw) - keptMsgs
+				if firstKept < 0 {
+					firstKept = 0
+				}
+				if err := st.AppendEmergencyTrim(*sessionID, firstKept, 0, pct); err != nil {
+					log.Printf("自愈记录落盘失败: %v", err)
+					return
+				}
+				log.Printf("⚠ 自愈降级已落盘: 裁剪 %d%%，保留起点 %d（共 %d 条历史）", pct, firstKept, len(raw))
+			}
 		}
 		reply, err := a.Run(*task)
 		a.OnToolExchange = nil

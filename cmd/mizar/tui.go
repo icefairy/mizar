@@ -1354,7 +1354,29 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 				m.renderAllDirect()
 				return
 			}
-			// 多候选：显示提示条
+			// 多候选：优先补公共前缀（类似 bash tab）
+			if len(candidates) > 1 {
+				cp := commonPrefix(candidates)
+				after := atAfterToken(current, atIdx)
+				if cp != "" && len(cp) > len(after) {
+					// 有更长公共前缀：直接补到输入框，并在提示条显示剩余候选
+					base := current[:atIdx+1]
+					m.inputField.SetText(base+cp, true)
+					m.renderAllDirect()
+					var sb strings.Builder
+					sb.WriteString(sgrColor("yellow", "  候选: "))
+					for i, c := range candidates {
+						if i > 0 {
+							sb.WriteString(", ")
+						}
+						sb.WriteString(c)
+					}
+					m.autoComplete.SetText(sb.String())
+					m.autoCompleteList = candidates
+					return
+				}
+			}
+			// 无公共前缀可补：显示提示条
 			var sb strings.Builder
 			sb.WriteString(sgrColor("yellow", "  匹配: "))
 			for i, c := range candidates {

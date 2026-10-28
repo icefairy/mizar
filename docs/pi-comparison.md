@@ -1,9 +1,13 @@
 # Pi Agent 对比分析与引入建议
 
 > 分析对象：Pi Agent v0.84.1（`@earendil-works/pi-coding-agent`）+ pi-cache-guardian v1.0.4
-> 对比基准：开阳 Mizar（Go 单二进制，7649 行，15 包）
+> 对比基准：开阳 Mizar（Go 单二进制；**当前 26411 行 / 21 包**，本文档撰写时为 7649 行 / 15 包）
 > 日期：2026-08-13（初版） / 2026-08-27（逐文件精读 + 移植更新）
 > 方法：全量读 Pi dist/ 源码（201 文件）+ 官方 docs + CHANGELOG 0.78-0.84 + Pi monorepo 主分支源码，逐项比对 Mizar 本地代码
+>
+> ⚠️ 本文档是**特定时点的对比快照**，反映的是 Pi v0.84.1 与当时 Mizar 的状态。
+> 后续已按 Pi CHANGELOG 0.85→1.4.0 继续移植（摘要预算解耦、tools glob、压缩持久化、
+> 上下文自愈、`/chat`、`/checkupdate` 等），最新差异请以 README 与 `docs/changelog.md` 为准。
 
 ---
 

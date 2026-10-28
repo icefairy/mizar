@@ -27,6 +27,45 @@ type Compactor struct {
 	Summarize func(messages []Message) (string, error)
 }
 
+// 摘要输出预算的边界值。
+const (
+	// DefaultSummaryTokens 模型 output limit 未知时的回退摘要预算。
+	DefaultSummaryTokens = 1500
+	// MaxSummaryTokensCap 摘要预算硬上限，避免个别模型 output limit 过大而浪费。
+	MaxSummaryTokensCap = 8000
+)
+
+// EffectiveSummaryTokens 计算摘要请求的输出预算。
+//
+// 对齐 pi 1.4.0：摘要的输出去掉固定小上限，改为跟随模型 output limit，
+// 否则推理型模型会把固定的预算耗在 reasoning 上，报 "generation hit the token cap"，
+// 再走降级重试既浪费 token 又可能拿到空摘要。
+//
+// 优先级：显式配置（configured）> 模型 output limit 推导 > DefaultSummaryTokens。
+// modelMaxOutput 为 0 表示未知。
+func EffectiveSummaryTokens(modelMaxOutput, configured int) int {
+	if configured > 0 {
+		return min(configured, MaxSummaryTokensCap)
+	}
+	if modelMaxOutput <= 0 {
+		return DefaultSummaryTokens
+	}
+	// 取模型 output limit 的一半，但不低于默认值、不高于硬上限。
+	budget := modelMaxOutput / 2
+	if budget < DefaultSummaryTokens {
+		return DefaultSummaryTokens
+	}
+	return min(budget, MaxSummaryTokensCap)
+}
+
+// SummaryTokenBudget 返回当前压缩器实际使用的摘要输出预算。
+func (c *Compactor) SummaryTokenBudget() int {
+	if c == nil {
+		return DefaultSummaryTokens
+	}
+	return EffectiveSummaryTokens(0, c.MaxSummaryTokens)
+}
+
 // DefaultCompactor 返回默认配置的压缩器。
 func DefaultCompactor(summarize func([]Message) (string, error)) *Compactor {
 	return &Compactor{
@@ -261,6 +300,11 @@ func (c *Compactor) Compact(msgs []Message) ([]Message, error) {
 		return msgs, fmt.Errorf("summarize: %w", err)
 	}
 	summary = strings.TrimSpace(summary)
+	// 空摘要绝不能当作成功：写进会话就是「静默丢弃前面所有消息」，
+	// 比不压缩更糟（模型彻底失去这段历史且无任何补偿）。
+	if summary == "" {
+		return msgs, fmt.Errorf("summarize 返回空摘要（可能被模型输出上限截断或只产出 reasoning），放弃本次压缩")
+	}
 
 	// split user span：切点在 span 内部，该 span 的前缀部分需要单独摘要
 	if isSplitUserSpan(msgs, cut) {
@@ -281,6 +325,13 @@ func (c *Compactor) Compact(msgs []Message) ([]Message, error) {
 	}
 	out = append(out, Message{Role: RoleUser, Content: summary, Kind: KindSummary})
 	out = append(out, keep...)
+
+	// 压缩必须真的变小，否则这次摘要纯属浪费（还多花了一次 LLM 调用）。
+	// 典型场景：KeepRecentTokens 过小 → 保留的消息本身就接近原大小，
+	// 再叠加摘要开销反而更大。这种情况宁可放弃，也不写一条「越压越大」的记录。
+	if before, after := EstimateMessages(msgs), EstimateMessages(out); after >= before {
+		return msgs, fmt.Errorf("压缩后未变小（%d → %d tokens），放弃本次压缩", before, after)
+	}
 	return out, nil
 }
 

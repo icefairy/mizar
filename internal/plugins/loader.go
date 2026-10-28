@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -548,7 +549,7 @@ func (m *Manager) Tools() []Tool {
 	defer m.mu.RUnlock()
 	out := make([]Tool, 0, len(m.tools))
 	for _, t := range m.tools {
-		if m.disabled[t.Name] {
+		if m.isToolDisabled(t.Name) {
 			continue
 		}
 		out = append(out, t)
@@ -558,6 +559,7 @@ func (m *Manager) Tools() []Tool {
 }
 
 // SetDisabledTools 设置禁用的工具集合。
+// 支持精确名与 glob 通配符（对齐 pi 1.0.4）：如 "bash"、"mcp__redis__*"、"*"。
 // 禁用只影响工具注册表（LLM 看不到、调不到），不影响 System prompt ——
 // 提示词保持字节稳定，前缀缓存不破坏。
 func (m *Manager) SetDisabledTools(names []string) {
@@ -566,6 +568,22 @@ func (m *Manager) SetDisabledTools(names []string) {
 	for _, n := range names {
 		m.disabled[n] = true
 	}
+}
+
+// isToolDisabled 判断工具是否被禁用（精确名或 glob 模式匹配）。
+func (m *Manager) isToolDisabled(name string) bool {
+	if m.disabled[name] {
+		return true
+	}
+	for pat := range m.disabled {
+		if !strings.ContainsAny(pat, "*?[") {
+			continue // 无通配符的精确名已在上面命中
+		}
+		if ok, err := path.Match(pat, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 插件级启用/禁用 ----------
@@ -682,7 +700,7 @@ func (m *Manager) Get(name string) (Tool, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	t, ok := m.tools[name]
-	if ok && m.disabled[name] {
+	if ok && m.isToolDisabled(name) {
 		return t, false
 	}
 	return t, ok
