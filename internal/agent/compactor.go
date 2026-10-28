@@ -300,6 +300,11 @@ func (c *Compactor) Compact(msgs []Message) ([]Message, error) {
 		return msgs, fmt.Errorf("summarize: %w", err)
 	}
 	summary = strings.TrimSpace(summary)
+	// 空摘要绝不能当作成功：写进会话就是「静默丢弃前面所有消息」，
+	// 比不压缩更糟（模型彻底失去这段历史且无任何补偿）。
+	if summary == "" {
+		return msgs, fmt.Errorf("summarize 返回空摘要（可能被模型输出上限截断或只产出 reasoning），放弃本次压缩")
+	}
 
 	// split user span：切点在 span 内部，该 span 的前缀部分需要单独摘要
 	if isSplitUserSpan(msgs, cut) {
@@ -320,6 +325,13 @@ func (c *Compactor) Compact(msgs []Message) ([]Message, error) {
 	}
 	out = append(out, Message{Role: RoleUser, Content: summary, Kind: KindSummary})
 	out = append(out, keep...)
+
+	// 压缩必须真的变小，否则这次摘要纯属浪费（还多花了一次 LLM 调用）。
+	// 典型场景：KeepRecentTokens 过小 → 保留的消息本身就接近原大小，
+	// 再叠加摘要开销反而更大。这种情况宁可放弃，也不写一条「越压越大」的记录。
+	if before, after := EstimateMessages(msgs), EstimateMessages(out); after >= before {
+		return msgs, fmt.Errorf("压缩后未变小（%d → %d tokens），放弃本次压缩", before, after)
+	}
 	return out, nil
 }
 

@@ -563,14 +563,24 @@ func (a *Agent) Run(task string) (string, error) {
 				a.Hooks.fireCompactionBefore(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, EstTokens: est, Messages: msgs}, a.logf)
 				// 先算切点（纯函数，与 Compact 内部一致），供落盘记录保留边界。
 				cut := a.Compactor.FindCutPoint(msgs)
+				// 只有切点有效时才算真正压缩；否则 Compact 原样返回，
+				// 此时不能说「压缩成功」（否则日志 token 不变却显示 result，误导排查）。
+				compacted := cut > 0
 				var err error
-				msgs, err = a.Compactor.Compact(msgs)
-				if err != nil {
-					a.log("%s", q.FormatLog("compact_fail", "err=", err.Error()))
+				if compacted {
+					msgs, err = a.Compactor.Compact(msgs)
+					if err != nil {
+						a.log("%s", q.FormatLog("compact_fail", "err=", err.Error()))
+						compacted = false
+					}
 				} else {
+					// 无可用切点：消息结构不允许切分（保留预算内全是不可切消息）。
+					a.log("%s", q.FormatLog("compact_skip", "reason=", "no-cut-point", "est=", fmt.Sprintf("%d", est)))
+				}
+				if compacted {
 					a.log("%s", q.FormatLog("compact", "result=", fmt.Sprintf("%d msgs, %d tokens", len(msgs), EstimateMessages(msgs))))
-					// 真正瘦身了才落盘压缩记录（cut<=0 时 Compact 原样返回，不算压缩）。
-					if a.OnCompact != nil && cut > 0 && len(msgs) > 0 {
+					// 真正瘦身了才落盘压缩记录。
+					if a.OnCompact != nil && len(msgs) > 0 {
 						// cut 是 msgs 下标；换算成「被摘要掉的会话消息条数」：
 						// 只有落在会话消息区间（≤histEnd）的部分才计入文件位置。
 						dropped := cut
@@ -582,7 +592,7 @@ func (a *Agent) Run(task string) (string, error) {
 						}
 					}
 				}
-				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Compacted: true, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
+				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Compacted: compacted, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
 			}
 		}
 
