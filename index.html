@@ -220,20 +220,27 @@ chmod +x mizar
             <li>cmd/mizar/ <span class="tree-cmt"># 入口</span></li>
             <li>internal/
               <ul>
-                <li>agent/ <span class="tree-cmt"># Agent 循环</span></li>
-                <li>engine/ <span class="tree-cmt"># goja + esbuild 编译管线</span></li>
-                <li>plugins/ <span class="tree-cmt"># 插件加载器</span></li>
-                <li>skills/ <span class="tree-cmt"># SKILL.md 加载器</span></li>
-                <li>mcp/ <span class="tree-cmt"># MCP 客户端</span></li>
-                <li>llm/ <span class="tree-cmt"># LLM 客户端</span></li>
-                <li>shell/ <span class="tree-cmt"># 安全命令执行</span></li>
-                <li>lsp/ <span class="tree-cmt"># LSP 客户端 + 服务器</span></li>
-                <li>server/ <span class="tree-cmt"># HTTP/RPC/WebSocket + 内嵌 Web UI</span></li>
-                <li>session/ <span class="tree-cmt"># 会话管理（JSONL）</span></li>
-                <li>lifecycle/ <span class="tree-cmt"># 生命周期钩子</span></li>
-                <li>diag/ <span class="tree-cmt"># 诊断日志（~/.mizar/logs）</span></li>
-                <li>jobs/ <span class="tree-cmt"># 后台任务</span></li>
+                <li>agent/ <span class="tree-cmt"># Agent 循环 + 压缩自愈</span></li>
                 <li>assets/ <span class="tree-cmt"># 内置插件/技能（go:embed，首运行释放）</span></li>
+                <li>builtins/ <span class="tree-cmt"># 内置工具（文件/搜索/goal/定时/GUI）</span></li>
+                <li>config/ <span class="tree-cmt"># 配置加载（~/.mizar/config.json）</span></li>
+                <li>context/ <span class="tree-cmt"># 上下文估算与裁剪</span></li>
+                <li>diag/ <span class="tree-cmt"># 诊断日志（~/.mizar/logs）</span></li>
+                <li>engine/ <span class="tree-cmt"># goja + esbuild 编译管线</span></li>
+                <li>jobs/ <span class="tree-cmt"># 后台任务</span></li>
+                <li>lifecycle/ <span class="tree-cmt"># 生命周期钩子</span></li>
+                <li>llm/ <span class="tree-cmt"># LLM 客户端</span></li>
+                <li>lsp/ <span class="tree-cmt"># LSP 客户端 + 服务器</span></li>
+                <li>mcp/ <span class="tree-cmt"># MCP 客户端</span></li>
+                <li>needle/ <span class="tree-cmt"># needle 协议支持</span></li>
+                <li>plugins/ <span class="tree-cmt"># 插件加载器</span></li>
+                <li>prompts/ <span class="tree-cmt"># Prompt 模板加载</span></li>
+                <li>repo/ <span class="tree-cmt"># 仓库地图（repo_map）</span></li>
+                <li>schedule/ <span class="tree-cmt"># 定时提醒</span></li>
+                <li>server/ <span class="tree-cmt"># HTTP/RPC/WebSocket + 内嵌 Web UI</span></li>
+                <li>session/ <span class="tree-cmt"># 会话管理（JSONL + 压缩记录）</span></li>
+                <li>skills/ <span class="tree-cmt"># SKILL.md 加载器</span></li>
+                <li>utils/ <span class="tree-cmt"># 通用工具函数</span></li>
               </ul>
             </li>
             <li>extensions/ <span class="tree-cmt"># 插件示例</span></li>
