@@ -77,6 +77,7 @@ func main() {
 		history   = flag.Int("history", 50, "会话恢复的最大历史消息数")
 		ctxWindow = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
 		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
+		noMCP     = flag.Bool("no-mcp", false, "禁用 MCP（不初始化 mcp_call 宿主函数）")
 		task      = flag.String("task", "", "任务内容 (非空则单次执行)")
 		showVer   = flag.Bool("version", false, "显示版本")
 		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
@@ -206,7 +207,9 @@ func main() {
 	engine.StartDBReaper()
 	// MCPCall：外部 MCP server 长尾能力（Redis/Kafka/MongoDB 等），插件 mcp_call() 直达
 	mcpReg := engine.NewMCPRegistry(nil)
-	if cfg, err := config.Load(config.DefaultPath()); err == nil && len(cfg.MCPServers) > 0 {
+	if *noMCP {
+		log.Printf("已禁用 MCP（--no-mcp）: mcp_call 不可用")
+	} else if cfg, err := config.Load(config.DefaultPath()); err == nil && len(cfg.MCPServers) > 0 {
 		mcpReg = engine.NewMCPRegistry(cfg.MCPServers)
 		log.Printf("MCP server 配置 %d 个: %s", len(cfg.MCPServers), mcpNames(cfg.MCPServers))
 	} else if err != nil {
@@ -1476,9 +1479,17 @@ func main() {
 	})
 	if !*noCompact {
 		client2 := client // SummarizeMessages 用同一客户端
+		// 摘要输出预算：跟随模型 output limit（配置可选手填），未知时回退 1500。
+		// 对齐 pi 1.4.0：固定小上限会让推理模型报 "generation hit the token cap"。
+		modelMaxOutput := 0
+		if cfg, err := config.Load(config.DefaultPath()); err == nil {
+			modelMaxOutput = cfg.MaxOutput
+		}
+		summaryTokens := agent.EffectiveSummaryTokens(modelMaxOutput, 0)
 		a.Compactor = agent.DefaultCompactor(func(msgs []agent.Message) (string, error) {
-			return client2.SummarizeMessages(msgs, 1500)
+			return client2.SummarizeMessages(msgs, summaryTokens)
 		})
+		a.Compactor.MaxSummaryTokens = summaryTokens
 		a.Compactor.ContextWindow = *ctxWindow
 		// 小窗口兜底（参照 auto_offload 教训）：reserve/keep 不能超过窗口的合理比例，
 		// 否则压缩恒触发或永不触发。
