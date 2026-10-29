@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -131,5 +132,38 @@ func TestProbeThinking(t *testing.T) {
 	defer ts2.Close()
 	if ok, err := ProbeThinking(ts2.URL+"/v1", "sk-test", "test-model"); err != nil || ok {
 		t.Fatalf("thinking probe = %v, %v; want false, nil", ok, err)
+	}
+}
+
+// TestConfigUserAgentRoundtrip 自定义 User-Agent 持久化往返（含空格与中文）。
+func TestConfigUserAgentRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	ua := "MyApp/1.0 (contact: me@example.com)"
+	if err := Save(path, &Config{UserAgent: ua}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UserAgent != ua {
+		t.Fatalf("user_agent roundtrip = %q, want %q", got.UserAgent, ua)
+	}
+}
+
+// TestConfigUserAgentOmitEmpty 未设置时不写 user_agent 字段（保持配置文件干净）。
+func TestConfigUserAgentOmitEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := Save(path, &Config{Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "user_agent") {
+		t.Fatalf("empty user_agent should be omitted, got %s", raw)
 	}
 }

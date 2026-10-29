@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"mizar/internal/agent"
@@ -525,4 +526,107 @@ func TestChatWithToolsStream_MalformedToolJSONNotWrappedAsReply(t *testing.T) {
 		t.Fatalf("stream: malformed tool JSON must NOT be wrapped as reply, got: %s", reply)
 	}
 	_ = malformed
+}
+
+// ============================================================================
+// 自定义 User-Agent 测试
+// ============================================================================
+
+// TestUserAgent_AppliedToAllRequestPaths 自定义 UA 必须覆盖所有出站请求路径：
+// ChatWithTools（非流式/流式）、AIChat、AIChatStream、SummarizeMessages、Chat。
+func TestUserAgent_AppliedToAllRequestPaths(t *testing.T) {
+	const want = "MizarTest/9.9 (custom-ua)"
+
+	var seen []string
+	var mu sync.Mutex
+	record := func(r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("User-Agent"))
+		mu.Unlock()
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if r.URL.Path == "/v1/chat/completions" && r.Header.Get("Accept") == "text/event-stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	newClient := func() *OpenAI {
+		o := NewOpenAI(srv.URL+"/v1", "k", "m")
+		o.SetUserAgent(want)
+		return o
+	}
+
+	msgs := []agent.Message{{Role: "user", Content: "hi"}}
+	c := newClient()
+	if _, err := c.ChatWithTools(msgs, nil); err != nil {
+		t.Fatalf("ChatWithTools: %v", err)
+	}
+	if _, err := c.ChatWithToolsStream(msgs, nil, func(agent.StreamDelta) {}); err != nil {
+		t.Fatalf("ChatWithToolsStream: %v", err)
+	}
+	if _, err := c.AIChat(AIChatRequest{Messages: []AIChatMsg{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("AIChat: %v", err)
+	}
+	if _, err := c.AIChatStream(AIChatRequest{Messages: []AIChatMsg{{Role: "user", Content: "hi"}}}, func(agent.StreamDelta) {}); err != nil {
+		t.Fatalf("AIChatStream: %v", err)
+	}
+	if _, err := c.SummarizeMessages(msgs, 100); err != nil {
+		t.Fatalf("SummarizeMessages: %v", err)
+	}
+	if _, err := c.Chat(msgs); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) < 6 {
+		t.Fatalf("expected >=6 requests recorded, got %d", len(seen))
+	}
+	for i, ua := range seen {
+		if ua != want {
+			t.Errorf("request %d User-Agent = %q, want %q", i, ua, want)
+		}
+	}
+}
+
+// TestUserAgent_DefaultUnchanged 未设置自定义 UA 时不覆盖 Go 默认 UA。
+func TestUserAgent_DefaultUnchanged(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	o := NewOpenAI(srv.URL+"/v1", "", "m")
+	if o.UserAgent() != "" {
+		t.Fatalf("default UserAgent() should be empty, got %q", o.UserAgent())
+	}
+	if _, err := o.AIChat(AIChatRequest{Messages: []AIChatMsg{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(gotUA, "Go-http-client/") {
+		t.Fatalf("expected Go default User-Agent, got %q", gotUA)
+	}
+}
+
+// TestUserAgent_Clear 传入空串等价于恢复默认。
+func TestUserAgent_Clear(t *testing.T) {
+	o := NewOpenAI("http://x/v1", "", "m")
+	o.SetUserAgent("custom")
+	if o.UserAgent() != "custom" {
+		t.Fatalf("UserAgent() = %q", o.UserAgent())
+	}
+	o.SetUserAgent("")
+	if o.UserAgent() != "" {
+		t.Fatalf("UserAgent() after clear = %q", o.UserAgent())
+	}
 }

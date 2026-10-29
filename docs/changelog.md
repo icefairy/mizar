@@ -4,6 +4,21 @@
 
 ---
 
+## [Unreleased]
+
+### ✨ 新增（自定义 User-Agent）
+
+- **`/config user_agent <字符串>`**：设置自定义 User-Agent，立即生效并持久化到 `~/.mizar/config.json` 的 `user_agent` 字段（支持含空格，如 `/config user_agent MyApp/1.0 (contact: me@example.com)`）。
+- **清除**：`/config user_agent -`（或 `reset`/`default`）恢复 Go 默认 UA，并同步落盘。
+- **全路径覆盖**：`internal/llm` 的 6 处出站请求统一经 `applyUA` 注入（ChatWithTools 非流式/流式、AIChat、AIChatStream、Chat、SummarizeMessages），未设置时不覆盖 Go 默认。
+- **加载/同步**：启动时从配置注入；`/reload` 重新应用；`/save`、`/provider`、`/model`、`/apikey` 的持久化段同步 `user_agent`，不会因改其它项而丢失。
+
+### 🐞 修复
+
+- **`/config context_window` 改小窗口后压缩阈值不同步**：补齐与启动一致的 `KeepRecentTokens` 下限兜底（≥500），避免 keepRecent 过小导致压缩后仍超阈值、反复触发。
+
+---
+
 ## [v0.5.6]
 
 ### ✨ 新增（`/checkupdate` 版本检查）

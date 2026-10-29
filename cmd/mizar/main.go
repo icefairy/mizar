@@ -263,6 +263,7 @@ func main() {
 	client := llm.NewOpenAI(*baseURL, *apiKey, *model)
 	if cfg, err := config.Load(config.DefaultPath()); err == nil {
 		client.SetThinkingLevel(cfg.ThinkingStr())
+		client.SetUserAgent(cfg.UserAgent)
 	}
 	host.LLMChat = func(messagesJSON string) (string, error) {
 		var msgs []agent.Message
@@ -665,6 +666,7 @@ func main() {
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
 			cfg.ThinkingLevel = client.ThinkingEnabled()
+			cfg.UserAgent = client.UserAgent()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/provider 持久化失败: %v", err)
 			}
@@ -693,6 +695,7 @@ func main() {
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
 			cfg.ThinkingLevel = client.ThinkingEnabled()
+			cfg.UserAgent = client.UserAgent()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/model 持久化失败: %v", err)
 				return "", fmt.Errorf("模型已切换为 %s 但写入配置失败: %w", name, err)
@@ -722,6 +725,7 @@ func main() {
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
 			cfg.ThinkingLevel = client.ThinkingEnabled()
+			cfg.UserAgent = client.UserAgent()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/apikey 持久化失败: %v", err)
 			}
@@ -744,6 +748,7 @@ func main() {
 			client.BaseURL = cfg.BaseURL
 			client.APIKey = cfg.APIKey
 			client.Model = cfg.Model
+			client.SetUserAgent(cfg.UserAgent)
 			if cfg.ThinkingStr() != "off" {
 				client.SetThinkingLevel(cfg.ThinkingStr())
 			} else {
@@ -1223,29 +1228,30 @@ func main() {
 	// 内置 /config 命令：查看/修改运行配置
 	a.Commands.Register(agent.Command{
 		Name:        "config",
-		Description: "查看/修改运行配置（/config 查看 ｜ /config max_steps 30 设置）",
+		Description: "查看/修改运行配置（/config 查看 ｜ /config max_steps 30 ｜ /config user_agent MyApp/1.0）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			cfg, _ := config.Load(config.DefaultPath())
 			if args == "" {
 				// 查看当前生效配置（内存中的 a.MaxSteps 优先，因为可能被 Run 兜底改写）
 				ms := a.MaxSteps
+				msStr := fmt.Sprintf("%d", ms)
 				if ms < 0 {
-					return fmt.Sprintf(`当前运行配置:
-  最大步数 max_steps: -1 (无限)
-  上下文窗口 context_window: %d (token, 配置:%d)
-  思考等级 thinking_level: %s
-  模型 model: %s
-  供应商 base_url: %s
-可修改项: max_steps ｜ context_window ｜ 例: /config max_steps 30 /config context_window 128000`, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
+					msStr = "-1 (无限)"
+				}
+				// UA 以内存中的客户端为准（可能刚被 /config user_agent 改写）
+				ua := client.UserAgent()
+				if ua == "" {
+					ua = "(默认 Go-http-client)"
 				}
 				return fmt.Sprintf(`当前运行配置:
-  最大步数 max_steps: %d
+  最大步数 max_steps: %s
   上下文窗口 context_window: %d (token, 配置:%d)
   思考等级 thinking_level: %s
   模型 model: %s
   供应商 base_url: %s
-可修改项: max_steps ｜ context_window ｜ 例: /config max_steps 30 /config context_window 128000`, ms, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL), nil
+  自定义UA user_agent: %s
+可修改项: max_steps ｜ context_window ｜ user_agent ｜ 例: /config max_steps 30 /config context_window 128000 /config user_agent MyApp/1.0`, msStr, *ctxWindow, cfg.ContextWindow, cfg.ThinkingStr(), client.Model, client.BaseURL, ua), nil
 			}
 			fields := strings.Fields(args)
 			if len(fields) == 2 && fields[0] == "max_steps" {
@@ -1276,6 +1282,10 @@ func main() {
 					if a.Compactor.KeepRecentTokens > n/3 {
 						a.Compactor.KeepRecentTokens = n / 3
 					}
+					// 下限兜底（同启动逻辑）：keepRecent 过小会让压缩后仍超阈值，反复触发
+					if a.Compactor.KeepRecentTokens < 500 {
+						a.Compactor.KeepRecentTokens = 500
+					}
 				}
 				if err := config.Save(config.DefaultPath(), cfg); err != nil {
 					return "", fmt.Errorf("持久化失败: %v", err)
@@ -1288,7 +1298,27 @@ func main() {
 				}
 				return fmt.Sprintf("✓ 上下文窗口已设置为 %d，已持久化到 %s%s", n, config.DefaultPath(), ratio), nil
 			}
-			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps 30 或 /config context_window 128000")
+			// /config user_agent <字符串>：自定义 User-Agent（支持含空格，取键后的整段）
+			// /config user_agent -  或 reset + 空值 = 清除（恢复 Go 默认）
+			if len(fields) >= 1 && (fields[0] == "user_agent" || fields[0] == "ua") {
+				ua := strings.TrimSpace(strings.TrimPrefix(args, fields[0]))
+				if ua == "-" || ua == "reset" || ua == "default" {
+					ua = ""
+				}
+				if strings.ContainsAny(ua, "\r\n") {
+					return "", fmt.Errorf("user_agent 不能包含换行符")
+				}
+				client.SetUserAgent(ua)
+				cfg.UserAgent = ua
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return "", fmt.Errorf("持久化失败: %v", err)
+				}
+				if ua == "" {
+					return fmt.Sprintf("✓ 自定义 UA 已清除，恢复默认（Go-http-client），已持久化到 %s", config.DefaultPath()), nil
+				}
+				return fmt.Sprintf("✓ 自定义 UA 已设置为 %q，已立即生效并持久化到 %s", ua, config.DefaultPath()), nil
+			}
+			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps 30 ｜ /config context_window 128000 ｜ /config user_agent MyApp/1.0（清除用 /config user_agent -）")
 		},
 	})
 	// 内置 /compact 命令：手动触发上下文压缩
@@ -1360,6 +1390,7 @@ func main() {
 			cfg.APIKey = client.APIKey
 			cfg.ContextWindow = *ctxWindow
 			cfg.ThinkingLevel = client.ThinkingEnabled()
+			cfg.UserAgent = client.UserAgent()
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				return "", fmt.Errorf("保存失败: %v", err)
 			}

@@ -36,6 +36,8 @@ type OpenAI struct {
 	// Params 运行时对话参数（temperature/top_p/max_tokens，Web UI 设置用）。
 	// nil = 不传，保持供应商默认。进程级生效，影响 Chat / ChatWithTools 全部路径。
 	Params *ChatParams
+	// userAgent 自定义 User-Agent（空=不覆盖，用 Go 默认）。经 SetUserAgent 设置。
+	userAgent string
 	// 最后一次响应的 token 用量（只读，供 TUI 状态栏展示）
 	lastUsage *agent.Usage
 }
@@ -50,6 +52,23 @@ type ChatParams struct {
 // SetParams 设置运行时对话参数（nil 清除）。
 func (o *OpenAI) SetParams(p *ChatParams) {
 	o.Params = p
+}
+
+// SetUserAgent 设置自定义 User-Agent（空串 = 恢复 Go 默认）。
+func (o *OpenAI) SetUserAgent(ua string) {
+	o.userAgent = strings.TrimSpace(ua)
+}
+
+// UserAgent 返回当前自定义 User-Agent（空=默认）。
+func (o *OpenAI) UserAgent() string {
+	return o.userAgent
+}
+
+// applyUA 把自定义 User-Agent 写入请求（未设置则不动，保留 Go 默认）。
+func (o *OpenAI) applyUA(req *http.Request) {
+	if o.userAgent != "" {
+		req.Header.Set("User-Agent", o.userAgent)
+	}
 }
 
 // applyParams 把运行时参数应用到请求（nil 字段不覆盖，保持默认）。
@@ -330,6 +349,7 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 		return "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.applyUA(httpReq)
 	if c.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
@@ -638,6 +658,7 @@ func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message,
 		return "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.applyUA(httpReq)
 	if c.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
@@ -823,6 +844,7 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 			return "", err
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
+		o.applyUA(httpReq)
 		if o.APIKey != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
 		}
@@ -1074,6 +1096,7 @@ func (c *OpenAI) Chat(messages []agent.Message) (string, error) {
 		return "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	c.applyUA(httpReq)
 	if c.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
@@ -1130,6 +1153,7 @@ func (o *OpenAI) AIChat(req AIChatRequest) (string, error) {
 		return "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	o.applyUA(httpReq)
 	if o.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
 	}
@@ -1179,6 +1203,7 @@ func (o *OpenAI) SummarizeMessages(msgs []agent.Message, maxTokens int) (string,
 		return "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	o.applyUA(httpReq)
 	if o.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+o.APIKey)
 	}
