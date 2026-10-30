@@ -4,7 +4,15 @@
 
 ---
 
-## [Unreleased]
+## [v0.5.7]
+
+### 🐞 修复（空工具名导致上游 11133）
+
+- **根因**：模型丢失 `tool` 字段且 args 里无法猜出工具时，旧实现仍继续执行并把 `ToolCallRef{ID, Name:"", Args}` 写进历史；编码层原样发出 `tool_calls[].function.name == ""`，上游一律拒绝——workbuddy 回通用 `11133`（根因被网关吞掉）、stepfun/agnes 回 `tool_calls.function.name is required`。
+- **源头拦截**（`agent/loop.go runOneToolCall`）：空工具名且猜不出时不再往下走，直接注入「第 i/n 个工具调用缺少工具名」纠正提示让模型重发。与既有空参数兜底同形态（普通 assistant 文本 + user 纠正，不标 `KindToolCall`，避免触发另一类 `tool calls and tool results do not match` 400）。
+- **编码层兜底**（`llm/openai.go`）：`encodeToolCallMsg` 过滤空名调用（无法表达则不声明）；`pairedCallIDs` 同步排除空名调用，否则其结果会以孤立 `role:"tool"` 发出。
+- **信息不丢**：空名调用对应的工具结果降级为普通 user 文本，历史仍可读。
+- **测试**：`internal/llm/empty_toolname_test.go`（空名不发 / 混合场景只保留合法调用 / 结果降级不丢失）、`internal/agent/empty_toolname_test.go`（循环内不写空名 `ToolCallRef` 且注入纠正提示）。
 
 ### ✨ 新增（自定义 User-Agent）
 
@@ -13,7 +21,7 @@
 - **全路径覆盖**：`internal/llm` 的 6 处出站请求统一经 `applyUA` 注入（ChatWithTools 非流式/流式、AIChat、AIChatStream、Chat、SummarizeMessages），未设置时不覆盖 Go 默认。
 - **加载/同步**：启动时从配置注入；`/reload` 重新应用；`/save`、`/provider`、`/model`、`/apikey` 的持久化段同步 `user_agent`，不会因改其它项而丢失。
 
-### 🐞 修复
+### 🐞 修复（压缩阈值）
 
 - **`/config context_window` 改小窗口后压缩阈值不同步**：补齐与启动一致的 `KeepRecentTokens` 下限兜底（≥500），避免 keepRecent 过小导致压缩后仍超阈值、反复触发。
 

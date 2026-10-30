@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.5.6</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.5.7</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -144,6 +144,10 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.5.7 · 空工具名修复（上游 11133）</h3>
+          <p>模型偶尔会丢 <code>tool</code> 字段，旧实现仍把 <code>ToolCallRef{Name:""}</code> 写进历史，<strong>发出去的 tool_calls 里 <code>function.name</code> 是空串</strong>，workbuddy 回 <code>11133</code>、stepfun/agnes 回 <code>tool_calls.function.name is required</code>，任务直接中断。现在<strong>双层防御</strong>：源头无法确定工具名时不执行、不写 tool_calls，改为注入纠正提示让模型重发；编码层再兜底过滤空名调用，其结果降级为普通文本不丢信息。</p>
+        </div>
         <div class="card">
           <h3>v0.5.6 · <code>/checkupdate</code> 版本检查 + 压缩三修</h3>
           <p>新增 <code>/checkupdate</code>：读取主页最新版本与更新内容，与当前版本比对，<strong>只提醒不自动更新</strong>。同时修掉压缩的三种「假成功」——切点无效却谎报压缩成功、摘要为空却照写记录（等于静默丢历史）、压缩后 token 反而变大。<strong>现在压缩必须真的变小，否则宁可放弃。</strong></p>
