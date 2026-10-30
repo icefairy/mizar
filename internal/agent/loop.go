@@ -228,6 +228,11 @@ type callRequest struct {
 	// CallID 原生 tool_call id（来自 OpenAI tool_calls[].id）。
 	// 回填结果时用作 tool_call_id；为空则分配一个合成 ID。
 	CallID string `json:"callId,omitempty"`
+
+	// ID 仅为兼容读取：原生 tool_calls 转文本协议时写的是 "id"（见 llm.callSpec），
+	// 而本结构历史 tag 是 "callId"——两者不匹配会让原生 id 永远丢失、每次都被
+	// 合成新 call_N。解析后由 parseOneCallJSON 归并到 CallID，不参与序列化输出。
+	ID string `json:"id,omitempty"`
 }
 
 // toolCallSeq 合成 tool_call id 的序号（进程内单调递增，保证唯一）。
@@ -916,10 +921,9 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 
 	// 空工具名兜底（规避 `tool "" not found`）：模型在某些形态下丢了 tool 字段，
 	// 但 args 里带了 bash 的 command 参数——此时猜为 bash 工具。
-	if c.Tool == "" {
-		if trimmed := strings.TrimSpace(c.Args); strings.Contains(trimmed, "\"command\":") {
-			c.Tool = "bash"
-		}
+	// 判断条件与解析层的 inferableToolFromArgs 共用，避免两处逻辑漂移。
+	if strings.TrimSpace(c.Tool) == "" && inferableToolFromArgs(c.Args) {
+		c.Tool = "bash"
 	}
 
 	// 仍无法确定工具名：不执行、不写 tool_calls，注入纠正提示让模型重发。
@@ -1158,13 +1162,59 @@ func parseOneCallJSON(extracted string) (*callRequest, error) {
 	if reqJSON.Action == "" {
 		// 原生 bare 工具调用（缺 action 字段）：{"tool":...,"args":...}
 		// 含 tool 字段即视为工具调用（args 可为空字符串，循环内做空参数兜底），归一化为标准工具调用。
-		if reqJSON.Tool != "" {
+		if strings.TrimSpace(reqJSON.Tool) != "" {
 			reqJSON.Action = "tool"
+			normalizeCallIDs(&reqJSON)
 			return &reqJSON, nil
 		}
 		return nil, fmt.Errorf("缺少 action 字段：提取到的 JSON 没有 action 字段\n请输出：{\"action\":\"tool\",\"tool\":\"工具名\",\"args\":\"{...}\"} 或 {\"action\":\"reply\",\"text\":\"回答\"}")
 	}
+	// 空工具名校验：只要还有可推断线索就放行（循环层会把 args 含 "command": 的
+	// 空名调用兜底为 bash）。只有完全无救的空名才在此拒绝——模型偶发输出
+	// {"action":"tool","args":"{\"path\":...}","tool":""}（实测 2026-10-28/29 两例：
+	// 参数抄上一条 read，工具名留空）。旧实现只要 action=tool 就放行，空名一路
+	// 写进历史并发给上游 → workbuddy 11133 / stepfun、agnes "function.name is required"，
+	// 到那一步已无人能自纠。层层把关：能在循环层推断的留给循环层，推断不了才报错。
+	if reqJSON.Action == "tool" {
+		if len(reqJSON.Calls) > 0 {
+			// calls 是权威列表；顶层 tool/args 只是首个调用的冗余副本，它为空正常。
+			for i, c := range reqJSON.Calls {
+				if strings.TrimSpace(c.Tool) == "" && !inferableToolFromArgs(c.Args) {
+					return nil, fmt.Errorf("第 %d 个工具调用缺少工具名（tool 字段为空，且参数里无法推断）\n原始输出片段：%s\n请重新调用并填入正确的工具名，例如：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{...}\"}", i+1, truncate(extracted, 120))
+				}
+			}
+		} else if strings.TrimSpace(reqJSON.Tool) == "" && !inferableToolFromArgs(reqJSON.Args) {
+			return nil, fmt.Errorf("工具调用缺少工具名（tool 字段为空，且参数里无法推断）\n原始输出片段：%s\n请重新调用并填入正确的工具名，例如：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{...}\"}", truncate(extracted, 120))
+		}
+	}
+	normalizeCallIDs(&reqJSON)
 	return &reqJSON, nil
+}
+
+// normalizeCallIDs 把兼容字段 ID 归并到 CallID（原生 tool_calls 的 "id" 写法），
+// 并递归处理 calls[] 元素。归并后清空 ID，避免序列化时输出两份 id。
+//
+// 背景：llm.callSpec 序列化用 "id"，而 callRequest 历史 tag 是 "callId"，
+// 两者不匹配导致原生 id 在文本协议往返中丢失，每一步都重新合成 call_N。
+func normalizeCallIDs(r *callRequest) {
+	if r.CallID == "" {
+		r.CallID = r.ID
+	}
+	r.ID = ""
+	for i := range r.Calls {
+		if r.Calls[i].CallID == "" {
+			r.Calls[i].CallID = r.Calls[i].ID
+		}
+		r.Calls[i].ID = ""
+	}
+}
+
+// inferableToolFromArgs 判断空工具名调用是否还能从参数里推断出工具。
+// 当前只有一条线索：args 含 "command": → 可推断为 bash。
+// 必须与 runOneToolCall 里的兜底条件完全一致，否则会出现「解析层放行但循环层
+// 推断不出」→ 空名照旧进历史的漏洞。
+func inferableToolFromArgs(args string) bool {
+	return strings.Contains(strings.TrimSpace(args), `"command":`)
 }
 
 // extractActionXML 从 XML 标签格式中提取控制指令（返回**全部**，保序）。
