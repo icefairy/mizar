@@ -723,6 +723,17 @@ func (m *tuiModel) startTask(input string) {
 		m.liveMu.Unlock()
 	}
 
+	// 输出截断提示：finish_reason=length 时回答被 max_tokens 砍断，看着完整实则残缺。
+	// 不提示的话用户不知道还需要说「继续」。走 err role：红色，与普通系统消息区分。
+	m.agent.OnTruncated = func(step int) {
+		_ = step // 仅需告知用户；步号已在 diag 日志里（notifyTruncated）
+		m.addChatLineAsync(chatLine{
+			role:    "err",
+			content: "回答被输出长度上限（max_tokens）截断，内容不完整。可输入「继续」让模型接着做，或用 /config max_tokens 调大上限。",
+			ts:      time.Now(),
+		})
+	}
+
 	go func() {
 		// 任务 goroutine 退出时解除“取消中”状态（新任务可安全启动，不会再干扰本任务）
 		defer m.canceling.Store(false)
@@ -768,6 +779,7 @@ func (m *tuiModel) startTask(input string) {
 		m.toolLog = nil
 		m.liveMu.Unlock()
 		m.agent.OnToolExchange = nil
+		m.agent.OnTruncated = nil
 		if !mine {
 			return
 		}

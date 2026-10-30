@@ -186,6 +186,12 @@ type Agent struct {
 	// 持久化后，用户退出再进入会直接以裁剪后的上下文开始，不用重新撞 400。
 	OnEmergencyTrim func(pct, keptMsgs int)
 
+	// OnTruncated 可选：本步 LLM 输出因 max_tokens 上限被截断（finish_reason=length）时回调。
+	// step 为发生截断的步号。供 TUI/CLI 提示用户「此回答被截断，可输入继续」，
+	// 否则用户看到的是语气自然但句子断在中间的应答，无从得知实际不完整。
+	// 仅在 LLM 实现了 TruncationLister 时才会被调用；不持久化。
+	OnTruncated func(step int)
+
 	// 快速插入（steer/abort，见 steer.go）
 	steerMu  sync.Mutex // 保护 steer 槽位
 	steer    *steerMsg  // 待插入消息（nil = 无）
@@ -805,6 +811,9 @@ func (a *Agent) Run(task string) (string, error) {
 					continue
 				}
 			}
+			// 截断告知：reply 是任务终点，一旦是 length 截断，用户看到的就是一句
+			// 语气自然但断在中间的回答。必须在收尾前把事实报出去（日志 + 回调）。
+			a.notifyTruncated(qc.Step)
 			q.Complete(nil)
 			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
 			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text}, a.logf)
@@ -1089,6 +1098,22 @@ func (a *Agent) notifyEmergency(pct, keptMsgs int) {
 
 func (a *Agent) logf(msg string) {
 	a.log("%s", msg)
+}
+
+// notifyTruncated 检查并报告上一步 LLM 输出是否被 max_tokens 截断。
+//
+// 仅当 LLM 实现 TruncationLister 时才有信号（已用类型断言，未实现则直接返回，
+// 保持旧行为零副作用）。信号读后清零由实现方负责。
+// 不能静默：截断后的回答看似完整，用户不知道还需要说「继续」；日志可供事后追查。
+func (a *Agent) notifyTruncated(step int) {
+	lister, ok := a.LLM.(TruncationLister)
+	if !ok || !lister.LastTruncated() {
+		return
+	}
+	diag.Logf("agent", "输出被 max_tokens 截断: step=%d", step)
+	if a.OnTruncated != nil {
+		a.OnTruncated(step)
+	}
 }
 
 func (a *Agent) log(format string, args ...any) {

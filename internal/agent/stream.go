@@ -48,6 +48,16 @@ type CancellableStreamToolCallLLM interface {
 	ChatWithToolsStreamCtx(ctx context.Context, messages []Message, tools []plugins.Tool, onToken func(StreamDelta)) (string, error)
 }
 
+// TruncationLister 可选接口：报告「最近一次 LLM 调用是否因 max_tokens 截断」
+// （对应 finish_reason == "length"）。
+//
+// 采用旁路信号而非扩展 Chat* 返回值，是为了不惊扰上面四个接口的全部实现与测试替身。
+// 实现方应**读后清零**，否则该信号会串到下一步造成误报。
+// 未实现本接口的 LLM 视为「无截断信号」——循环完全按旧行为运行，没有任何副作用。
+type TruncationLister interface {
+	LastTruncated() bool
+}
+
 // StreamTextExtractor 增量提取模型流式输出中的「可显示回复文本」。
 //
 // 背景：mizar 的回复协议里，模型每一步的输出都是 JSON 控制文本

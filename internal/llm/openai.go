@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"mizar/internal/agent"
@@ -40,6 +41,55 @@ type OpenAI struct {
 	userAgent string
 	// 最后一次响应的 token 用量（只读，供 TUI 状态栏展示）
 	lastUsage *agent.Usage
+
+	// lastTruncated 最近一次 agent 循环路径调用是否因 max_tokens 被截断
+	// （finish_reason == "length"）。供 agent 层经 LastTruncated() 读取后据此提示用户。
+	// 用旁路字段而非改 Chat* 签名：Chat* 返回值被 5 个可选接口共享，改签名会波及
+	// 全部接口实现与测试替身（见 agent/stream.go 的类型断言回退链）。
+	truncMu       sync.Mutex
+	lastTruncated bool
+}
+
+// LastTruncated 报告并清零「最近一次调用是否因 max_tokens 截断」信号。
+// 读后即清，避免该信号串到下一步造成误报。实现 agent.TruncationLister。
+func (o *OpenAI) LastTruncated() bool {
+	o.truncMu.Lock()
+	defer o.truncMu.Unlock()
+	v := o.lastTruncated
+	o.lastTruncated = false
+	return v
+}
+
+// markTruncated 记录本次调用是否被截断（每次 agent 循环路径调用开始时都会先覆盖）。
+func (o *OpenAI) markTruncated(v bool) {
+	o.truncMu.Lock()
+	o.lastTruncated = v
+	o.truncMu.Unlock()
+}
+
+// truncationMarker 模型可见的截断标记。作为返回文本前缀注入，使模型下一轮能
+// 分辨「自己的输出被长度上限截断」与「自己写坏了 JSON」——两者历史表现相同
+// （循环报格式错误），但对症下药完全不同：前者要拆分/精简，后者要修语法。
+// 始终作为**前缀**出现，不塞进 JSON 内部，wrapReplyJSON 的解析不变量保持不变。
+const truncationMarker = "⚠️[截断]"
+
+// truncationNotice 生成注入模型上下文的截断提示。
+//
+// 仅对 "length" 生效：content_filter 是内容策略拦截，提示模型「拆分输出」属于错误
+// 纠偏，会白白浪费一轮；stop / 缺失也不提示（缺失多为上游提前断流，提示无益）。
+//
+// toolCall 为 true 时针对工具调用参数被截断给出专门措辞：此时绝不能续写补全，
+// 必须整条重发完整参数，否则会写出语法损坏或被追加半截的文件/命令。
+func truncationNotice(finishReason string, toolCall bool) string {
+	if finishReason != "length" {
+		return ""
+	}
+	if toolCall {
+		return truncationMarker + "上一条工具调用参数因输出长度上限被强制截断，参数不完整。" +
+			"**不要**在截断处续写补全，请把完整参数重新输出一次（必要时拆成多次较小的工具调用）。\n"
+	}
+	return truncationMarker + "上一条输出因输出长度上限（max_tokens）被强制截断，内容不完整。" +
+		"请不要从截断处硬续，而是把内容拆分/精简后重新完整输出。\n"
 }
 
 // ChatParams 运行时对话参数（可选覆盖）。
@@ -378,6 +428,7 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 
 	msg := out.Choices[0].Message
 	fr := out.Choices[0].FinishReason
+	c.markTruncated(fr == "length")
 	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本（附带模型说明文字作为 reason）
 	if len(msg.ToolCalls) > 0 {
 		return toolCallsToText(msg.ToolCalls, msg.Content), nil
@@ -390,7 +441,7 @@ func (c *OpenAI) ChatWithTools(messages []agent.Message, tools []plugins.Tool) (
 		diag.Logf("llm", "非流式 finish_reason=%q 非 stop，内容已按协议归一化", fr)
 	}
 	if wrapped := wrapReplyJSON(msg.Content); wrapped != "" {
-		return wrapped, nil
+		return withTruncationNotice(wrapped, msg.Content, fr), nil
 	}
 	return msg.Content, nil
 }
@@ -423,6 +474,21 @@ func wrapReplyJSON(content string) string {
 		return s
 	}
 	return fmt.Sprintf(`{"action":"reply","text":"%s"}`, escapeJSONString(content))
+}
+
+// withTruncationNotice 在 wrapReplyJSON 的产出前追加截断提示（仅 finish_reason=length）。
+//
+// 前置为**独立行前缀**而非塞进 JSON 内部，原因有二：
+//  1. 保持 wrapReplyJSON 的解析不变量原封不动——前缀 + 合法控制 JSON 仍能被
+//     parseCallJSON 消化（JSON 提取器会跳过前导文本）。
+//  2. 截断的工具调用 JSON 仍是畸形数据，绝不能因“拼上提示”而变成可执行调用：
+//     它照旧走「格式错误」纠正路径，只是模型额外看到真实失败原因（长度，而非语法）。
+func withTruncationNotice(wrapped, rawContent, finishReason string) string {
+	notice := truncationNotice(finishReason, agent.IsToolCallText(strings.TrimSpace(rawContent)))
+	if notice == "" {
+		return wrapped
+	}
+	return notice + wrapped
 }
 
 // encodeMessages 把 agent.Message 列表编码为 OpenAI 兼容的 chatMsg 列表。
@@ -698,6 +764,7 @@ func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message,
 
 	msg := out.Choices[0].Message
 	fr := out.Choices[0].FinishReason
+	c.markTruncated(fr == "length")
 	// 优先处理原生 tool_calls：转为 agent 循环可解析的 JSON 文本（附带模型说明文字作为 reason）
 	if len(msg.ToolCalls) > 0 {
 		return toolCallsToText(msg.ToolCalls, msg.Content), nil
@@ -709,7 +776,7 @@ func (c *OpenAI) ChatWithToolsCtx(ctx context.Context, messages []agent.Message,
 		diag.Logf("llm", "非流式 finish_reason=%q 非 stop 且无工具调用，内容已按协议归一化", fr)
 	}
 	if wrapped := wrapReplyJSON(msg.Content); wrapped != "" {
-		return wrapped, nil
+		return withTruncationNotice(wrapped, msg.Content, fr), nil
 	}
 	return msg.Content, nil
 }
@@ -981,11 +1048,12 @@ func (o *OpenAI) streamCoreCtx(ctx context.Context, req *chatReq, wrapReply bool
 	// 文本 → 循环解析失败白耗一轮。
 	// wrapReply=false（插件直连）必须拿到原始 content，一律不包装。
 	if wrapReply {
+		o.markTruncated(lastFinishReason == "length")
 		if lastFinishReason != "stop" && strings.TrimSpace(content.String()) != "" {
 			diag.Logf("llm", "流 finish_reason=%q 非 stop 且无工具调用，内容已按协议归一化", lastFinishReason)
 		}
 		if wrapped := wrapReplyJSON(content.String()); wrapped != "" {
-			return wrapped, nil
+			return withTruncationNotice(wrapped, content.String(), lastFinishReason), nil
 		}
 	}
 	return content.String(), nil
