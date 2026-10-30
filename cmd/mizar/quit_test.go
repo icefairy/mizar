@@ -74,21 +74,25 @@ func TestAddQuitHintContainsSession(t *testing.T) {
 }
 
 // TestSubmitInputQuitRoutesToStop submitInput 收到 /quit 时应走退出路径
-// （渲染提示 + Stop），而不是把消息交给命令分发或 startTask。
+// （回显命令 + 渲染续接提示 + Stop），而不是把消息交给命令分发或 startTask。
 func TestSubmitInputQuitRoutesToStop(t *testing.T) {
 	m := newTUIForQuitTest()
 	before := len(m.lines)
 	m.submitInput("/quit")
-	// 退出提示已加入对话列表
-	if len(m.lines) != before+1 {
-		t.Fatalf("lines = %d, want %d (one hint added)", len(m.lines), before+1)
+	// 斜杠命令会先回显用户输入（role=user），再追加续接提示（role=system），共 2 行。
+	// 旧实现未回显命令，只加 1 行；此处按现行行为断言。
+	if len(m.lines) != before+2 {
+		t.Fatalf("lines = %d, want %d (echo + hint)", len(m.lines), before+2)
 	}
-	if !strings.Contains(m.lines[len(m.lines)-1].content, "mizar -session") {
-		t.Fatalf("last line = %q", m.lines[len(m.lines)-1].content)
+	echo := m.lines[before]
+	if echo.role != "user" || echo.content != "/quit" {
+		t.Fatalf("第 1 行应为 /quit 回显, got role=%q content=%q", echo.role, echo.content)
 	}
-	// 不应启动普通任务（loading 不应为 true — submitInput 不会直接设置，
-	// 通过检查无新 user 行即可断言）
-	if m.lines[len(m.lines)-1].role == "user" {
-		t.Fatal("/quit 不应被作为普通任务发送")
+	hint := m.lines[before+1]
+	if hint.role != "system" {
+		t.Fatalf("第 2 行应为续接提示(system), got role=%q", hint.role)
+	}
+	if !strings.Contains(hint.content, "mizar -session") {
+		t.Fatalf("hint content = %q", hint.content)
 	}
 }
