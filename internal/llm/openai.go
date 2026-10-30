@@ -462,6 +462,8 @@ func encodeMessages(msgs []agent.Message) []chatMsg {
 			out = append(out, encoded)
 		case agent.KindToolResult:
 			if id, ok := takePaired(&open, m.ToolCallID); ok {
+				// 配对队列只收「已声明且名字非空」的调用（见 encodeToolCallMsg），
+				// 因此这里取到的一定是合法 id。
 				out = append(out, chatMsg{
 					Role:       "tool",
 					Content:    toolResultBody(m.Content),
@@ -511,7 +513,9 @@ func pairedCallIDs(msgs []agent.Message) map[string]bool {
 		switch m.Kind {
 		case agent.KindToolCall:
 			for _, c := range toolCallRefs(m) {
-				if c.ID != "" {
+				// 空名调用不会被声明（见 encodeToolCallMsg），不能算作「会收到回应」，
+				// 否则它的结果会以孤立 role:"tool" 发出。
+				if c.ID != "" && strings.TrimSpace(c.Name) != "" {
 					open = append(open, c.ID)
 				}
 			}
@@ -563,6 +567,12 @@ func encodeToolCallMsg(m agent.Message, paired map[string]bool) (chatMsg, bool) 
 	for _, c := range calls {
 		if !paired[c.ID] {
 			continue // 该调用没有对应结果：不得声明
+		}
+		if strings.TrimSpace(c.Name) == "" {
+			// 空工具名：上游必然 400（workbuddy 11133 / stepfun、agnes 的
+			// "tool_calls.function.name is required"），且错误文本常被网关吞掉。
+			// 这种调用无法表达，不声明；其结果在 encodeMessages 里降级为普通文本。
+			continue
 		}
 		var w wireToolCall
 		w.ID = c.ID

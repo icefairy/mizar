@@ -922,6 +922,21 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		}
 	}
 
+	// 仍无法确定工具名：不执行、不写 tool_calls，注入纠正提示让模型重发。
+	// ⚠ 绝不能带着空名继续往下走：那样会把 ToolCallRef{Name:""} 写进历史，
+	// 编码后发出 `tool_calls[].function.name == ""` → 上游一律 400
+	// （workbuddy 报 "11133"、stepfun/agnes 报 "tool_calls.function.name is required"，
+	// 2026-10-30 实测）。标 KindToolCall 而无 ToolCalls 也会触发另一类 400，
+	// 因此这里与空参数兜底保持同一形态：普通 assistant 文本 + 纠正提示。
+	if strings.TrimSpace(c.Tool) == "" {
+		q.EndOperation("tool:")
+		msg := fmt.Sprintf("⚠️ 第 %d/%d 个工具调用缺少工具名（tool 字段为空）。请重新调用并填入正确的工具名，例如：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{...}\"}。可用工具见系统提示。", idx+1, total)
+		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
+		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
+	}
+
 	// respond 工具：直接回答出口。不执行不回填，text 参数作为最终回答返回。
 	// 给 tool_choice=required 模式下的模型一条正规的"回答"路径，
 	// 避免模型被迫硬调无关工具或手写畸形 JSON。
