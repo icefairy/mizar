@@ -6,7 +6,7 @@
 
 **开阳 (Mizar)** 是一个极简、零依赖、单文件、可自举的 AI Agent 框架。
 
-- **核心**：单个静态 Go 二进制（~67MB，strip 后，无运行时依赖，无需 npm / Python / Docker）
+- **核心**：单个静态 Go 二进制（未压缩 ~67MB，发布包 tar.gz ~22MB，无运行时依赖，无需 npm / Python / Docker）
 - **插件**：TypeScript / JavaScript 文件 —— 内嵌 esbuild 编译 TS，JS 免编译直跑 goja，支持热重载
 - **技能**：纯文本 SKILL.md 文件（兼容 Anthropic/Hermes 第三方技能生态）
 - **工具**：MCP 协议 —— 接入任意语言实现的 MCP 服务器
