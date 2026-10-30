@@ -6,7 +6,7 @@
 
 **开阳 (Mizar)** 是一个极简、零依赖、单文件、可自举的 AI Agent 框架。
 
-- **核心**：单个静态 Go 二进制（~20-30MB，无运行时依赖，无需 npm / Python / Docker）
+- **核心**：单个静态 Go 二进制（~67MB，strip 后，无运行时依赖，无需 npm / Python / Docker）
 - **插件**：TypeScript / JavaScript 文件 —— 内嵌 esbuild 编译 TS，JS 免编译直跑 goja，支持热重载
 - **技能**：纯文本 SKILL.md 文件（兼容 Anthropic/Hermes 第三方技能生态）
 - **工具**：MCP 协议 —— 接入任意语言实现的 MCP 服务器
@@ -214,9 +214,9 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 从项目主页读取最新版本与更新内容，与当前版本比对：
 
 ```
-🔔 发现新版本: v0.5.6（当前 v0.5.3）
+🔔 发现新版本: v0.5.7（当前 v0.5.4）
 
-  更新内容: 版本检查 + 压缩三修
+  更新内容: 空工具名修复（上游 11133）
   ...
   本命令不会自动更新。请自行获取新版本后替换二进制：
     详情/下载: https://icefairy.github.io/mizar/
@@ -273,7 +273,8 @@ chmod +x mizar
   # /provider <baseURL> <apiKey>   一次设置 base URL 与 API Key（自动保存到 ~/.mizar/config.json）
   # /model <name>                   切换模型（自动列出供应商可用模型）
   # /think <level>                  设置思考等级（auto/off/low/medium/high）
-  # /config                        查看当前配置
+  # /config                        查看当前配置（max_steps / context_window / user_agent）
+  # /config user_agent MyApp/1.0   自定义 User-Agent，立即生效并持久化到配置
   # /compact                       立即压缩上下文（可附摘要指引）
   # /chat <内容>                    裸聊：不注入任何提示词直接问模型
   # /checkupdate                   检查是否有新版本（只提醒，不自动更新）
