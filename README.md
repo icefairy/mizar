@@ -49,6 +49,7 @@
 - 鼠标滚轮滚动 + 点击不窃取焦点（Windows 下鼠标上报默认关闭，见 `platform_input.go`）
 - 状态栏显示模型名、思考等级等信息
 - 输入框多行编辑 + Tab 自动补全
+- **本地 bash 直执行**：`!` 开头的输入直接在本地执行 bash 命令，命令与输出都纳入对话历史（详见 [快速开始](#快速开始)）
 - 执行中消息排队，Alt+↑ 取回
 - 聊天区翻页：`PgUp`/`PgDn`，vim 风格 `Ctrl+U`/`Ctrl+D`、`Alt+K`/`Alt+J`（上/下 10 行）、`Alt+G`/`Alt+Shift+G`（到顶/底）
 - 流式输出 + 等待进度指示（LLM SSE → Agent 流式回调 → TUI/Server 增量渲染）
@@ -226,6 +227,25 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 - **三种结论**：发现新版 / 已是最新 / 本地版本更新（开发中会比站点新）
 - **失败不打扰**：网络不可达或站点改版，给出提示并附站点地址，不影响使用
 
+#### 7.6 本地 bash 直执行（`!` 前缀）
+
+有时你只是想跑一条 shell 命令，看一眼结果、再让模型基于输出继续推理，而不想让模型自己调 `bash` 工具绕一圈：
+
+```
+!ls -la
+!git status
+!cat config.json | head -20
+```
+
+- **输入框直接以 `!` 开头**：命令在本地 `bash -c` 下执行，30 秒超时，stderr 合并到 stdout
+- **CLI 模式**：命令与输出直接打印到终端，同时写入会话历史与内存 `Initial`，下一轮模型能看到
+- **TUI 模式**：命令以 `user` 行立即显示，输出以 `cmd` 角色异步显示（保留原始换行，不按 markdown 重排），同步写入会话历史与内存
+- **会话续接**：命令与输出都会落盘，会话重启后仍可续接
+- **典型用途**：查环境状态（`!df -h`、`!ps aux`）、快速读文件（`!cat x.json`）、git 查询（`!git log -5`）
+- **空命令**：输入单独的 `!` 会提示用法，不执行任何东西
+
+注意：`!` 命令不经模型，也不会触发工具调用；需要模型基于输出推理时，直接在下一条消息里发任务即可。
+
 ### 8. LSP 支持
 - **作为客户端**：通过 stdio 启动语言服务器（gopls/tsserver），提供 `lsp_diagnostics` / `lsp_definition` / `lsp_references` / `lsp_completion` 工具
 - **作为服务器**：`--lsp-server` 模式，通过 stdio 接收 JSON-RPC 请求
@@ -277,6 +297,7 @@ chmod +x mizar
   # /config user_agent MyApp/1.0   自定义 User-Agent，立即生效并持久化到配置
   # /compact                       立即压缩上下文（可附摘要指引）
   # /chat <内容>                    裸聊：不注入任何提示词直接问模型
+  # !ls -la                         本地 bash 直执行：!开头直接运行，命令+输出纳入对话历史
   # /checkupdate                   检查是否有新版本（只提醒，不自动更新）
 
 # 也可通过命令行 flag 一次性指定（跳过交互配置）

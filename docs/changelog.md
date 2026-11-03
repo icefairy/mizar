@@ -4,6 +4,20 @@
 
 ---
 
+## [v0.5.9]
+
+### ✨ 新增（`!` 本地 bash 直执行）
+
+- **输入框以 `!` 开头即本地 bash 直执行**：命令不经模型、不触发工具调用，`bash -c` 运行（30 秒超时，stderr 合并到 stdout），结果与错误都展示出来。
+- **命令与输出纳入对话历史**：写入 `agent.Initial` 与会话文件（user=`!cmd`、assistant=`$ cmd\n<输出>`），下一轮模型能看到这次操作，可以基于结果继续推理。CLI / TUI 两条路径都覆盖。
+- **TUI 异步渲染**：命令立即以 user 角色显示，输出以 `cmd` 角色异步追加（`cmd` 角色保留原始换行，不按 markdown 重排）。
+- **空命令保护**：单独输入 `!`（或 `!   `）提示用法，不执行任何东西。
+- **典型用途**：`!ls -la`、`!git status`、`!cat config.json | head -20`、`!df -h` 等快速查环境的命令；需要模型基于输出推理时直接在下一条消息里发任务即可。
+- **banner 提示同步**：TUI 启动提示新增「本地 bash：!开头直接执行」一行。
+- **实现**：`cmd/mizar/helpers.go` 新增 `runUserBash`（`bash -c` + 30s 超时 + env 继承）与 `buildBashEchoContent`（命令回显统一格式）；`cmd/mizar/interactive.go` 经典 readline 分支 + `cmd/mizar/tui.go::submitInput` 顶部拦截（在 `!` 判断里 `return`，避免被后续路径当成任务或 steer 注入）。
+
+---
+
 ## [v0.5.8]
 
 ### ✨ 改进（Alt+C 拷贝模式重做）
