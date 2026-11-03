@@ -129,6 +129,7 @@
         <div class="card"><h3>📄 SKILL.md 技能</h3><p>纯文本技能文件，兼容 Anthropic/Hermes 生态，frontmatter 解析后按需注入上下文。</p></div>
         <div class="card"><h3>🔌 MCP 协议</h3><p>接入任意语言实现的 MCP 服务器，工具生态不再受限。</p></div>
         <div class="card"><h3>🖥️ 交互式 TUI</h3><p>基于 tview，支持鼠标滚动、多行编辑、Tab 补全、流式输出与等待进度指示。</p></div>
+        <div class="card"><h3>⚡ 本地 bash 直执行</h3><p>输入 <code>!ls -la</code> 直接在本地跑 shell，命令与输出都纳入对话历史，模型可基于结果继续推理。</p></div>
         <div class="card"><h3>🌐 Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 三种接入方式。</p></div>
       </div>
     </section>
@@ -145,6 +146,11 @@ chmod +x mizar
 /provider &lt;baseURL&gt; &lt;apiKey&gt;
 /model &lt;name&gt;
 /think &lt;level&gt;
+
+<span class="cm"># 本地 bash 直执行（命令 + 输出都纳入对话历史）</span>
+!ls -la
+!git status
+!cat config.json | head -20
       </div>
       <div class="grid cols-2" style="margin-top:14px">
         <div class="card"><h3>Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 接入。</p></div>
