@@ -416,3 +416,16 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 | 验证框架 | — | 100 场景验证 |
 
 完整对比分析见 [docs/pi-comparison.md](docs/pi-comparison.md)。
+
+---
+
+## 关联项目
+
+开阳生态下的配套项目，可独立部署或组合使用：
+
+| 项目 | 仓库 | 说明 |
+|------|------|------|
+| **开阳 Agent** | [icefairy/mizar](https://github.com/icefairy/mizar) | 本项目：终端 AI 编码助手，单个静态二进制，零依赖离线运行 |
+| **璇玑网关** | [icefairy/xuanji](https://github.com/icefairy/xuanji) | API 网关，为开阳 Agent 提供多供应商模型路由、鉴权与流量管理 |
+| **飞鹤输入法** | [icefairy/feihe](https://github.com/icefairy/feihe) | 开源输入法，支持自定义词库与插件扩展 |
+| **HMEM 记忆系统** | [icefairy/hmem_hermes_agent](https://github.com/icefairy/hmem_hermes_agent) | 分布式长期记忆后端，为开阳 Agent 提供 HMEM 服务端记忆模式（见 §4.1） |
