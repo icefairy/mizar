@@ -35,6 +35,7 @@ func banner() string {
   ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
   ◆ TUI 模式：Enter 发送 / Alt+Enter 换行 / Esc 取消 / Ctrl+T 思考等级
   ◆ 复制粘贴：Alt+C 进入拷贝模式(↑↓ 选择任意区域→y 复制) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+Q 复制/Ctrl+V 粘贴
+  ◆ 本地 bash：!开头直接执行（如 !ls -la），命令与输出纳入对话历史
   ◆ 命令行模式：Enter 发送 ｜ 多行粘贴自动合并 ｜ /send 手动提交
 %s`, version, scrollHint())
 	if startupHint != "" {
@@ -182,6 +183,32 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 			continue // /send 只是多行模式的终止符
 		}
 		rl.AppendHistory(trimmed)
+
+		// "!" 前缀：作为本地 bash 命令直接执行（不经模型）。
+		// 命令与输出都纳入对话历史（user 消息 + assistant 回显），让模型在后续轮次
+		// 看到这次操作的上下文，可以基于结果继续推理或解释。
+		if strings.HasPrefix(trimmed, "!") {
+			cmd := strings.TrimSpace(strings.TrimPrefix(trimmed, "!"))
+			fmt.Printf("$ %s\n", cmd)
+			if cmd == "" {
+				fmt.Println("(! 前面为空，用法: !ls -la)")
+				continue
+			}
+			out, err := runUserBash(cmd)
+			out = strings.TrimRight(out, "\n")
+			if out != "" {
+				fmt.Println(out)
+			}
+			if err != nil {
+				fmt.Printf("(! 退出非零: %v)\n", err)
+			}
+			// 落盘 + 内存历史：user=bash 命令，assistant=命令输出（带非零退出标记）
+			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
+			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: buildBashEchoContent(cmd, out, err)})
+			a.Initial = append(a.Initial, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
+			a.Initial = append(a.Initial, agent.Message{Role: agent.RoleAssistant, Content: buildBashEchoContent(cmd, out, err)})
+			continue
+		}
 
 		// /quit 与 /exit 在命令分发之前拦截（注册表 quit 不再 os.Exit，
 		// 由本层打印续接提示后正常返回，不依赖退出后的 stdout/stderr 时序）

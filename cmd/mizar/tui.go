@@ -1605,6 +1605,36 @@ func (m *tuiModel) submitInput(s string) {
 	if s == "" {
 		return
 	}
+	// "!" 前缀：本地 bash 命令直接执行（不经模型），命令与输出都纳入对话历史。
+	if strings.HasPrefix(s, "!") {
+		cmd := strings.TrimSpace(strings.TrimPrefix(s, "!"))
+		if cmd == "" {
+			m.addChatLine(chatLine{role: "err", content: "! 后面为空，用法: !ls -la", ts: time.Now()})
+			m.renderAllDirect()
+			return
+		}
+		m.addChatLine(chatLine{role: "user", content: "!" + cmd, ts: time.Now()})
+		m.renderAllDirect()
+		go func() {
+			out, err := runUserBash(cmd)
+			out = strings.TrimRight(out, "\n")
+			echo := buildBashEchoContent(cmd, out, err)
+			m.app.QueueUpdateDraw(func() {
+				// cmd 角色保留原始换行，不按 markdown 重排
+				m.addChatLine(chatLine{role: "cmd", content: echo, ts: time.Now()})
+				// 命令与输出都写入内存历史，下一轮模型能延续上下文
+				m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
+				m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleAssistant, Content: echo})
+				// 落盘，保证会话重启后仍可续接
+				if m.store != nil && m.sessionID != "" {
+					m.store.Append(m.sessionID, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
+					m.store.Append(m.sessionID, agent.Message{Role: agent.RoleAssistant, Content: echo})
+				}
+				m.renderAllDirect()
+			})
+		}()
+		return
+	}
 	// 若当前有 ask_user_question 等待回答，将输入作为答案（优先于正常任务流）。
 	// 多问题时逐问收集：未答完不发 channel，只在聊天区提示进入下一问。
 	m.askMu.Lock()

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -384,4 +388,36 @@ func onPluginFileWritten(pluginDir string, pm *plugins.Manager, a *agent.Agent) 
 		}
 		return "\n[自动热重载] " + reloadPlugins(pm, a)
 	}
+}
+
+// runUserBash 以 bash -c 执行用户以 ! 前缀输入的命令，返回合并后的 stdout+stderr。
+// 超时由 context 控制；找不到 bash 时回退到直接 exec 命令本身（不经过 shell）。
+// 输出按原样返回（不裁剪），由调用方决定展示与历史入账。
+func runUserBash(cmd string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c := exec.CommandContext(ctx, "bash", "-c", cmd)
+	var buf bytes.Buffer
+	c.Stdout = &buf
+	c.Stderr = &buf
+	c.Stdin = nil
+	c.Env = os.Environ()
+	if err := c.Run(); err != nil {
+		return buf.String(), err
+	}
+	return buf.String(), nil
+}
+
+// buildBashEchoContent 生成 bash 命令执行结果的 assistant 回显文本，
+// 用于纳入对话历史，让模型在后续轮次能看到命令输出。
+func buildBashEchoContent(cmd, output string, err error) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("$ %s\n", cmd))
+	if output != "" {
+		sb.WriteString(output)
+	}
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("\n[exit error: %v]", err))
+	}
+	return sb.String()
 }
