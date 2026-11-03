@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"github.com/rivo/tview"
 )
 
 // =============================================================================
@@ -110,4 +112,18 @@ func readLocalClipboard() string {
 		}
 	}
 	return ""
+}
+
+// copyInputSelectionToClipboard 把输入框当前选中的文字复制到剪贴板。
+// 由全局 InputCapture 在 KeyCtrlQ 时调用；无选区则返回 false 由调用方决定回退逻辑。
+func copyInputSelectionToClipboard(input *tview.TextArea, clip *clipboard) bool {
+	if input == nil || clip == nil || !input.HasSelection() {
+		return false
+	}
+	text, _, _ := input.GetSelection()
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	clip.set(text)
+	return true
 }

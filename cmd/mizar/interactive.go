@@ -34,7 +34,7 @@ func banner() string {
   ◆ 会话压缩：自动超窗压缩，摘要保留上下文
   ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
   ◆ TUI 模式：Enter 发送 / Alt+Enter 换行 / Esc 取消 / Ctrl+T 思考等级
-  ◆ 复制粘贴：Alt+C 拷贝模式(任意区域) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+V/右键粘贴
+  ◆ 复制粘贴：Alt+C 进入拷贝模式(↑↓ 选择任意区域→y 复制) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+Q 复制/Ctrl+V 粘贴
   ◆ 命令行模式：Enter 发送 ｜ 多行粘贴自动合并 ｜ /send 手动提交
 %s`, version, scrollHint())
 	if startupHint != "" {
