@@ -320,6 +320,8 @@ chmod +x mizar
   # /zig                           查看内嵌 Zig 工具链状态（版本/是否内嵌/是否已释放）
   # /zig init                      释放内嵌 Zig 到 ~/.cache/mizar/zig/，之后可现场编 C/Zig
   # /zig path                      打印 zig 可执行文件路径
+  # /zig new-mcp ./myserver        生成 Zig MCP server 骨架（形态B：独立二进制子进程）
+  # /zig new-wasm ./mykernel       生成 Zig wasm 内核骨架（形态A：内嵌计算内核）
 
 # 也可通过命令行 flag 一次性指定（跳过交互配置）
 ./mizar -base-url http://127.0.0.1:3002/v1 -api-key sk-xxxx -model deepseek-v4-flash
@@ -392,6 +394,8 @@ mizar/
 │   │   └── wasmkern.go     # 加载/实例池/两段式调用 API
 │   └── zigboot/            # 内嵌 Zig 工具链（/zig 释放到本地缓存，供内网现场编译）
 │       ├── zigboot.go      # 内嵌归档的定位/原子解压/状态
+│       ├── templates.go    # /zig new-mcp、/zig new-wasm 的脚手架生成
+│       ├── templates/      # 内嵌骨架（zig-mcp/server.zig、zig-wasm/kernel.zig）
 │       └── zigdist/        # 归档目录（默认空，.gitignore 忽略，--embed 生成）
 ├── extensions/             # 插件目录（Agent 自写的 .ts 文件）
 ├── skills/                 # 技能目录（SKILL.md）
@@ -452,6 +456,27 @@ goja 逐条的 102 ms / 372k 分配，改为宿主函数 `mem_score` 批量计�
 **内嵌进二进制**，目标机拷一个文件即可现场编译 C/Zig（`zig cc` 也是 C 编译器），
 产物是独立可执行文件，再由 `bash` 工具以 `exec` 方式运行——**不涉及 cgo，
 不破坏「纯静态单文件」的部署模型**。
+
+### 两种「用 Zig 扩展 Mizar」的形态
+
+| | 形态 A：wasm 计算内核 | 形态 B：MCP server 子进程 |
+|---|---|---|
+| 产物 | `.wasm`，编译期 `go:embed` 进 Mizar | 独立静态二进制，由 Mizar `exec` 拉起 |
+| 插件里怎么用 | `wasm_invoke(kernel, fn, "文本")` | `mcp_call(server, tool, args)` |
+| 能力边界 | 纯计算、沙箱、无系统调用 | 全部系统能力（IO/网络/多线程） |
+| 改代码后 | 重新构建 Mizar | 重新 `zig build-exe` + `/mcp reload`（无需重启 Mizar） |
+
+一条命令生成可编译的骨架：
+
+```bash
+# 出现提示符后
+/zig new-wasm ./mykernel     # 形态A：kernel.zig（通用 ABI：in_ptr/in_len → 响应头）
+/zig new-mcp  ./myserver     # 形态B：server.zig（JSON-RPC 2.0 按行协议，含 echo/hostname 示例）
+```
+
+Zig 二进制本身**不能**像 .ts 插件那样在进程内热替换（Linux 上运行中的可执行文件被覆盖，
+旧进程仍跑旧 inode）；但 `/mcp reload` 会杀掉旧子进程按同路径重启，因此是「重编译 + reload」
+级别的近似热加载。完整解释与逐步教程见 [docs/zig-plugin-forms.md](docs/zig-plugin-forms.md)。
 
 ### 发版侧（有网的机器）
 

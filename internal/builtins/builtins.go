@@ -18,11 +18,13 @@ package builtins
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"mizar/internal/plugins"
+	"mizar/internal/zigboot"
 )
 
 // All 返回全部内置工具。skillsDir 为技能目录（skill_manage / skill 用）。
@@ -65,6 +67,9 @@ func toolBash() plugins.Tool {
 			}
 			// pi-lens-ignore: go-command-injection (bash tool is designed to execute shell commands)
 			cmd := exec.Command("bash", "-c", p.Command)
+			// 内嵌 Zig 工具链：已释放时把其目录前置到子进程 PATH，
+			// 让 `zig build-exe ...` 直接可用，不必每次写绝对路径。
+			cmd.Env = zigboot.Env(os.Environ())
 			// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化（平台抽象）
 			setupProcessGroup(cmd)
 			// 增量输出：边跑边回调给 UI（对齐 pi 0.73.0）；回调为 nil 时退化为纯累计

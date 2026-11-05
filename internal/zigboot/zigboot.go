@@ -179,6 +179,45 @@ func ZigBinary() string {
 	return filepath.Join(CacheDir(), plat, name)
 }
 
+// Available 报告 zig 工具链是否已释放到本地缓存（即可直接执行）。
+// 只做一次 stat，不触发解压——调用方（如 bash 工具每次执行）可放心频繁调用。
+func Available() bool {
+	st, err := os.Stat(ZigBinary())
+	return err == nil && !st.IsDir()
+}
+
+// Env 在给定环境变量切片上把 zig 工具链目录前置到 PATH，返回新切片。
+//
+// 用途：让 Agent 的 bash 工具、插件 shell_exec 等子进程直接 `zig build`，
+// 而不必每次手写 ~/.cache/mizar/zig/<平台>/zig 的绝对路径。
+// 未释放时原样返回（不注入不存在的目录，避免污染 PATH）。
+// 传入 env 不会被就地修改（返回新切片）。
+func Env(env []string) []string {
+	if !Available() {
+		return env
+	}
+	dir := filepath.Dir(ZigBinary())
+	out := make([]string, 0, len(env)+1)
+	pathSet := false
+	for _, kv := range env {
+		name, val, ok := strings.Cut(kv, "=")
+		if ok && strings.EqualFold(name, "PATH") {
+			if val == "" {
+				out = append(out, name+"="+dir)
+			} else {
+				out = append(out, name+"="+dir+string(os.PathListSeparator)+val)
+			}
+			pathSet = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !pathSet {
+		out = append(out, "PATH="+dir)
+	}
+	return out
+}
+
 // Release 把内嵌归档解压到缓存目录，返回 zig 可执行文件路径。
 // force=true 时先删除旧目录再解压。
 //

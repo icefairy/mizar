@@ -58,6 +58,40 @@ func (r *MCPRegistry) Close() {
 	r.clients = nil
 }
 
+// Reload 用新配置替换 server 列表：关闭所有已建立的连接（杀掉 stdio 子进程），
+// 下次 mcp_call 时按新配置重新握手。
+//
+// 这是「MCP server 热加载」的实现要点：Zig 编译出的二进制本身没法在进程内被替换，
+// 但**杀掉旧子进程、按同一路径重新拉起**就能吃到新二进制——等价于热更新。
+// 因此改完 Zig 源码后：zig build-exe 覆盖旧文件 → /mcp reload → 立即生效，无需重启 Mizar。
+//
+// 若某次 get() 正在建立连接（持锁），Reload 会等它完成；连接超时默认 30s，
+// 最坏情况等到超时，不会死锁。
+func (r *MCPRegistry) Reload(conf []MCPServerConf) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.clients {
+		c.tr.Close()
+	}
+	r.clients = make(map[string]*mcpClient)
+	r.conf = conf
+}
+
+// Conf 返回当前生效的配置快照。
+func (r *MCPRegistry) Conf() []MCPServerConf {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]MCPServerConf, len(r.conf))
+	copy(out, r.conf)
+	return out
+}
+
 // CallFn 返回可直接装配进 HostFuncs.MCPCall 的调用函数。
 // 每次调用解析 argsJSON（对象）→ 按名查 server → 惰性初始化 → CallTool。
 func (r *MCPRegistry) CallFn() MCPCallFn {

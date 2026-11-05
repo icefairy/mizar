@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **形态 A 补齐**：插件现在可以通过宿主函数 `wasm_invoke` / `wasm_invoke_b64` /
+  `wasm_kernels` 调用任意符合「通用 ABI」的 Zig wasm 内核（`internal/engine/wasmhost.go`），
+  不再局限于内置的 `count_tokens`/`bigram`。搭配 `extensions/wasm_demo.ts` 示例插件与
+  `internal/plugins/wasm_demo_test.go` 端到端测试（含旧版宿主缺失时的降级验证）。
+- **形态 B 脚手架**：`/zig new-mcp <dir>` 生成零依赖 Zig MCP server 骨架
+  （按行 JSON-RPC 2.0，已实现 `initialize`/`tools/list`/`tools/call`，含 `echo` 与
+  `hostname` 示例工具）；`/zig new-wasm <dir>` 生成 wasm 内核骨架。两者内嵌在
+  `internal/zigboot/templates/`，离线可用。
+- **文档**：`docs/zig-plugin-forms.md` 对比两种形态，并逐层解释「Zig 二进制为什么不能
+  像 .ts 插件那样热加载」以及 `/mcp reload` 为何是「重编译 + reload」级别的近似热加载。
+
 ## [v0.7.0] — 2026-11-05
 
 > 主题：**把「计算」和「编译」都装进一个文件**。两条新路径（Zig→wasm 计算内核、

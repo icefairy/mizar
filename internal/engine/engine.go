@@ -130,6 +130,8 @@ func (e *Engine) registerHostFuncs() error {
 	registerSeg(reg)
 	// 记忆检索批量打分宿主函数（mem_tokenize / mem_score）
 	registerMem(reg)
+	// Zig→wasm 计算内核（wasm_invoke / wasm_invoke_b64 / wasm_kernels）
+	registerWasm(reg)
 	if h.HTTPGet != nil {
 		reg("http_get", h.HTTPGet)
 	}

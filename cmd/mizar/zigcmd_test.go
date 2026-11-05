@@ -70,3 +70,53 @@ func TestZigCommandClean(t *testing.T) {
 		t.Fatalf("/zig clean 报错: %v", err)
 	}
 }
+
+// TestZigCommandNewMCPScaffold /zig new-mcp 生成可编译的 MCP server 骨架。
+func TestZigCommandNewMCPScaffold(t *testing.T) {
+	isolateZigCache(t)
+	dir := t.TempDir()
+	proj := dir + "/myserver"
+	out, err := newZigCommand().Run("new-mcp " + proj)
+	if err != nil {
+		t.Fatalf("new-mcp 报错: %v", err)
+	}
+	if !strings.Contains(out, "热加载") || !strings.Contains(out, "/mcp reload") {
+		t.Errorf("脚手架说明应讲清热加载真相:\n%s", out)
+	}
+	if _, err := os.Stat(proj + "/server.zig"); err != nil {
+		t.Fatalf("未生成 server.zig: %v", err)
+	}
+	// 二次调用不覆盖
+	out2, err := newZigCommand().Run("new-mcp " + proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out2, "--force") {
+		t.Errorf("应提示 --force: %s", out2)
+	}
+}
+
+// TestZigCommandNewWasmScaffold /zig new-wasm 生成 wasm 内核骨架，内核名合法化。
+func TestZigCommandNewWasmScaffold(t *testing.T) {
+	isolateZigCache(t)
+	dir := t.TempDir()
+	proj := dir + "/my-kernel"
+	out, err := newZigCommand().Run("new-wasm " + proj)
+	if err != nil {
+		t.Fatalf("new-wasm 报错: %v", err)
+	}
+	if !strings.Contains(out, "wasm_invoke(\"my_kernel\", \"my_kernel\"") {
+		t.Errorf("内核名应合法化为 my_kernel:\n%s", out)
+	}
+	if _, err := os.Stat(proj + "/kernel.zig"); err != nil {
+		t.Fatalf("未生成 kernel.zig: %v", err)
+	}
+}
+
+// TestZigCommandNewMissingArg 缺少目录参数应报错。
+func TestZigCommandNewMissingArg(t *testing.T) {
+	isolateZigCache(t)
+	if _, err := newZigCommand().Run("new-mcp"); err == nil {
+		t.Fatal("缺目录应报错")
+	}
+}

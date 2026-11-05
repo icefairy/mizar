@@ -1537,13 +1537,16 @@ func main() {
 				return fmt.Sprintf("✓ MCP server %q 连接正常，响应: %s", name, result), nil
 
 			case "reload":
-				// 重新从配置文件加载
+				// 重新从配置文件加载，并真正重建运行时连接：
+				// 关闭旧的 stdio 子进程，下次 mcp_call 按新配置重新握手。
+				// 这是 Zig 二进制「热更新」的落地方式：覆盖可执行文件后执行本命令即可。
 				newCfg, err := config.Load(config.DefaultPath())
 				if err != nil {
 					return "", fmt.Errorf("读取配置失败: %v", err)
 				}
 				cfg.MCPServers = newCfg.MCPServers
-				return fmt.Sprintf("✓ MCP 配置已重新加载（%d 个 server: %s）", len(cfg.MCPServers), mcpNames(cfg.MCPServers)), nil
+				mcpReg.Reload(newCfg.MCPServers)
+				return fmt.Sprintf("✓ MCP 配置已重新加载并重建连接（%d 个 server: %s）", len(cfg.MCPServers), mcpNames(cfg.MCPServers)), nil
 
 			default:
 				return "", fmt.Errorf("未知子命令 %q，支持: add/remove/test/reload（输入 /mcp 查看帮助）", cmd)
