@@ -16,6 +16,8 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/peterh/liner v1.2.2
 	github.com/rivo/tview v0.42.0
+	github.com/tetratelabs/wazero v1.12.0
+	github.com/ulikunitz/xz v0.5.17
 	github.com/xuri/excelize/v2 v2.11.0
 	go.lsp.dev/jsonrpc2 v1.0.1
 	go.lsp.dev/protocol v1.0.1

@@ -14,3 +14,7 @@ workerpool.go
 
 # 本地临时材料(不纳入版本管理)
 /docs/innovation-*
+
+# Zig 工具链归档：构建产物，不入库（scripts/fetch-zig.sh --embed 生成）
+internal/zigboot/zigdist/*.tar.xz
+internal/zigboot/zigdist/*.zip

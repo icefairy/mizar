@@ -23,9 +23,24 @@ LDFLAGS := -s -w
 TRIM    := -trimpath
 GOENV   := CGO_ENABLED=0 GOAMD64=v1
 
-.PHONY: all build debug dynamic test release upx clean
+.PHONY: all build debug dynamic test release release-amd64 release-arm64 release-windows upx clean zig-kernels zig-fetch zig-embed zig-select zig-clean
 
 all: build
+
+# 重新编译 Zig→wasm 计算内核（产物 *.wasm 已内嵌进二进制并纳入版本管理）。
+# 只有改动 internal/wasmkern/*.zig 时才需要跑；没有 zig 也能正常构建/发布，
+# 因为 .wasm 产物是提交到仓库的。CI 与发布流程不依赖 zig。
+# 安装 zig：https://ziglang.org/download/ （单个 55MB 包即可，无需其它工具链）
+ZIG ?= zig
+zig-kernels:
+	@command -v $(ZIG) >/dev/null 2>&1 || { echo "zig 未安装，跳过内核重编（使用已提交的 .wasm）"; exit 0; }
+	@for src in internal/wasmkern/*.zig; do \
+		name=$$(basename $$src .zig); \
+		echo "  zig: $$name"; \
+		$(ZIG) build-exe $$src -target wasm32-freestanding -OReleaseFast \
+			--name $$name -fno-entry -rdynamic -femit-bin=internal/wasmkern/$$name.wasm; \
+	done
+	@ls -l internal/wasmkern/*.wasm | awk '{print "  "$$5, $$9}'
 
 build:
 	$(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o $(BINARY) $(PKG)
@@ -43,13 +58,46 @@ test:
 	go test ./... -count=1
 
 # 三平台 strip 构建（发布用，全部纯静态，可跨发行版部署）
+#
+# Zig 归档按架构分别内嵌：linux/amd64 只嵌 x86_64-linux，linux/arm64 只嵌
+# aarch64-linux，windows/amd64 只嵌 x86_64-windows——每个二进制只带自己那份。
+# go:embed all:zigdist 是「目录级」的，无法按 GOARCH 条件排除，
+# 所以用 scripts/zigdist-select.sh 在每个二进制构建前重排目录内容。
+# 归档不在 ~/.cache/zig 时自动跳过内嵌（二进制照常产出，/zig 会提示未内嵌）。
 release:
 	@mkdir -p dist
+	@echo ">>> linux/amd64（内嵌 x86_64-linux Zig）"
+	@scripts/zigdist-select.sh x86_64-linux || true
 	GOOS=linux   GOARCH=amd64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-amd64 $(PKG)
+	@echo ">>> linux/arm64（内嵌 aarch64-linux Zig）"
+	@scripts/zigdist-select.sh aarch64-linux || true
 	GOOS=linux   GOARCH=arm64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-arm64 $(PKG)
+	@echo ">>> windows/amd64（内嵌 x86_64-windows Zig）"
+	@scripts/zigdist-select.sh x86_64-windows || true
 	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
+	@scripts/zigdist-select.sh all >/dev/null 2>&1 || true
 	@echo "--- dist/ ---"
 	@ls -lh dist/ | awk '{print $$5, $$9}'
+
+# 单平台发布：只编 linux/amd64 或 linux/arm64，各自内嵌对应 Zig。
+# 用法: make release-amd64 / make release-arm64
+release-amd64:
+	@mkdir -p dist
+	@scripts/zigdist-select.sh x86_64-linux || true
+	GOOS=linux GOARCH=amd64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-amd64 $(PKG)
+	@ls -lh dist/$(BINARY)-linux-amd64 | awk '{print $$5, $$9}'
+
+release-arm64:
+	@mkdir -p dist
+	@scripts/zigdist-select.sh aarch64-linux || true
+	GOOS=linux GOARCH=arm64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-arm64 $(PKG)
+	@ls -lh dist/$(BINARY)-linux-arm64 | awk '{print $$5, $$9}'
+
+release-windows:
+	@mkdir -p dist
+	@scripts/zigdist-select.sh x86_64-windows || true
+	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
+	@ls -lh dist/$(BINARY)-windows-amd64.exe | awk '{print $$5, $$9}'
 
 # release + UPX 压缩（显式三平台，避免误压 .upx 临时文件）
 UPX_TARGETS := dist/$(BINARY)-linux-amd64 dist/$(BINARY)-linux-arm64 dist/$(BINARY)-windows-amd64.exe
@@ -65,3 +113,23 @@ upx: release
 
 clean:
 	rm -rf dist $(BINARY)
+
+# ---- Zig 工具链（内网现场编译用）----
+# 下载官方 Zig 归档到 ~/.cache/zig（优先复用本地缓存，不联网）。
+zig-fetch:
+	scripts/fetch-zig.sh
+
+# 下载（或复用缓存）并把归档复制到 internal/zigboot/zigdist/，随后 make build
+# 会把归档 go:embed 进二进制，目标机执行 /zig init 即可释放工具链。
+# 注意：二进制会增大约 55~60 MB；归档目录已被 .gitignore 忽略。
+zig-embed:
+	scripts/fetch-zig.sh --embed
+
+# 选择哪些平台的归档参与 go:embed（默认把已下载的全放进去）。
+# 用法: make zig-select PLAT=x86_64-linux   /  PLAT=aarch64-linux  /  PLAT=none  /  PLAT=all
+zig-select:
+	scripts/zigdist-select.sh $(or $(PLAT),all)
+
+# 清理本地下载缓存与运行时释放目录。
+zig-clean:
+	scripts/fetch-zig.sh --clean

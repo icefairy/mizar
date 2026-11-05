@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"path"
 	"time"
+
+	"mizar/internal/wasmkern"
 )
 
 // countTokensEstimate 估算文本 token 数（保守启发式：CJK 按字符，其他按 4 字符/token）。
@@ -97,7 +99,11 @@ func registerStdlib(reg func(name string, fn any)) {
 
 	// count_tokens(text) → int：估算 token 数（CJK 按字符、其他按 4 字符/token）。
 	// 与 Agent 压缩触发同口径；估算用，精确值以 LLM API usage 为准。
-	reg("count_tokens", func(s string) int { return countTokensEstimate(s) })
+	// 优先走 Zig→wasm 内核（快，且与 Go 实现逐字节同口径）；
+	// 内核缺失、平台不支持或被 MIZAR_WASM_KERNEL 禁用时自动回退纯 Go。
+	reg("count_tokens", func(s string) int {
+		return wasmkern.CountTokensOr(s, countTokensEstimate)
+	})
 
 	// doc_get(name) → string：查宿主函数完整文档（渐进式披露，按需加载）。
 	// 写插件时精简清单不够用，用 doc_get 取参数/示例/坑。

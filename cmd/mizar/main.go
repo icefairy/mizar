@@ -38,7 +38,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.5.9"
+var version = "v0.7.0"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -703,6 +703,8 @@ func main() {
 			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, name), nil
 		},
 	))
+	// 内置 /zig 命令：释放/管理内嵌 Zig 工具链（详见 zigcmd.go）
+	registerZigCommand(a)
 	// 内置 /apikey 命令：查看/设置 API Key（与 /provider 配合使用）
 	a.Commands.Register(agent.Command{
 		Name:        "apikey",

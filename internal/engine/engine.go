@@ -128,6 +128,8 @@ func (e *Engine) registerHostFuncs() error {
 	registerStdlib(reg)
 	// 中文+英文分词宿主函数（seg_cut / seg_pos）
 	registerSeg(reg)
+	// 记忆检索批量打分宿主函数（mem_tokenize / mem_score）
+	registerMem(reg)
 	if h.HTTPGet != nil {
 		reg("http_get", h.HTTPGet)
 	}
