@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.5.7</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.7.0</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -125,7 +125,7 @@
     <section id="features">
       <h2>核心特性</h2>
       <div class="grid cols-3">
-        <div class="card"><h3>🚀 单个静态二进制</h3><p>未压缩 ~67MB、发布包 tar.gz ~22MB（均 strip，纯静态），无运行时依赖，无需 npm / Python / Docker，拷一个文件到目标机器即可运行。</p></div>
+        <div class="card"><h3>🚀 单个静态二进制</h3><p>未压缩 ~74MB、发布包 tar.gz ~23MB（均 strip，纯静态），无运行时依赖，无需 npm / Python / Docker，拷一个文件到目标机器即可运行。</p></div>
         <div class="card"><h3>🧩 TS/JS 插件热重载</h3><p>内嵌 esbuild 编译 TS，JS 免编译直跑 goja，修改即生效，无需重启。</p></div>
         <div class="card"><h3>📄 SKILL.md 技能</h3><p>纯文本技能文件，兼容 Anthropic/Hermes 生态；支持子目录布局 <code>&lt;name&gt;/SKILL.md</code>（可携带 references/ 等附属文件），frontmatter 解析后按需注入上下文。</p></div>
         <div class="card"><h3>🔌 MCP 协议</h3><p>接入任意语言实现的 MCP 服务器，工具生态不再受限。</p></div>
@@ -139,12 +139,18 @@
         <div class="card"><h3>💬 裸聊 <code>/chat</code></h3><p>不注入任何提示词——系统提示、工具、技能、会话历史全部跳过，只把一句话直接发给当前模型（沿用当前思考等级）。纯旁路不落盘，适合临时问答与对照「无提示词」下的原始回答。</p></div>
         <div class="card"><h3>⚙️ 配置热改 <code>/config</code></h3><p>不重启、不改文件：<code>max_steps</code> / <code>context_window</code> / <code>user_agent</code> 一条命令立即生效并持久化到 <code>~/.mizar/config.json</code>。User-Agent 可自定义（支持含空格），全路径覆盖所有出站请求，便于网关/厂商侧识别客户端。</p></div>
         <div class="card"><h3>🔍 诊断日志</h3><p>关键事件落盘 <code>~/.mizar/logs</code>（TUI/Agent/LLM/panic），三步定位「任务莫名中止/卡死」：看 RUN 边界、ESC 取消、finish_reason。</p></div>
+        <div class="card"><h3>🛠️ 内嵌 Zig 工具链 <code>/zig</code></h3><p>官方 Zig 归档 <code>go:embed</code> 内嵌，<code>/zig init</code> 释放到 <code>~/.cache/mizar/zig/&lt;平台&gt;/</code>。<strong>目标机没有编译器也能现场编 C/Zig</strong>（<code>zig cc</code> 就是 C 编译器，自带各版本 glibc stub），产物是独立二进制，由 <code>bash</code> 以 <code>exec</code> 运行——<strong>不涉及 cgo，纯静态单文件部署模型不变</strong>。每个发布二进制<strong>只嵌自己那份架构</strong>（amd64 / arm64 / windows），不多背 50MB；只释放到用户缓存，<strong>绝不写 <code>/usr/local/bin</code>、不建系统软链接</strong>。</p></div>
+        <div class="card"><h3>⚡ Zig→wasm 计算内核</h3><p><code>internal/wasmkern</code>：进程内跑 Zig 编译的 WebAssembly，运行时是 <strong>wazero（纯 Go，无 cgo）</strong>。内核 <code>go:embed</code> 随二进制走，惰性编译 + 编译缓存 + <code>sync.Pool</code> 实例池，增量约 2.6MB。已含 <code>count_tokens</code> / <code>bigram</code> 两个内核，宿主函数优先尝试内核、失败自动回退纯 Go。<strong>实测纯 Go 更快，所以默认仍走 Go</strong>——内核的收益是沙箱与字节码分发，不是性能。</p></div>
       </div>
     </section>
 
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.7.0 · 内嵌 Zig 工具链 + Zig→wasm 计算内核</h3>
+          <p>两条新路径，同一个目标：<strong>内网离线机器上除了拷一个二进制，什么都别装</strong>。（1）<code>internal/zigboot</code> 把官方 Zig 归档 <code>go:embed</code> 进二进制，<code>/zig init</code> 原子释放到 <code>~/.cache/mizar/zig/&lt;平台&gt;/</code>，目标机即可<strong>现场编译 C/Zig</strong>——<code>zig cc</code> 自带 C 编译器与各版本 glibc stub，<code>-target x86_64-linux-gnu.2.17</code> 产出的东西在 CentOS 7 上直接跑；产物是独立进程、<code>exec</code> 调用，<strong>与 cgo 无关</strong>。（2）<code>internal/wasmkern</code> 用 wazero（纯 Go）在进程内跑 Zig 编译的 wasm 内核，已落地 <code>count_tokens</code> 与 <code>bigram</code>。<strong>一包一架构</strong>：发版前用 <code>scripts/zigdist-select.sh</code> 重排归档目录，每个二进制只带自己那份（<code>make release</code> 已自动串好三平台），不多背 50MB；顺手修掉 Windows <code>.zip</code> 解压白拷 95MB 字符串的浪费。</p>
+        </div>
         <div class="card">
           <h3>v0.5.7 · 空工具名修复（上游 11133）</h3>
           <p>模型偶尔会丢 <code>tool</code> 字段，旧实现仍把 <code>ToolCallRef{Name:""}</code> 写进历史，<strong>发出去的 tool_calls 里 <code>function.name</code> 是空串</strong>，workbuddy 回 <code>11133</code>、stepfun/agnes 回 <code>tool_calls.function.name is required</code>，任务直接中断。现在<strong>三层防御</strong>：解析层对无救空名当场报错让模型自纠，循环层不执行不写 tool_calls，编码层再兜底过滤，其结果降级为普通文本不丢信息。顺带修掉 <code>calls[].id</code> 与 <code>callId</code> 字段名不匹配导致原生 id 逐轮丢失、重复合成的问题。</p>
@@ -206,6 +212,10 @@ chmod +x mizar
 /model &lt;name&gt;
 /think &lt;level&gt;
 
+<span class="cm"># 内网现场编译 C/Zig：释放内嵌工具链（幂等）</span>
+/zig init
+/zig path        <span class="cm"># 打印 zig 可执行文件路径</span>
+
 <span class="cm"># 或持久化运行：Server + 浏览器 Web UI</span>
 ./mizar --serve --addr :3003
 <span class="cm"># 浏览器打开 http://127.0.0.1:3003/web/（首次启动生成登录密码）</span>
@@ -246,6 +256,8 @@ chmod +x mizar
                 <li>session/ <span class="tree-cmt"># 会话管理（JSONL + 压缩记录）</span></li>
                 <li>skills/ <span class="tree-cmt"># SKILL.md 加载器</span></li>
                 <li>utils/ <span class="tree-cmt"># 通用工具函数</span></li>
+                <li>wasmkern/ <span class="tree-cmt"># Zig→wasm 计算内核（wazero 纯 Go 运行时，无 cgo）</span></li>
+                <li>zigboot/ <span class="tree-cmt"># 内嵌 Zig 工具链（/zig 释放到本地缓存）</span></li>
               </ul>
             </li>
             <li>extensions/ <span class="tree-cmt"># 插件示例</span></li>
@@ -273,6 +285,7 @@ chmod +x mizar
           <tr><td>计划模式</td><td>/plan + exit_plan_mode</td><td>/plan + TUI 审批</td></tr>
           <tr><td>会话目标</td><td>create/get/update_goal</td><td>get/create/update_goal（权限约束）</td></tr>
           <tr><td>定时提醒</td><td>schedule</td><td>schedule（after/at/every）</td></tr>
+          <tr><td>内嵌工具链</td><td>—</td><td>Zig（<code>/zig init</code> 现场编译 C/Zig）</td></tr>
         </table>
       </div>
       <p style="color:var(--muted);font-size:13px;margin-top:8px">完整对比分析见 <a href="docs/pi-comparison.md">docs/pi-comparison.md</a>。</p>

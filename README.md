@@ -6,7 +6,7 @@
 
 **开阳 (Mizar)** 是一个极简、零依赖、单文件、可自举的 AI Agent 框架。
 
-- **核心**：单个静态 Go 二进制（未压缩 ~67MB，发布包 tar.gz ~22MB，无运行时依赖，无需 npm / Python / Docker）
+- **核心**：单个静态 Go 二进制（未压缩 ~74MB，发布包 tar.gz ~23MB，无运行时依赖，无需 npm / Python / Docker）
 - **插件**：TypeScript / JavaScript 文件 —— 内嵌 esbuild 编译 TS，JS 免编译直跑 goja，支持热重载
 - **技能**：纯文本 SKILL.md 文件（兼容 Anthropic/Hermes 第三方技能生态）
 - **工具**：MCP 协议 —— 接入任意语言实现的 MCP 服务器
@@ -39,6 +39,24 @@
 > 🎧 项目介绍语音版：[docs/mizar-intro.ogg](docs/mizar-intro.ogg)（TTS 合成，约 20 秒）
 
 姊妹项目 [璇玑 (Xuanji)](https://github.com/icefairy/xuanji) 取北斗一二星（枢纽之意），负责 AI 网关汇聚与路由；Mizar 取北斗第六星（辅星相伴之意），负责 Agent 本体与自举扩展。一枢纽，一自举，同源同构。
+
+---
+
+## v0.7.0 亮点：把「计算」和「编译」都装进一个文件
+
+这一版只有两件事，但都指向同一个目标——**内网离线机器上，除了拷一个二进制，什么都别装**。
+
+| 能力 | 形态 | 解决什么 |
+|---|---|---|
+| **Zig→wasm 计算内核** | 进程内 wasm（wazero 纯 Go 运行时） | 需要一段可跨平台分发的「计算字节码」，且绝不能引入 cgo |
+| **内嵌 Zig 工具链** | 官方归档 `go:embed`，`/zig init` 释放 | 目标机没有编译器/编译器太老，却要**现场编 C/Zig 并 exec 运行** |
+
+两条路径都不破坏 `CGO_ENABLED=0`、纯静态单文件、跨发行版（CentOS 7 / glibc 2.17）部署：
+
+- **wasm 内核**：`internal/wasmkern/`，`.wasm` 用 `go:embed` 随二进制走，惰性编译 + `CompilationCache` + `sync.Pool` 实例池，二进制增量约 2.6 MB。已落地 `count_tokens`（token 估算）与 `bigram`（分词）两个内核。**但实测纯 Go 更快，所以默认仍走 Go**——内核的价值是沙箱与字节码分发，不是性能（详见 [docs/zig-wasm-eval.md](docs/zig-wasm-eval.md)）。
+- **内嵌 Zig 工具链**：`zig cc` 本身就是完整的 C 编译器，单包自带各版本 glibc stub，`-target x86_64-linux-gnu.2.17` 直接产出能在 CentOS 7 上跑的产物。产物是**独立二进制**，Mizar 只通过 `bash`/`exec` 调用，进程边界通信（stdin/stdout/exit code），与 cgo 完全无关。
+- **一包一架构**：`go:embed all:zigdist` 是目录级的，没法按 `GOARCH` 排除。所以发版前用 `scripts/zigdist-select.sh` 重排目录，**每个发布二进制只带自己那份归档**（linux/amd64→x86_64、linux/arm64→aarch64、windows/amd64→x86_64-windows），不多背 50 MB。
+- **不污染系统**：只释放到 `~/.cache/mizar/zig/<平台>/`，绝不写 `/usr/local/bin`、不建系统级软链接。
 
 ---
 
@@ -215,9 +233,9 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 从项目主页读取最新版本与更新内容，与当前版本比对：
 
 ```
-🔔 发现新版本: v0.5.7（当前 v0.5.4）
+🔔 发现新版本: v0.7.0（当前 v0.5.9）
 
-  更新内容: 空工具名修复（上游 11133）
+  更新内容: 内嵌 Zig 工具链 + Zig→wasm 计算内核
   ...
   本命令不会自动更新。请自行获取新版本后替换二进制：
     详情/下载: https://icefairy.github.io/mizar/
@@ -299,6 +317,9 @@ chmod +x mizar
   # /chat <内容>                    裸聊：不注入任何提示词直接问模型
   # !ls -la                         本地 bash 直执行：!开头直接运行，命令+输出纳入对话历史
   # /checkupdate                   检查是否有新版本（只提醒，不自动更新）
+  # /zig                           查看内嵌 Zig 工具链状态（版本/是否内嵌/是否已释放）
+  # /zig init                      释放内嵌 Zig 到 ~/.cache/mizar/zig/，之后可现场编 C/Zig
+  # /zig path                      打印 zig 可执行文件路径
 
 # 也可通过命令行 flag 一次性指定（跳过交互配置）
 ./mizar -base-url http://127.0.0.1:3002/v1 -api-key sk-xxxx -model deepseek-v4-flash
@@ -364,7 +385,14 @@ mizar/
 │   ├── server/             # HTTP/RPC/WebSocket 服务器
 │   ├── session/            # 会话管理（JSONL 持久化 + 压缩记录）
 │   ├── skills/             # SKILL.md 加载器（解析 frontmatter → 注入上下文）
-│   └── utils/              # 通用工具函数
+│   ├── utils/              # 通用工具函数
+│   ├── wasmkern/           # Zig→wasm 计算内核（wazero 纯 Go 运行时，无 cgo）
+│   │   ├── *.zig           # 内核源码
+│   │   ├── *.wasm          # 编译产物（已提交，构建不依赖 zig）
+│   │   └── wasmkern.go     # 加载/实例池/两段式调用 API
+│   └── zigboot/            # 内嵌 Zig 工具链（/zig 释放到本地缓存，供内网现场编译）
+│       ├── zigboot.go      # 内嵌归档的定位/原子解压/状态
+│       └── zigdist/        # 归档目录（默认空，.gitignore 忽略，--embed 生成）
 ├── extensions/             # 插件目录（Agent 自写的 .ts 文件）
 ├── skills/                 # 技能目录（SKILL.md）
 ├── scenarios/              # 验证场景（开发 70 / 运维 30）
@@ -373,6 +401,10 @@ mizar/
 ```
 
 详细设计见 [docs/architecture.md](docs/architecture.md)。
+
+> 🧪 **Zig→wasm 内核的实测开销**（单次调用、内存、GC 尖刺、可调试性）见
+> [docs/zig-wasm-eval.md](docs/zig-wasm-eval.md)：wasm 的收益是**沙箱与跨平台
+> 字节码**，不是性能——性能上它是净损失，因此内核默认走纯 Go。
 
 ---
 
@@ -388,6 +420,151 @@ make release
 # 单文件可执行，无需任何运行时依赖
 ./mizar --help
 ```
+
+**可选：重编 wasm 计算内核**（仅当修改 `internal/wasmkern/*.zig` 时需要）
+
+```bash
+make zig-kernels     # 需要 zig；未安装则跳过，仍用仓库里已提交的 .wasm
+```
+
+内核产物已提交到仓库，因此**正常构建与发布不依赖 zig**。
+wazero 是纯 Go 实现的 wasm 运行时，所以 `CGO_ENABLED=0`、纯静态、
+Windows 交叉编译等前提完全不受影响（实测二进制增量约 2.6 MB / +3.9%）。
+
+内核开关（默认全部走纯 Go）：
+- `MIZAR_WASM_KERNEL=force` 强制 `count_tokens` 走 wasm，`=0` 全部禁用
+- `MIZAR_WASM_BIGRAM=force` 让 bigram 分词走 wasm（默认关，实测纯 Go 更快）
+- `MIZAR_WASM_VERIFY=1` 内核结果与 Go 参考逐 token 交叉校验
+
+> 实测结论：这两种算法的**纯 Go 实现都比 wasm 内核快**（详见
+> `internal/engine/memscore_bench_test.go`）。内核保留为可复用基础设施与
+> 对照基准，默认不接管热路径——诚实的默认值比「看起来用了黑科技」更重要。
+
+真正带来数量级收益的是**把循环搬出 goja**：记忆检索的 2000 条打分从
+goja 逐条的 102 ms / 372k 分配，改为宿主函数 `mem_score` 批量计算后
+10.8 ms / 4.2k 分配（**9.4×**）。
+
+---
+
+## 内嵌 Zig 工具链（内网现场编译 C/Zig）
+
+内网离线场景下，目标机不一定自带编译器。Mizar 可以把官方 Zig 工具链
+**内嵌进二进制**，目标机拷一个文件即可现场编译 C/Zig（`zig cc` 也是 C 编译器），
+产物是独立可执行文件，再由 `bash` 工具以 `exec` 方式运行——**不涉及 cgo，
+不破坏「纯静态单文件」的部署模型**。
+
+### 发版侧（有网的机器）
+
+```bash
+make zig-fetch      # 按当前架构下载到 ~/.cache/zig（缓存优先，可复用）
+make zig-embed      # 下载并复制到 internal/zigboot/zigdist/，随后 make build 内嵌
+make zig-clean      # 清理缓存
+```
+
+等价于直接调用脚本（支持 `--arch` / `--version` / `--offline-check`）：
+
+```bash
+scripts/fetch-zig.sh --arch x86_64-linux        # 内网主力
+scripts/fetch-zig.sh --arch aarch64-linux       # arm64（aarch64 与 arm64 是同一架构）
+scripts/fetch-zig.sh --arch x86_64-windows      # Windows 版（.zip 归档）
+```
+
+**注意 `arm64` 与 `aarch64` 是同一架构的两个叫法**（Linux/Go 叫 arm64，
+Zig/LLVM 叫 aarch64），官方归档名统一是 `zig-aarch64-linux-*.tar.xz`，
+不需要下载两份。真正不同的只有 32 位 ARM（`arm-linux`）。
+
+### 一包一架构：每个二进制只嵌自己那份（重要）
+
+`go:embed all:zigdist` 是**目录级**的，无法按 `GOARCH` 条件排除。若把三个
+归档都扔进 `zigdist/`，那不管编哪个平台，二进制都会平白增大 ~200 MB。
+因此发版流程用 `scripts/zigdist-select.sh` 在**每次构建前重排目录**：
+
+```bash
+scripts/zigdist-select.sh x86_64-linux      # 只留 x86_64 归档（缓存没有再下）
+scripts/zigdist-select.sh aarch64-linux     # 只留 aarch64 归档
+scripts/zigdist-select.sh x86_64-windows    # 只留 Windows 归档
+scripts/zigdist-select.sh none              # 清空，不嵌任何 Zig
+scripts/zigdist-select.sh all               # 全放进去（做通用大包时用）
+# 也支持简写 amd64 / arm64
+```
+
+`make release` 已自动串好这套流程：
+
+```bash
+make release           # 一次编三个平台，各自内嵌对应 Zig
+make release-amd64     # 只编 linux/amd64（内嵌 x86_64-linux）
+make release-arm64     # 只编 linux/arm64（内嵌 aarch64-linux）
+make release-windows   # 只编 windows/amd64（内嵌 x86_64-windows）
+```
+
+实测产物（0.17.1，Zig 只嵌自己那份）：
+
+| 产物 | 大小 | 内嵌归档 |
+|---|---|---|
+| `mizar-linux-amd64` | 126 MB | `zig-x86_64-linux-0.17.1.tar.xz`（55 MB） |
+| `mizar-linux-arm64` | 119 MB | `zig-aarch64-linux-0.17.1.tar.xz`（51 MB） |
+| `mizar-windows-amd64.exe` | 168 MB | `zig-x86_64-windows-0.17.1.zip`（96 MB） |
+
+归档目录 `internal/zigboot/zigdist/` 已被 `.gitignore` 忽略（属构建产物）。
+**未内嵌时二进制照常构建**，只是 `/zig` 会提示未内嵌。
+
+### 目标侧（内网机器）
+
+```
+/zig            # 状态：版本 / 是否内嵌 / 是否已释放 / 缓存路径
+/zig init       # 释放内嵌归档到 ~/.cache/mizar/zig/<平台>/（幂等，原子解压）
+/zig init -f    # 强制重新释放
+/zig path       # 打印 zig 可执行文件路径
+/zig clean      # 删除运行时释放目录
+```
+
+释放后即可在任务里直接让 Agent 用 `bash` 调 zig：
+
+```bash
+~/.cache/mizar/zig/x86_64-linux/zig cc -O3 -march=native calc.c -o calc
+./calc 1000
+```
+
+**释放路径与软链接**（明确一下，避免误解）：
+
+- 释放目录：`~/.cache/mizar/zig/<平台>/`，如 `~/.cache/mizar/zig/x86_64-linux/`。
+  可用环境变量 `MIZAR_ZIG_CACHE` 整体改到别处（例如放到空间更大的分区）。
+- 平台子目录名与官方归档一致：`x86_64-linux` / `aarch64-linux` / `x86_64-windows`。
+- Windows 上 zig 可执行文件是 `zig.exe`，其余平台是 `zig`。
+- **不会写 `/usr/local/bin` 或 `/usr/bin`，也不会建任何系统级软链接。**
+  原因：内网机器常是多用户/无 sudo/受限容器，污染系统 PATH 风险大且难清理；
+  而且同一台机器可能同时存在多个 Mizar 版本。需要 PATH 里直接敲 `zig` 时，
+  自己在 shell 里加即可：
+
+  ```bash
+  export PATH="$HOME/.cache/mizar/zig/x86_64-linux:$PATH"
+  ```
+
+  （归档内的 `lib/`、`doc/` 是 zig 自己按相对路径查找的，跟着 `zig` 二进制走，
+  所以复制/移动整个 `<平台>` 目录仍然可用。）
+
+### 实测（x86_64-linux，0.17.1）
+
+| 项目 | 数值 |
+|---|---|
+| 内嵌归档 | 54.8 MB（sha256 `3581863e…b17a`，官方校验通过） |
+| 二进制增量 | 86 MB → 141 MB（+55 MB，仅当 `--embed` 时） |
+| `/zig init` 首释 | 12 s（纯 Go `ulikunitz/xz` 解压，`CGO_ENABLED=0`，不依赖系统 `xz`） |
+| 释放后体积 | 181 MB（`zig` 单文件 177 MB + `lib/std` 与 C 头文件） |
+| `zig cc` 编 C | 5 s，产物 7.3 KB，`GLIBC_2.2.5` 起可用（CentOS 7 无障碍） |
+| 原生 Zig 编译 | `zig build-exe -O ReleaseSmall -fstrip` → 134 KB，**静态、无任何动态依赖** |
+| 交叉编译 | `-target aarch64-linux-gnu.2.17` 出 arm64 动态产物；`-target aarch64-linux` 出 arm64 静态产物 |
+
+> **下载慢的坑**：ziglang.org 对单连接限速极狠（实测 ~15 KB/s，57 MB 要一小时），
+> 但对**并发 Range 请求**宽松得多。`scripts/fetch-zig.sh` 因此默认用 32 路分片
+> 下载（`--jobs N` 可调，`--single` 回落单连接），实测 15 s 拿完 17 MB 等效速率，
+> 约 1 分钟下完整个归档。
+
+> **为什么不是 gcc / 为什么不 cgo**：内网机器自带的 gcc 往往很老（CentOS 7 是
+> 4.8.5），且 glibc 版本与编译机不一致会直接跑不起来；而「产物是独立进程、
+> 用 exec 调用」的方案让 glibc 天然一致（现场编现场跑），也没有 cgo 的
+> `CGO_ENABLED=1` 依赖。Zig 单包自带 C 编译器与各版本 glibc stub，
+> 一个 55 MB 压缩包就能覆盖全平台交叉编译（`zig cc -target x86_64-linux-gnu.2.17`）。
 
 ---
 

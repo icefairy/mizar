@@ -4,6 +4,137 @@
 
 ---
 
+## [Unreleased]
+
+## [v0.7.0] — 2026-11-05
+
+> 主题：**把「计算」和「编译」都装进一个文件**。两条新路径（Zig→wasm 计算内核、
+> 内嵌 Zig 工具链）指向同一目标——内网离线机器上，除了拷一个二进制，什么都别装。
+> 全程保持 `CGO_ENABLED=0`、纯静态单文件、跨发行版（CentOS 7 / glibc 2.17）部署。
+
+### 版本
+
+- `version` 提升到 **v0.7.0**（`cmd/mizar/main.go`）。主页 `index.html` 的版本徽章同步
+  （`/checkupdate` 读的就是这个 badge）。
+
+### 发版矩阵（每个二进制只带自己那份归档）
+
+| 产物 | 大小 | 内嵌 Zig 归档 |
+|---|---|---|
+| `mizar-linux-amd64` | 126 MB | `zig-x86_64-linux-0.17.1.tar.xz`（55 MB） |
+| `mizar-linux-arm64` | 119 MB | `zig-aarch64-linux-0.17.1.tar.xz`（51 MB） |
+| `mizar-windows-amd64.exe` | 168 MB | `zig-x86_64-windows-0.17.1.zip`（96 MB） |
+
+不内嵌 Zig 的裸二进制为 **74 MB**（tar.gz 23 MB）。
+
+### 升级提示
+
+- Zig 归档属构建产物，`internal/zigboot/zigdist/` 已被 `.gitignore` 忽略；
+  **未内嵌时二进制照常构建**，只是 `/zig` 会提示未内嵌。
+- 发版请用 `make release`（自动按平台重排 `zigdist/`），不要手工往目录里塞三个包——
+  否则任何架构的二进制都会多背 100 MB。
+- 运行时只释放到 `~/.cache/mizar/zig/<平台>/`，**不写 `/usr/local/bin`、不建系统软链接**；
+  需要 PATH 里敲 `zig` 自行 `export PATH=...`。
+
+### 详细变更
+
+### ✨ 新增（内嵌 Zig 工具链 + `/zig` 命令：内网现场编译）
+
+- **`internal/zigboot`**：把官方 Zig 归档用 `go:embed` 内嵌进二进制，运行时按需释放到 `~/.cache/mizar/zig/<平台>/`。目标机拷一个二进制即可**现场编译 C/Zig**（`zig cc` 也是 C 编译器），产物是独立可执行文件，再由 `bash` 工具以 `exec` 调用——**不涉及 cgo，`CGO_ENABLED=0` 与纯静态单文件部署模型不变**。
+- **原子解压**：先解到 `<目标>.tmp`，校验 `zig` 可执行文件存在且置可执行位后再 `rename` 覆盖。避免中途失败留下半个 zig 被幂等短路误判为「已就绪」（实测踩过：EOF 中断后残留残次文件）。
+- **`/zig` 命令**：`/zig` 看状态（版本/是否内嵌/是否已释放/缓存路径）、`/zig init` 释放（幂等，`-f` 强制重放）、`/zig path` 打印路径、`/zig clean` 清运行时缓存。
+- **`scripts/fetch-zig.sh`**：按架构下载官方归档，**缓存优先**（`~/.cache/zig`，命中且 shasum 校验通过则不联网，内网友好）。支持 `--embed`（复制进仓库供内嵌）、`--arch`、`--version`、`--offline-check`、`--clean`。
+- **`make zig-fetch / zig-embed / zig-clean`**：构建期辅助目标。归档目录 `internal/zigboot/zigdist/` 被 `.gitignore` 忽略（构建产物，约 55~60 MB）；**未内嵌时二进制照常构建**，只是 `/zig` 提示未内嵌。
+- **一包一架构：每个二进制只嵌自己那份 Zig**。`go:embed all:zigdist` 是目录级的，无法按 `GOARCH` 条件排除，两个归档同时存在会让任何架构的二进制都多背 50 MB。新增 **`scripts/zigdist-select.sh`**（`make zig-select PLAT=...`）在每次构建前重排 `zigdist/`；`make release` 自动串好：linux/amd64 只嵌 `x86_64-linux`、linux/arm64 只嵌 `aarch64-linux`、windows/amd64 只嵌 `x86_64-windows`。另加 `make release-amd64 / release-arm64 / release-windows` 单平台目标。
+- **Windows 也支持**：`.zip` 归档走 `archive/zip` 解压（与 `.tar.xz` 同一套剥顶层目录逻辑，`zig.exe` 落在解压根）。顺手修掉 `zip.NewReader(strings.NewReader(string(data)))` 白拷一份 95 MB string 的浪费，改用 `bytes.NewReader`。
+- **不污染系统 PATH**：只释放到 `~/.cache/mizar/zig/<平台>/`，**绝不写 `/usr/local/bin`、不建系统级软链接**（内网常多用户/无 sudo/受限容器，且可能并存多个 Mizar 版本）。需要直接敲 `zig` 时自己 `export PATH=...` 即可。释放目录可用 `MIZAR_ZIG_CACHE` 整体改址（也用于测试隔离——早前 `go test` 并行跑不同包时，`Clean` 会撞上正在解压的 `.tmp` 报 `directory not empty`）。
+- **为什么不是随包带 gcc**：内网机器自带 gcc 常很老（CentOS 7 为 4.8.5），且交叉编译产物会绑定编译机 glibc 版本；「产物为独立进程、exec 调用」让 **glibc 天然一致**（现场编现场跑）。Zig 单包自带 C 编译器与各版本 glibc stub，一个包覆盖全平台交叉（`zig cc -target x86_64-linux-gnu.2.17`）。
+
+### ✨ 新增（Zig→wasm 计算内核基础设施）
+
+- **`internal/wasmkern`**：在进程内运行 Zig 编译的 WebAssembly 计算内核。运行时用 wazero（**纯 Go，无 cgo**），因此 `CGO_ENABLED=0`、纯静态单文件、跨发行版部署、Windows 交叉编译等前提**全部不变**。实测二进制增量 +2684 KB（67.85 → 70.47 MB，+3.86%），Windows/arm64 交叉编译均正常。
+- **内嵌 + 惰性编译 + 实例池**：`.wasm` 用 `go:embed` 随二进制发布，运行时无需外部文件；编译结果进 `CompilationCache` 多实例共享；模块实例放 `sync.Pool`（wazero 实例非并发安全）。冷启动实测 2–4ms，单次调用固定开销约 3µs。
+- **两段式调用 API**：`Load(data)` 一次写入线性内存 + `CallLoaded(fn, ptr, len)` 反复计算，避免大输入重复拷贝。线性内存按 64KiB 页自动扩容，已测 4MB 级输入。
+- **`kernels/count_tokens.zig`**：与 Go 参考实现逐字节同口径的 token 估算内核（CJK 按字符、其余 4 字符/token），含 UTF-8 解码与边界码点处理，产物 6.3 KB。
+- **宿主函数接入**：`count_tokens` 现在优先尝试 wasm 内核，失败自动回退纯 Go，功能零风险。
+- **`make zig-kernels`**：重编内核的辅助目标。产物已提交，**正常构建/发布不依赖 zig**。
+- **开关**：`MIZAR_WASM_KERNEL=force` 强制走 wasm、`=0` 全部禁用。
+
+### ✨ 新增（`bigram` 分词内核 + 记忆检索批量打分）
+
+- **`internal/wasmkern/bigram.zig`**：零分配 bigram/整词分词内核（11.9 KB）。token 以 `(offset,len)` u32 对输出，指回线性内存里的输入缓冲区，不复制内容；去重 + 停用词过滤在内核内的「代际戳」哈希表完成（每次调用只 `cur_gen++`，不清表），语义与 `memory.ts` 的 `tokenize()` 逐 token 一致。
+- **修复内核静态数据边界 bug**：`kernel_data_end()` 原先只覆盖两张哈希表，漏算了排在后面的 `cur_gen` / `inited`，导致 Go 侧写输入时把它们踩掉——表现为**第一次调用正常、之后每次返回 0**（并发场景全失败）。现改为对所有全局变量取最大值，并加了回归测试。
+- **`internal/engine/memscore.go`**：新增两个纯函数宿主函数
+  - `mem_tokenize(text)`：按 memory 插件规则分词并用空格拼接（CJK unigram+bigram、ASCII 整词、停用词过滤、去重）
+  - `mem_score(query, docs)`：对一批记忆的 tokens 列**批量**打分，一次跨边界返回分数数组
+- **`memory.ts` 改造**：`mem_write` 的 tokens 生成走 `mem_tokenize`，`mem_search` 的打分循环走 `mem_score`；宿主函数缺失时自动降级回本地 `tokenize()`/`similarity()`，老宿主上行为不变。
+- **开关统一**：`MIZAR_WASM_BIGRAM` 的判定收敛到 `wasmkern.BigramAvailable()`，宿主与上层只有一个真相来源。新增 `MIZAR_WASM_VERIFY=1` 做内核/Go 交叉校验。
+
+### 📊 实测结论（记忆检索打分）
+
+2000 条真实记忆（每条 tokens 约 120 字符），查询「中文分词记忆检索的性能测试」（i7-10700）：
+
+| 路径 | 耗时 | 分配 |
+|---|---|---|
+| goja 里逐条 `similarity()`（改造前） | **102 ms** | 372k allocs |
+| 宿主函数 `mem_score` 批量打分（改造后） | **10.8 ms** | 4.2k allocs |
+
+**9.4×，且收益来自「把循环搬出 goja」而不是 wasm。**
+
+分词两条路径对比（同一算法，纯 Go vs wasm 内核）：
+
+| 输入规模 | 纯 Go | wasm 内核 |
+|---|---|---|
+| 1 段（约 120 字） | 9.5 µs | 37.6 µs |
+| 3 段 | 28 µs | 69 µs |
+| 10 段 | 79 µs | 127 µs |
+
+**任何尺寸下内核都更慢**——要把整段输入写进线性内存再读回 span，两次拷贝的开销超过 Go `for range string` 的切分。因此 `memTokenize` 默认走纯 Go，内核仅在 `MIZAR_WASM_BIGRAM=force` 时启用（用于对照与压测）。
+
+### 📊 实测结论（避免误判，记录在此）
+
+「把纯计算下沉到 wasm 一定更快」是错觉。同一算法三方对比（i7-10700）：
+
+| 实现 | 100KB 混合文本 | 说明 |
+|---|---|---|
+| goja 里 JS 循环（插件现状） | **95.4 ms** | 831556 allocs，真痛点 |
+| wasm 内核 | **368 µs** | 比 goja 快 **259×** |
+| 纯 Go 原生 | **137 µs** | 比 wasm 还快 2.7× |
+
+- 跨边界调用 + 线性内存拷贝的固定成本（约 5µs/次）在小输入上完全吃掉语言差距：9 字节输入纯 Go 13.8ns vs wasm 5.2µs（差 370×）。
+- 因此 `count_tokens` **默认走纯 Go**（`wantKernel()` 默认 false），wasm 通路仅在 `force` 模式下用于验证与压测。
+- 真正的收益场景是「goja 里的重计算」——那是 **259×** 的差距。后续候选内核（`seg_cut` 大词典分词、严格 JSON 校验）须先用 `bench_test.go` 量化 Go 侧确实慢再下沉。
+
+### 🧪 补充实测（wasm 除启动外的影响面，详见 [docs/zig-wasm-eval.md](zig-wasm-eval.md)）
+
+回答「独立 wasm 是不是只慢在启动」这个问题——**不是**。逐项实测：
+
+| 影响面 | 实测 | 严重度 |
+|---|---|---|
+| 单次调用 | 纯 Zig 原生 1.42 µs / 纯 Go 7.70 µs / **wasm 16.5 µs** | 🔴 慢 2–5× |
+| 边界成本占比 | 空调用 132 ns + `mem.Write` 30B 9 ns，只占 16.5 µs 的 **0.8%** | — |
+| 批量 2000 条 | wasm 96.6 ms vs Go 56.1 ms（**1.72× 慢**），但分配 18.3k vs 338k（**少 18×**） | 🔴/取tradeoff |
+| 内存 | 单实例线性内存 **1152 KB**；64 并发池化峰值 ≈ 70 MB | 🟡 |
+| 延迟稳定性 | 稳态 23 µs → `runtime.GC()` ×2 → **首次 2.06 ms** → 回 15 µs | 🟡 |
+| 实例化 | 全新 runtime+实例化 **2.45 ms/次**（`CompilationCache` 省编译但省不了实例化） | 🟡 |
+| 可调试性 | 无 Go 栈、pprof 全归 `wasmcall`、dlv 不能单步、改逻辑须重编 | 🔴 |
+| 能力边界 | `wasm32-freestanding` 无 IO/无线程/栈受限/无 SIMD | 🟡 |
+| 安全 | 越界写触发 trap（不再静默踩内存） | ✅ 唯一硬收益 |
+
+**关键结论：16.5 µs 里只有 0.14 µs 是跨边界，剩下全是 Go 侧封装搬运成本**——
+为安全封装付的胶水钱比 wasm 调用本身贵 100×。所以换内核写法救不了，
+要么接受、要么别在这条热路径上用。
+
+因此 `bigram` / `count_tokens` 内核**默认走纯 Go** 的决策经得起数据检验：
+wasm 该用在「不可信计算 + 低频 + 单次 >10ms」的窄交集里（如用户上传的
+沙箱计算逻辑、大词典分词），而不是每次记忆检索都跑的热路径。
+
+### 📝 备注
+
+- `cmd/mizar` 的 `TestModelPickerMoveKeysHandled` 在改动前后**均失败**（`k 后选中 = "m3", want m1`），与本变更无关，属既有问题。
+
+---
+
 ## [v0.5.9]
 
 ### ✨ 新增（`!` 本地 bash 直执行）
