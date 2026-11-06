@@ -33,6 +33,35 @@ type chatLine struct {
 	role    string // "system" / "user" / "bot" / "err" / "tool" / "cmd"
 	content string
 	ts      time.Time
+
+	// mdCache 是 content 经 glamour 渲染 + ansi.Strip 后的结果（仅 bot 角色用）。
+	// 为什么缓存：renderAllDirect 会被高频触发（流式 60ms、bash 实时输出 80ms、
+	// spinner 100ms），每次都对最近 30 条消息重跑 glamour 会把事件循环占满，
+	// 键击排在更新队列后面，表现就是「执行后台脚本时输入框卡住」。
+	// content 一变即失效：mdForContent 记录生成缓存时的 content 指针值。
+	mdCache        string
+	mdCacheContent string
+	mdCacheOK      bool
+}
+
+// mdRendered 返回该消息经 glamour 渲染并剥离 ANSI 后的纯文本（带缓存）。
+// ok=false 表示渲染不可用（renderer 为 nil 或渲染出错），调用方应退回原文。
+//
+// 只在事件循环内调用（renderAllDirect），因此无需加锁。
+func (l *chatLine) mdRendered(r *glamour.TermRenderer) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	if l.mdCacheOK && l.mdCacheContent == l.content {
+		return l.mdCache, true
+	}
+	rendered, err := r.Render(l.content)
+	if err != nil || rendered == "" {
+		return "", false
+	}
+	plain := ansi.Strip(rendered)
+	l.mdCache, l.mdCacheContent, l.mdCacheOK = plain, l.content, true
+	return plain, true
 }
 
 type toolCallInfo struct {
@@ -150,12 +179,12 @@ type tuiModel struct {
 
 	// 剪贴板桥接 + 拷贝模式（任意区域选择复制）
 	clip       *clipboard
-	copyMode   bool           // 是否处于拷贝模式（暂停流式自动滚动，供选择复制）
-	copyCursor int            // 拷贝模式当前光标（m.lines 下标）
-	copyEnd    int            // 范围模式选区终点（闭区间；与 copyActive 配合）
-	copyBase   int            // 范围模式选区锚点（copyActive 时有效）
-	copyActive bool           // 范围模式：是否已标记选择起点
-	copyMarked map[int]bool   // 逐行标记模式：被用户标记的行下标集合（独立于范围选区）
+	copyMode   bool         // 是否处于拷贝模式（暂停流式自动滚动，供选择复制）
+	copyCursor int          // 拷贝模式当前光标（m.lines 下标）
+	copyEnd    int          // 范围模式选区终点（闭区间；与 copyActive 配合）
+	copyBase   int          // 范围模式选区锚点（copyActive 时有效）
+	copyActive bool         // 范围模式：是否已标记选择起点
+	copyMarked map[int]bool // 逐行标记模式：被用户标记的行下标集合（独立于范围选区）
 
 	// 流式显示状态（streamMu 保护）：LLM 回复逐 token 回调 → 增量提取 → TUI 实时渲染
 	streamMu        sync.Mutex
@@ -184,6 +213,8 @@ type tuiModel struct {
 	bashMu     sync.Mutex
 	bashLive   string // 当前运行中命令的累计输出（仅保留尾部）
 	bashLiveOn bool   // 是否有命令正在运行（决定是否渲染实时块）
+	// bashLivePending：已有一次重绘排在事件队列里（合并密集输出，避免输入框卡顿）
+	bashLivePending bool
 
 	// 等待进度指示（spinner 动画 + 宣传语轮换，状态栏显示）
 	spinnerOn   atomic.Bool  // spinner 循环是否运行中
@@ -210,6 +241,19 @@ type tuiModel struct {
 	pasteGuard    bool
 	lastKeyAt     time.Time
 	lastNewlineAt time.Time
+
+	// 伪 ESC 防护（见 esc_guard.go）：ESC 可能是 ConPTY 泄漏鼠标序列（ESC[<35;66;61M）
+	// 的开头，先挂起 escJunkWindow，确认不是坐标序列后再真正取消任务。
+	// escPending — 有已挂起、等待确认的 ESC；escSeq — 挂起序号（让旧定时器失效）；
+	// escJunk — 正在吞一段已确认的泄漏序列。
+	escPending bool
+	escSeq     int
+	escJunk    bool
+	escJunkAt  time.Time
+
+	// 上下文占用估算缓存（见 statusBarDirect）：lines 长度不变则估算值不变
+	ctxEst      int
+	ctxEstLines int
 }
 
 // askPending 一次待回答的提问（可能含多个问题，逐问收集）。
@@ -257,7 +301,8 @@ func (m *tuiModel) renderAllDirect() {
 	if len(m.lines) > 30 {
 		start = len(m.lines) - 30
 	}
-	for _, l := range m.lines[start:] {
+	for i := start; i < len(m.lines); i++ {
+		l := &m.lines[i]
 		t := l.ts.Format("15:04")
 		// 正文统一 Escape：用户输入/命令输出/模型回复里可能含 [...]，
 		// 不转义会被 tview 当颜色标签吞掉，并把后续内容打回默认色。
@@ -277,13 +322,10 @@ func (m *tuiModel) renderAllDirect() {
 			// 使用 glamour 渲染 Markdown（处理 \n 换行、列表、代码块等）
 			// glamour 输出含 ANSI 颜色码（[38;5;xxx]），tview 不认这些格式，
 			// 用 ansi.Strip 去掉 ANSI 后保留纯 markdown 结构，再由 sgrColor 统一上色。
-			if m.renderer != nil {
-				rendered, err := m.renderer.Render(l.content)
-				if err == nil && rendered != "" {
-					sb.WriteString(sgrColor(m.aiColor, tview.Escape(ansi.Strip(rendered))) + "\n\n")
-				} else {
-					sb.WriteString(sgrColor(m.aiColor, tview.Escape(l.content)) + "\n\n")
-				}
+			// 结果按 content 缓存（见 chatLine.mdCache 注释）：高频重绘时不再重跑 glamour。
+			plain, ok := l.mdRendered(m.renderer)
+			if ok {
+				sb.WriteString(sgrColor(m.aiColor, tview.Escape(plain)) + "\n\n")
 			} else {
 				sb.WriteString(sgrColor(m.aiColor, tview.Escape(l.content)) + "\n\n")
 			}
@@ -383,10 +425,18 @@ func (m *tuiModel) statusBarDirect() {
 	if a := m.agent; a != nil && a.Compactor != nil {
 		limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
 		if limit > 0 && len(m.lines) > 0 {
-			est := 0
-			for i := 1; i < len(m.lines); i++ {
-				est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
+			// 估算结果按「行数」缓存：lines 只在追加时变化（内容不原地改写），
+			// 因此行数不变即结果不变。状态栏在 spinner/流式/bash 输出时被高频重绘
+			// （每 60~100ms 一次），不缓存的话每次都要遍历全部消息重算 EstimateTokens，
+			// 长会话下会把事件循环拖慢，用户看到的就是「输入框卡住」。
+			if m.ctxEstLines != len(m.lines) {
+				est := 0
+				for i := 1; i < len(m.lines); i++ {
+					est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
+				}
+				m.ctxEst, m.ctxEstLines = est, len(m.lines)
 			}
+			est := m.ctxEst
 			// 流式正在输出的回复同样计入估算（与任务结束后该消息入 lines 的趋势一致），
 			// 使「上下文:」在回复过程中持续增长，不再只有整条结束才跳变。
 			est += streamOutTok
@@ -506,6 +556,22 @@ func (m *tuiModel) addChatLine(line chatLine) {
 func (m *tuiModel) addChatLineAsync(line chatLine) {
 	m.lines = append(m.lines, line)
 	m.renderAll()
+}
+
+// cancelCurrentTask 真正取消当前任务（ESC 确认不是终端泄漏序列后调用）。
+// 可能在事件循环内（确认 ESC 的按键分支）或定时器 goroutine（挂起超时）中调用。
+func (m *tuiModel) cancelCurrentTask() {
+	if !m.loading {
+		return
+	}
+	diag.Logf("tui", "ESC 确认 → 取消任务")
+	// 真正请求中止 agent 循环：循环在下一个检查点停止并返回 ErrAborted。
+	// 此前这里只做了 setLoading(false) + 打印提示，从未调用 Abort()，
+	// 导致 agent 在后台继续跑，工具调用/流式输出继续刷屏（任务实际未取消）。
+	m.agent.Abort()
+	m.canceling.Store(true) // 阻止新任务启动，直到旧任务 goroutine 真正退出
+	m.setLoading(false)
+	m.addChatLine(chatLine{role: "err", content: "任务已取消（当前步骤结束后停止）", ts: time.Now()})
 }
 
 // setLoading 设置加载状态（仅从事件循环调用）。loading 变化联动 spinner 启停。
@@ -1079,6 +1145,16 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		// 注意：本函数返回 nil 表示事件被吞掉（InputCapture 语义），与 MouseCapture 相反。
 		now := time.Now()
 		defer func() { m.lastKeyAt = now }()
+		// 伪 ESC / ConPTY 鼠标泄漏序列防护（见 esc_guard.go）：吞掉泄漏字符，
+		// 挂起 Esc 待确认，确认不是泄漏后才真正取消任务。
+		seq, guard := m.escGuardKey(event, now)
+		switch guard {
+		case escGuardConsumed:
+			return nil
+		case escGuardPendingEsc:
+			m.scheduleEscConfirm(seq)
+			return nil
+		}
 		// 模型选择器：接管 ↑↓ / j·k / Enter / Esc/q。
 		// ⚠ 必须放在所有 Enter/↑↓ 处理之前：
 		//   - Enter：选择器打开时输入框已被清空，若落到「发送」分支，
@@ -1138,17 +1214,8 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			}
 			return nil
 		}
-		if event.Key() == tcell.KeyEsc && m.loading {
-			diag.Logf("tui", "ESC 收到（loading=true）→ 取消任务")
-			// 真正请求中止 agent 循环：循环在下一个检查点停止并返回 ErrAborted。
-			// 此前这里只做了 setLoading(false) + 打印提示，从未调用 Abort()，
-			// 导致 agent 在后台继续跑，工具调用/流式输出继续刷屏（任务实际未取消）。
-			m.agent.Abort()
-			m.canceling.Store(true) // 阻止新任务启动，直到旧任务 goroutine 真正退出
-			m.setLoading(false)
-			m.addChatLine(chatLine{role: "err", content: "任务已取消（当前步骤结束后停止）", ts: time.Now()})
-			return nil
-		}
+		// 注：任务运行中的 Esc（取消任务）已由本函数最前面的 escGuardKey 接管——
+		// 它会先挂起 escJunkWindow 确认不是 ConPTY 泄漏的鼠标序列，再真正取消。
 		// Ctrl+C 不退出：清空输入框并退出历史浏览
 		if event.Key() == tcell.KeyCtrlC {
 			m.histIdx = -1
@@ -2037,9 +2104,9 @@ func (m *tuiModel) renderCopyMode() {
 	}
 	for i := range m.lines {
 		content := m.linePlainText(i)
-		marked := m.copyMarked[i]                                  // 逐行标记
-		inRange := m.copyActive && i >= lo && i <= hi              // 范围选区
-		isCursor := i == m.copyCursor                              // 光标所在行
+		marked := m.copyMarked[i]                     // 逐行标记
+		inRange := m.copyActive && i >= lo && i <= hi // 范围选区
+		isCursor := i == m.copyCursor                 // 光标所在行
 		prefix := "  "
 		if marked {
 			prefix = "✓ "
@@ -2130,9 +2197,9 @@ func (m *tuiModel) handleModelPickerKey(event *tcell.EventKey) (bool, *tcell.Eve
 	case event.Key() == tcell.KeyDown:
 		m.modelPickerActive.Move(1)
 	case event.Key() == tcell.KeyRune && event.Rune() == 'j':
-		m.modelPickerActive.Move(-1)
-	case event.Key() == tcell.KeyRune && event.Rune() == 'k':
 		m.modelPickerActive.Move(1)
+	case event.Key() == tcell.KeyRune && event.Rune() == 'k':
+		m.modelPickerActive.Move(-1)
 	case event.Key() == tcell.KeyEnter:
 		m.confirmModelPicker()
 		return true, nil
@@ -2214,9 +2281,9 @@ func (m *tuiModel) renderModelPicker() {
 		}
 		line := fmt.Sprintf("  %s%s", mark, name)
 		if i == p.cursor {
-			sb.WriteString("[black:white]▸ "+line+" [-:-:-:-]" + "\n")
+			sb.WriteString("[black:white]▸ " + line + " [-:-:-:-]" + "\n")
 		} else {
-			sb.WriteString("  "+line + "\n")
+			sb.WriteString("  " + line + "\n")
 		}
 	}
 	if hi < len(p.models) {
