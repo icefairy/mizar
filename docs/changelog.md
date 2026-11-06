@@ -10,6 +10,48 @@
 
 - 无（下一版待记录）。
 
+## [v0.7.2] — 2026-11-06
+
+> 主题：**交互再修一轮**。v0.7.1 的两处修复在 Windows 实机上仍能复现，
+> 这一版把根因补全：滚轮仍然会误取消（泄漏序列被 ConPTY 拆批到达，90ms 窗口等不到），
+> 粘贴多行文本时输入框「一个字一个字地蹦」（每个字符都触发一次全文扫描 + 全屏重绘）。
+
+### 修复
+
+- **Windows 滚轮仍会误取消任务（v0.7.1 遗留）**。v0.7.1 用「Esc 挂起 90ms，等紧跟的
+  坐标序列」来识别泄漏，但 ConPTY 把一次滚轮的泄漏序列拆成多条 win32 输入记录分批
+  flush，批次间隔可达几十到几百毫秒，90ms 内等不到 `[` 就当成「用户真按了 Esc」→
+  照样取消任务。现在三层兜底（`cmd/mizar/esc_guard.go`）：
+  1. Windows 常规确认窗口 90ms → **300ms**；
+  2. 只要最近 3 秒内见过泄漏序列（`escLastJunkAt`），确认窗口自动放宽到 **1.2s**，
+     且到点时若仍在泄漏就直接放弃取消——宁可让用户再按一次，也不误杀正在跑的任务；
+  3. Windows 上 Esc 取消改为**两段式**：第一次 Esc 只提示「再按一次 Esc 取消任务」，
+     2.5 秒内再按一次才真正取消。滚轮即使漏判成 Esc，最多出现一行提示，绝不停任务。
+     可用 `MIZAR_ESC_CONFIRM=0` 关掉（退回单键取消）。
+- **粘贴多行文本「一个字一个字地蹦」**。Windows 的 tcell `EnablePaste` 是空实现
+  （没有 bracketed paste），粘贴的每个字符都是独立 `KeyRune`；tview 对每个字符都要
+  `TextArea.replace()` → 触发 `changedFunc`（本程序里是 `GetText()` 全文 + `Fields`）
+  → 事件循环再 `draw()` 一次全屏（逐行 `WriteConsole`）。几百字就是几百次全文扫描
+  加全屏重画，长文本要等很久。现在新增 `cmd/mizar/paste_burst.go`：
+  - 与上一按键间隔 < 8ms 判定为粘贴，开始**攒批**；攒批中 < 40ms 的后续字符
+    （含粘贴来的换行）继续并入，用户手打（≥30ms）不会误并；
+  - 空闲 30ms 后把整段**一次性** `SetText`——`changedFunc` 只跑一次；
+  - 攒批期间用 `pasteSkipScreen`（包一层 tcell.Screen）吞掉 `Show()`，并用
+    `SetBeforeDrawFunc` 跳过 `root.Draw()`，每键只剩一次内存层 `Clear`；
+  - 落盘后用 `QueueUpdateDraw` 重画一次；单次攒批上限 1MB / 2s 兜底防冻结；
+  - 快捷键（Alt+K/J、Ctrl+U/D 等）到达时先落盘再立即生效，不会被并入缓冲。
+  Unix 有 bracketed paste（一次 `EventPaste` 整段送），默认不启用攒批；
+  `MIZAR_PASTE_BURST=1/0` 可强制开关。
+
+### 测试
+
+- `TestPasteBurstMergesIntoOneWrite` / `TestPasteBurstNewlinesKept` /
+  `TestPasteBurstHotkeyNotSwallowed` / `TestPasteSkipScreenSuppressesShow` /
+  `TestPasteBurstEnabledFor` / `TestPasteBurstGapWindows`
+- `TestEscLeakBroadensWindowOrSuppresses` / `TestEscConfirmTwoStageWindows` /
+  `TestEscConfirmExpires` / `TestEscConfirmEnabledFor`；
+  原 `TestEscJunkWindowConstant` 改为按平台断言（Windows 窗口必须宽于 Unix）。
+
 ## [v0.7.1] — 2026-11-06
 
 > 主题：**手感修复**。不改功能，只让两个天天会碰到的交互不再烦人：

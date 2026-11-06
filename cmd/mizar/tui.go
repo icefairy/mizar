@@ -248,6 +248,27 @@ type tuiModel struct {
 	escSeq     int
 	escJunk    bool
 	escJunkAt  time.Time
+	// escLastJunkAt — 最近一次观察到 ConPTY 泄漏鼠标序列的时间。滚轮连滚时
+	// ConPTY 分批 flush，序列间隔可达几百毫秒；有此记录就把 Esc 确认窗口放宽
+	// 到 escJunkWindowWide，避免下一批泄漏到达前就误取消任务。
+	escLastJunkAt time.Time
+	// escConfirm — Windows 下 Esc 取消改为两段式（第一次提示、第二次才取消），
+	// escArmedAt — 上一次「待确认」的 Esc 时间（超出 escArmWindow 即失效）。
+	escConfirm bool
+	escArmedAt time.Time
+
+	// 粘贴突发合并（见 paste_burst.go）：Windows 无 bracketed paste，粘贴的每个
+	// 字符都是独立 KeyRune，若逐个写进输入框就会「一个字一个字地蹦」（每次改文本
+	// 都触发 changedFunc 全文扫描 + 全屏重绘）。攒批 + 空闲后一次性落盘。
+	//   pastePending — 正在攒批（攒批期间跳过重绘）
+	//   pasteBuf     — 已攒下的文本；pasteLastAt — 最近一次并入时间；
+	//   pasteTimer   — 空闲落盘定时器（复用同一个，每次并入 Reset）
+	pasteBurst   bool // 是否启用粘贴攒批（见 paste_burst.go；Windows 默认开）
+	pastePending atomic.Bool
+	pasteBuf     strings.Builder
+	pasteLastAt  time.Time
+	pasteStartAt time.Time
+	pasteTimer   *time.Timer
 
 	// 上下文占用估算缓存（见 statusBarDirect）：lines 长度不变则估算值不变
 	ctxEst      int
@@ -707,6 +728,12 @@ func (m *tuiModel) startTask(input string) {
 	m.evtCh = evtCh
 	m.liveMu.Unlock()
 
+	// 新任务开始：清掉上一个任务遗留的「Esc 待确认」状态，避免上一轮按过
+	// 一次 Esc 就让本轮第一次 Esc 直接把任务杀掉（见 esc_guard.go 两段式取消）。
+	m.escArmedAt = time.Time{}
+	m.escPending = false
+	m.escSeq++
+
 	// 每次任务开始：复位流式状态（提取器、节流、实时统计；streamCountedUsage 清空
 	// 是为了防止上个任务的 usage 指针被复用后误命中 sameUsage 去重而漏记本任务用量）
 	m.streamMu.Lock()
@@ -1030,6 +1057,8 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		clip:       newClipboard(),
 		copyMode:   false,
 		pasteGuard: pasteGuardEnabledFor(os.Getenv),
+		pasteBurst: pasteBurstEnabled(),
+		escConfirm: escConfirmEnabled(),
 		renderer: func() *glamour.TermRenderer {
 			r, _ := glamour.NewTermRenderer(
 				glamour.WithAutoStyle(),
@@ -1173,6 +1202,14 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return nil
 		case escGuardPendingEsc:
 			m.scheduleEscConfirm(seq)
+			return nil
+		}
+		// 粘贴突发合并（见 paste_burst.go）：Windows 没有 bracketed paste，粘贴的
+		// 每个字符都是独立 KeyRune。若逐字写进输入框，每字都会触发 changedFunc
+		// 的全文扫描 + 一次全屏重绘 → 观感「一个字一个字地蹦」。这里先攒批，
+		// 空闲 30ms 后一次性 SetText（changedFunc 只跑一次），攒批期间跳过重绘。
+		// 必须放在模型选择器/pasteGuard 之前：粘贴内容不该触发任何逐键逻辑。
+		if m.pasteBurstKey(event, now) {
 			return nil
 		}
 		// 模型选择器：接管 ↑↓ / j·k / Enter / Esc/q。
@@ -1864,6 +1901,18 @@ func (m *tuiModel) Run() error {
 	diag.Logf("tui", "start: model=%s session=%s logs=%s msgs=%d",
 		m.agent.Model(), m.sessionID, diag.Path(), len(m.lines))
 
+	// 粘贴攒批期间抑制屏幕输出（见 paste_burst.go）：tview 对每个按键事件都会
+	// 走一次 a.draw()，而 draw 的屏幕输出是逐行 WriteConsole，粘贴几百字就是
+	// 上百次全屏重画 —— 这正是「一个字一个字地蹦、长文本要等很久」的主因。
+	// 用一层薄包装拦掉 Show()（攒批期间内容还没落进输入框，跳过是安全的），
+	// 攒批结束落盘后由 QueueUpdateDraw 触发一次真正的重画。
+	//
+	// 注意：tview 在 screen 已存在时会跳过 Run() 里的 Init/EnableMouse/EnablePaste，
+	// 因此这里必须自己把屏幕装好（见 screen_setup.go）。装屏失败不算致命——
+	// 回落到 tview 默认建屏路径（Run() 会再 NewScreen 一次），只是失去攒批抑制。
+	if err := m.initScreen(); err != nil {
+		diag.Logf("tui", "自定义屏幕装配失败（回落默认）: %v", err)
+	}
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)
 	err := m.app.Run()

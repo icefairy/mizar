@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.7.1</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.7.2</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -147,6 +147,11 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.7.2 · Windows 交互再修一轮：滚轮彻底不再误取消 + 粘贴不再逐字蹦</h3>
+          <p>v0.7.1 的两处修复在 Windows 实机上仍能复现，这一版补全根因。（1）<strong>滚轮仍会误取消任务</strong>：ConPTY 把泄漏的鼠标序列<strong>拆成多条输入记录分批 flush</strong>，批次间隔可达几百毫秒，90ms 窗口等不到 <code>[</code> 就当成用户真按了 Esc。现在三层兜底——Windows 确认窗口 90ms→<strong>300ms</strong>；最近 3 秒内见过泄漏序列时放宽到 <strong>1.2s</strong> 且到点仍在泄漏就放弃取消；Windows 上 Esc 改为<strong>两段式</strong>（第一次只提示「再按一次 Esc 取消」，2.5 秒内再按才真正取消），滚轮即使漏判最多出现一行提示，<strong>绝不停任务</strong>（<code>MIZAR_ESC_CONFIRM=0</code> 可关闭）。（2）<strong>粘贴多行文本「一个字一个字地蹦」</strong>：Windows 没有 bracketed paste，每个字符都是独立按键 → <code>replace()</code> → <code>changedFunc</code> 全文扫描 → 一次全屏重绘，几百字就是几百次。现在间隔 &lt;8ms 判定为粘贴并<strong>攒批</strong>，空闲 30ms 后一次性 <code>SetText</code>；攒批期间跳过 <code>root.Draw()</code> 并吞掉屏幕输出，只重画一次，快捷键（Alt+K/J、Ctrl+U/D）到达时先落盘再立即生效。</p>
+          <p>两处影响日常手感的毛病。（1）<strong>Windows 滚轮不再误取消任务</strong>：ConPTY 会把手部终端泄漏的鼠标事件还原成字符流（<code>ESC[&lt;35;66;61M</code>），tcell 把开头的 <code>ESC</code> 当成真 Esc，于是聊天区滚一下滚轮就显示「任务已取消」。现在 Esc 先挂起 90ms 确认——紧跟坐标序列（含 tcell 合成的 <code>Alt+[</code>）则整段吞掉、任务继续跑，确认没有序列才真正取消；单独的数字（回答选项）永远不被吞。（2）<strong>长任务运行时输入框发涩</strong>：任务运行中聊天区每 60~100ms 全量重绘，Markdown 渲染 <strong>52.7ms/次</strong>、状态栏遍历全部消息重算 token <strong>4.82ms/次</strong>，按键只能排在队尾。现在渲染结果按内容缓存、状态栏按条数缓存、重绘请求合并（队列里最多一个待处理）——稳态重绘降到 <strong>0.49ms</strong>、状态栏 <strong>1.4µs</strong>（3455x），并加了性能回归测试盯住不再复发。顺带修掉模型选择器 <code>j</code>/<code>k</code> 方向反了；<strong>发布资产一律 xz 压缩</strong>（126/119/168MB → 74/68/110MB）。</p>
+        </div>
         <div class="card">
           <h3>v0.7.1 · 交互修复：滚轮不再误取消任务 + 长任务输入不再发涩</h3>
           <p>两处影响日常手感的毛病。（1）<strong>Windows 滚轮不再误取消任务</strong>：ConPTY 会把手部终端泄漏的鼠标事件还原成字符流（<code>ESC[&lt;35;66;61M</code>），tcell 把开头的 <code>ESC</code> 当成真 Esc，于是聊天区滚一下滚轮就显示「任务已取消」。现在 Esc 先挂起 90ms 确认——紧跟坐标序列（含 tcell 合成的 <code>Alt+[</code>）则整段吞掉、任务继续跑，确认没有序列才真正取消；单独的数字（回答选项）永远不被吞。（2）<strong>长任务运行时输入框发涩</strong>：任务运行中聊天区每 60~100ms 全量重绘，Markdown 渲染 <strong>52.7ms/次</strong>、状态栏遍历全部消息重算 token <strong>4.82ms/次</strong>，按键只能排在队尾。现在渲染结果按内容缓存、状态栏按条数缓存、重绘请求合并（队列里最多一个待处理）——稳态重绘降到 <strong>0.49ms</strong>、状态栏 <strong>1.4µs</strong>（3455x），并加了性能回归测试盯住不再复发。顺带修掉模型选择器 <code>j</code>/<code>k</code> 方向反了；<strong>发布资产一律 xz 压缩</strong>（126/119/168MB → 74/68/110MB）。</p>
