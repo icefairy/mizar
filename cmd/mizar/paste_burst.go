@@ -197,6 +197,35 @@ func (s *pasteSkipScreen) Show() {
 // TookDeferred 报告攒批期间是否吞掉过输出（测试用）。
 func (s *pasteSkipScreen) TookDeferred() bool { return s.deferred.Load() }
 
+// resyncScreen 强制整屏重画（tcell Sync）：把所有格子标脏并重画一遍。
+// 用途：屏幕被外部写入（log / fmt.Print / OSC52 等绕过 tcell 的输出）后，
+// 那些格子在 tcell 眼里是「已画好的空格」，永远不再重绘 → 残留文字留在屏幕上。
+// Sync 会无视脏标记全部重画，是唯一的彻底清除手段（Ctrl+L / /redraw / 任务结束）。
+//
+// 必须在事件循环线程调用（Sync 内部会加屏幕锁并直接写终端）。
+func (m *tuiModel) resyncScreen() {
+	// 先按当前状态重建内容（只写内存里的 CellBuffer），再整体 Sync 一次：
+	// Sync = Invalidate(全标脏) + resize(重新问系统尺寸) + draw(全屏写) + 光标。
+	// 顺序反过来的话会先画一遍旧内容再画一遍新内容，白多做一次全屏输出。
+	if m.copyMode {
+		m.renderCopyMode()
+	} else if m.modelPickerActive != nil {
+		m.renderModelPicker()
+	} else {
+		m.renderAllDirect()
+	}
+	m.statusBarDirect()
+	// ForceDraw：让 tview 把各控件内容写进 CellBuffer（textView.Draw 等）。
+	// 注意 Sync 只是把 CellBuffer 刷到终端，不会重跑控件绘制——两者都要。
+	// 该函数只在 QueueUpdate 回调（事件循环线程）里调用，ForceDraw 允许在此使用。
+	m.app.ForceDraw()
+	// Sync：全标脏 + 重新向系统查询尺寸 + 整屏重写。这一步才是清除残留文字的关键
+	// （tcell 认为「已画好的空格」的格子，只有 Invalidate 后才会被重新输出）。
+	if m.scr != nil {
+		m.scr.Sync()
+	}
+}
+
 // pasteBurstActive 供 pasteSkipScreen 判断是否需要跳过屏幕输出。
 func (m *tuiModel) pasteBurstActive() bool {
 	return m.pastePending.Load()

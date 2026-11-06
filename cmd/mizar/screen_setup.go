@@ -22,6 +22,7 @@ func (m *tuiModel) initScreen() error {
 	}
 	// SetScreen（a.screen == nil 时）会替我们调用 screen.Init()。
 	wrapped := &pasteSkipScreen{Screen: scr, skip: m.pasteBurstActive}
+	m.scr = wrapped
 	m.app.SetScreen(wrapped)
 	// 鼠标上报：Windows 默认关闭（见 platform_input.go），其余平台开启。
 	if shouldEnableMouse() {

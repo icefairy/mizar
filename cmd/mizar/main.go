@@ -519,6 +519,12 @@ func main() {
 	// 定时提醒注册表（投递回调：到期时打印到终端）
 	schedReg := schedule.NewRegistry(func(id, prompt string) {
 		log.Printf("[schedule] 提醒到期: %s — %s", id, prompt)
+		// TUI 模式下不能直接 Printf 到终端：那会盖在 tcell 画出的界面上，
+		// 留下永远擦不掉的残留文字（见 tui_output.go）。改走聊天区。
+		if tuiDeliverReminder != nil && tuiOutputActive() {
+			tuiDeliverReminder(prompt)
+			return
+		}
 		fmt.Printf("\n⏰ 【定时提醒】%s\n", prompt)
 	})
 	// 注册 goal + schedule 工具

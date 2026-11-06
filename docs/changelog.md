@@ -12,10 +12,11 @@
 
 ## [v0.7.2] — 2026-11-06
 
-> 主题：**Windows 交互三连修**。v0.7.1 的两处修复在 Windows 实机上仍能复现，
+> 主题：**Windows 交互四连修**。v0.7.1 的两处修复在 Windows 实机上仍能复现，
 > 这一版把根因补全：滚轮仍然会误取消（泄漏序列被 ConPTY 拆批到达，90ms 窗口等不到）、
 > 粘贴多行文本时输入框「一个字一个字地蹦」（每个字符都触发一次全文扫描 + 全屏重绘），
-> 以及**方向键变成 `[D` / `[A`**（终端把原始 VT 序列逐字符送上来，tview 只认 Key）。
+> 以及**方向键变成 `[D` / `[A`**（终端把原始 VT 序列逐字符送上来，tview 只认 Key）、
+> **聊天区残留文字擦不掉**（绕过 tcell 的直写 + CellBuffer 宽度落后）。
 
 ### 修复
 
@@ -57,8 +58,27 @@
   单击 Esc 行为不变（任务运行中仍走两段式确认；未运行时窗口到期后照常交给 tview
   收提示条，代价是 ~130ms 延迟）。Windows 默认开启，`MIZAR_ESC_SEQ=0` 可关闭。
 
+- **聊天区出现「擦不掉的残留文字」**（Windows 尤其明显，屏幕右半边/上半区多出
+  几行旧文字）。两类成因都是「有东西绕过 tcell 写终端」，tcell 认为那些格子还是
+  自己画的，增量重绘永远不去覆盖：
+  1. **绕过 tcell 的直写**：标准库 `log`（插件 hook 报错、供应商持久化失败、
+     定时提醒……）写 stderr；`fmt.Printf`（定时提醒横幅）写 stdout；以及 OSC 52
+     剪贴板序列 `\x1b]52;c;…` 直写 stderr。现在进入 TUI 后（`cmd/mizar/tui_output.go`）：
+     标准 `log` 全部改道诊断日志（不丢信息、不上屏）；定时提醒改走聊天区；
+     OSC 52 在 TUI 下不再写（由内部缓冲 + 系统剪贴板承担）。
+  2. **CellBuffer 宽度落后于终端实际宽度**（窗口调整后 ConPTY 没送 resize 记录、
+     tview 未重排）：此后每次 draw 只覆盖左侧，右侧永远保留上一次更宽窗口的内容。
+     新增屏幕看门狗（`cmd/mizar/screen_watchdog.go`）：每 2s 比对 `screen.Size()`，
+     变化即整屏强制重画；另在「空闲 ≥5s 且距上次重画 ≥10s」时也重画一次兜底
+     （任务运行中/流式输出/拷贝模式一律不打扰）。
+  3. **手动兜底**：`Ctrl+L` 或 `/redraw` 随时强制整屏重画（`resyncScreen` =
+     重建内容 + `ForceDraw` + `Screen.Sync()`）。任务结束时也会自动 Sync 一次。
+
 ### 测试
 
+- `TestSizeChanged` / `TestResyncScreenRebuildsContent` / `TestResyncScreenNilSafe` /
+  `TestPasteSkipScreenSyncPasses` / `TestTUIOutputDisciplineRedirectsLog` /
+  `TestResyncScreenWatchdogStops`
 - `TestEscSeqArrowLeft`（复现 `[D` 问题）、`TestEscSeqAllArrowsAndNav`（16 种编码）、
   `TestEscSeqCtrlArrowModifiers`、`TestEscSeqAltLetter`、`TestEscSeqLeakSwallowed`、
   `TestEscSeqUnknownKeepsInput`、`TestEscSeqArrowWhileIdle`、

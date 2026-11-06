@@ -34,6 +34,7 @@ func banner() string {
   ◆ 会话压缩：自动超窗压缩，摘要保留上下文
   ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
   ◆ TUI 模式：Enter 发送 / Alt+Enter 换行 / Esc 取消(Windows 下需连按两次) / Ctrl+T 思考等级
+  ◆ 强制重绘：Ctrl+L（屏幕出现残留文字时一键清干净；也可输入 /redraw）
   ◆ 复制粘贴：Alt+C 进入拷贝模式(↑↓ 选择任意区域→y 复制) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+Q 复制/Ctrl+V 粘贴
   ◆ 本地 bash：!开头直接执行（如 !ls -la），命令与输出纳入对话历史
   ◆ 命令行模式：Enter 发送 ｜ 多行粘贴自动合并 ｜ /send 手动提交

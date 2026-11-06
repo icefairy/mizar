@@ -265,6 +265,11 @@ type tuiModel struct {
 	escConfirm bool
 	escArmedAt time.Time
 
+	// 屏幕对象（initScreen 装配后赋值）；resyncScreen 用它做整屏强制重画。
+	scr *pasteSkipScreen
+	// watchStop — 屏幕看门狗退出信号（见 screen_watchdog.go）
+	watchStop chan struct{}
+
 	// 粘贴突发合并（见 paste_burst.go）：Windows 无 bracketed paste，粘贴的每个
 	// 字符都是独立 KeyRune，若逐个写进输入框就会「一个字一个字地蹦」（每次改文本
 	// 都触发 changedFunc 全文扫描 + 全屏重绘）。攒批 + 空闲后一次性落盘。
@@ -714,7 +719,14 @@ func (m *tuiModel) setLoadingAsync(loading bool) {
 		if !loading {
 			m.stopSpinner()
 		}
-		m.renderAllDirect()
+		if !loading {
+			// 任务收尾：整屏 Sync 一次。任务运行期间可能有过绕过 tcell 的输出
+			// （第三方库 log、子进程、终端自身提示），它们的字在 tcell 眼里是
+			// 「已画好的空格」，普通重绘永远盖不掉 → 表现为屏幕上残留文字。
+			m.resyncScreen()
+		} else {
+			m.renderAllDirect()
+		}
 		// 任务结束后，如果有排队的消息则立即发送（在事件循环中安全）
 		if !loading && len(m.queue) > 0 {
 			q := m.queue[len(m.queue)-1]
@@ -1293,6 +1305,15 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		}
 		// 注：任务运行中的 Esc（取消任务）已由本函数最前面的 escGuardKey 接管——
 		// 它会先挂起 escJunkWindow 确认不是 ConPTY 泄漏的鼠标序列，再真正取消。
+		// Ctrl+L：强制整屏重画（Sync），清掉任何被外部写入的残留文字。
+		// 终端标准语义就是「清屏重绘」，这里映射成 tcell 的 Sync + 全量渲染。
+		if event.Key() == tcell.KeyCtrlL {
+			m.addChatLine(chatLine{role: "err", content: "✓ 已强制重绘整屏", ts: time.Now()})
+			if tuiRequestResync != nil {
+				tuiRequestResync()
+			}
+			return nil
+		}
 		// Ctrl+C 不退出：清空输入框并退出历史浏览
 		if event.Key() == tcell.KeyCtrlC {
 			m.histIdx = -1
@@ -1819,6 +1840,15 @@ func (m *tuiModel) submitInput(s string) {
 			m.app.Stop()
 			return
 		}
+		// /redraw：强制整屏重画（Sync）。屏幕若被外部写入（log/Printf/OSC52）留下
+		// 擦不掉的残留文字，用它一次性抹掉；Ctrl+L 同效。
+		if s == "/redraw" {
+			if tuiRequestResync != nil {
+				tuiRequestResync()
+			}
+			m.addChatLine(chatLine{role: "err", content: "✓ 已强制重绘整屏（Ctrl+L 同效）", ts: time.Now()})
+			return
+		}
 		// /model（无参数）：TUI 下不打印清单，而是直接弹 ↑↓ 选择器，
 		// 省掉「看到清单后还要再手打一遍模型名」的一步。
 		// 带参数的 /model <name> 仍走命令（保留直接指定任意模型名的能力）。
@@ -1908,6 +1938,22 @@ func (m *tuiModel) submitInput(s string) {
 	m.startTask(s)
 }
 
+// deliverReminderHook 注册「定时提醒 → 聊天区」的投递通道（TUI 专用）。
+// 以前提醒是 fmt.Printf 到 stdout，直接盖在 tcell 画出的界面上，永远擦不掉。
+func (m *tuiModel) deliverReminderHook() {
+	tuiDeliverReminder = func(prompt string) {
+		m.app.QueueUpdateDraw(func() {
+			m.addChatLine(chatLine{role: "err", content: "⏰ 【定时提醒】" + prompt, ts: time.Now()})
+		})
+	}
+	tuiRequestResync = func() {
+		// Sync 会让 tcell 把所有格子标脏并重画整屏——任何被外部写坏的
+		// 区域都会在这一帧被覆盖回正确内容。直接在事件循环里做（QueueUpdate
+		// 的回调本就在事件循环线程执行），不能再排一次 app.Sync() 以免自锁。
+		m.app.QueueUpdate(func() { m.resyncScreen() })
+	}
+}
+
 func (m *tuiModel) Run() error {
 	// 初始渲染：直接 SetText（因事件循环尚未启动，不能用 QueueUpdateDraw）。
 	//
@@ -1920,6 +1966,13 @@ func (m *tuiModel) Run() error {
 	// 诊断日志：记录 TUI 生命周期与初始化参数，定位“启动后莫名退出”类问题
 	diag.Logf("tui", "start: model=%s session=%s logs=%s msgs=%d",
 		m.agent.Model(), m.sessionID, diag.Path(), len(m.lines))
+
+	// 接管所有会污染终端的输出通道（见 tui_output.go）：标准 log → 诊断文件、
+	// OSC52 直写禁用、定时提醒改走聊天区。否则任何一次 log.Printf 都会在屏幕上
+	// 留下 tcell 无法擦除的残留文字（屏幕右半边/上半区突然多出几行字）。
+	enableTUIOutputDiscipline()
+	m.deliverReminderHook()
+	defer disableTUIOutputDiscipline()
 
 	// 粘贴攒批期间抑制屏幕输出（见 paste_burst.go）：tview 对每个按键事件都会
 	// 走一次 a.draw()，而 draw 的屏幕输出是逐行 WriteConsole，粘贴几百字就是
@@ -1935,6 +1988,8 @@ func (m *tuiModel) Run() error {
 	}
 	m.app.SetRoot(m.flex, true)
 	m.app.SetFocus(m.inputField)
+	m.startScreenWatchdog()
+	defer m.stopScreenWatchdog()
 	err := m.app.Run()
 	diag.Logf("tui", "exit: err=%v", err)
 	return err

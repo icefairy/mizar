@@ -48,8 +48,12 @@ func (c *clipboard) set(text string) {
 	c.mu.Lock()
 	c.buf = text
 	c.mu.Unlock()
-	// 尽力而为的外部同步（失败不影响内部功能）
-	osc52Set(text)
+	// 尽力而为的外部同步（失败不影响内部功能）。
+	// TUI 下绝不直写 OSC52：那串 \x1b]52;c;… 若被写出，tcell 不知道屏幕上多了东西，
+	// 残留的 base64 尾巴会永远留在界面上（右下/右半边常见）。TUI 里改用系统剪贴板。
+	if !tuiOutputActive() {
+		osc52Set(text)
+	}
 	setGlobalClipboard(text)
 }
 

@@ -165,3 +165,28 @@ func TestPasteSkipScreenSuppressesShow(t *testing.T) {
 		t.Fatal("恢复输出后应清除延迟标记")
 	}
 }
+
+// TestResyncScreenNilSafe resyncScreen 在屏幕尚未装配时必须安全（测试/降级路径）。
+func TestResyncScreenNilSafe(t *testing.T) {
+	m := newTuiModel(&agent.Agent{}, nil, "test-resync", nil)
+	m.resyncScreen() // 不应 panic
+}
+
+// TestPasteSkipScreenSyncPasses 攒批期间 Sync 也要透传（否则残留永远清不掉）。
+func TestPasteSkipScreenSyncPasses(t *testing.T) {
+	base := &syncCounterScreen{}
+	active := false
+	s := &pasteSkipScreen{Screen: base, skip: func() bool { return active }}
+	s.Sync()
+	if base.syncs != 1 {
+		t.Fatalf("Sync 应透传到底层屏幕, got %d", base.syncs)
+	}
+}
+
+// syncCounterScreen 统计 Sync 调用次数。
+type syncCounterScreen struct {
+	tcell.Screen
+	syncs int
+}
+
+func (s *syncCounterScreen) Sync() { s.syncs++ }
