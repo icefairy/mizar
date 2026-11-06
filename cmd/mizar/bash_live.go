@@ -28,7 +28,6 @@ func (m *tuiModel) setBashLive(on bool) {
 		m.bashMu.Lock()
 		m.bashLive = ""
 		m.bashLiveOn = false
-		m.bashLivePending = false
 		m.bashMu.Unlock()
 		return
 	}
@@ -39,24 +38,10 @@ func (m *tuiModel) setBashLive(on bool) {
 		if len(m.bashLive) > bashLiveMaxBytes {
 			m.bashLive = m.bashLive[len(m.bashLive)-bashLiveMaxBytes:]
 		}
-		// 重绘合并：已经有一次刷新排在事件队列里时不再重复排队。
-		// 为什么必须合并：每次 QueueUpdateDraw 都要在事件循环里跑一遍完整
-		// renderAllDirect（30 条消息 + 状态栏），密集输出时排队会把用户按键
-		// 挤到后面，观感就是「输入框卡住」。合并后无论输出多密，最多保持
-		// 一次待处理刷新，且刷新时读到的是最新缓冲。
-		if m.bashLivePending {
-			m.bashMu.Unlock()
-			return
-		}
-		m.bashLivePending = true
 		m.bashMu.Unlock()
-		// 节流已在 streamWriter 侧完成（80ms），这里直接请求重绘
-		m.app.QueueUpdateDraw(func() {
-			m.bashMu.Lock()
-			m.bashLivePending = false
-			m.bashMu.Unlock()
-			m.renderAllDirect()
-		})
+		// 重绘合并（见 queueRenderAsync）：密集输出时队列里最多一次待处理刷新，
+		// 不会把用户按键挤到队尾。节流已在 streamWriter 侧完成（80ms）。
+		m.queueRenderAsync()
 	})
 }
 
@@ -65,7 +50,6 @@ func (m *tuiModel) clearBashLive() {
 	m.bashMu.Lock()
 	m.bashLive = ""
 	m.bashLiveOn = false
-	m.bashLivePending = false
 	m.bashMu.Unlock()
 }
 

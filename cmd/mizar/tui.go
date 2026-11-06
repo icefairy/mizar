@@ -213,8 +213,6 @@ type tuiModel struct {
 	bashMu     sync.Mutex
 	bashLive   string // 当前运行中命令的累计输出（仅保留尾部）
 	bashLiveOn bool   // 是否有命令正在运行（决定是否渲染实时块）
-	// bashLivePending：已有一次重绘排在事件队列里（合并密集输出，避免输入框卡顿）
-	bashLivePending bool
 
 	// 等待进度指示（spinner 动画 + 宣传语轮换，状态栏显示）
 	spinnerOn   atomic.Bool  // spinner 循环是否运行中
@@ -254,6 +252,10 @@ type tuiModel struct {
 	// 上下文占用估算缓存（见 statusBarDirect）：lines 长度不变则估算值不变
 	ctxEst      int
 	ctxEstLines int
+
+	// renderPending：已有一个全量重绘排在事件队列里（合并高频重绘请求，
+	// 避免任务运行期间重绘堆积把按键挤到队尾 —— 各平台共性，见 queueRenderAsync）
+	renderPending atomic.Bool
 }
 
 // askPending 一次待回答的提问（可能含多个问题，逐问收集）。
@@ -528,9 +530,23 @@ func (m *tuiModel) recentUserMessages() []string {
 // 从 goroutine 安全渲染（用 QueueUpdateDraw，但不会造成死锁）
 // =============================================================================
 
-// renderAll 从任意 goroutine 安全更新 UI
+// renderAll 从任意 goroutine 安全更新 UI。
+//
+// 走 queueRenderAsync 合并：任务运行期间钩子/流式/bash 输出可能每秒请求几十次
+// 重绘，全量 renderAllDirect 每次都重建最近 30 条消息 + 状态栏。若不合并，
+// 请求会排队堆积，用户按键（同样走事件循环）只能排在后面 → 输入框发涩。
+// 合并安全：renderAllDirect 是全量重建，真正执行时读到的是最新状态。
 func (m *tuiModel) renderAll() {
+	m.queueRenderAsync()
+}
+
+// queueRenderAsync 请求一次聊天区全量重绘；已有一次排队时直接返回（合并）。
+func (m *tuiModel) queueRenderAsync() {
+	if m.renderPending.Swap(true) {
+		return
+	}
 	m.app.QueueUpdateDraw(func() {
+		m.renderPending.Store(false)
 		m.renderAllDirect()
 	})
 }
@@ -611,11 +627,15 @@ func (m *tuiModel) spinnerLoop() {
 			m.spinnerLine.Add(1)
 		}
 		i++
-		m.app.QueueUpdateDraw(func() {
-			if m.loading {
-				m.statusBarDirect()
-			}
-		})
+		// 已有一次全量重绘排队时不重复排：那次重绘会连同状态栏一起刷新，
+		// 避免 spinner 与流式/bash 输出争抢事件循环（任务运行期间输入框发涩的成因之一）。
+		if !m.renderPending.Load() {
+			m.app.QueueUpdateDraw(func() {
+				if m.loading {
+					m.statusBarDirect()
+				}
+			})
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
