@@ -8,6 +8,20 @@
 
 ### 变更
 
+- 无（下一版待记录）。
+
+## [v0.7.1] — 2026-11-06
+
+> 主题：**手感修复**。不改功能，只让两个天天会碰到的交互不再烦人：
+> Windows 滚轮不再误取消任务，长任务跑着的时候输入框不再发涩。
+
+### 版本
+
+- `version` 提升到 **v0.7.1**（`cmd/mizar/main.go`），主页 `index.html` 版本徽章与
+  最新动态同步（`/checkupdate` 读的就是这两处）。
+
+### 变更
+
 - **发布资产一律 xz 压缩**：内嵌 Zig 工具链后未压缩产物 126/119/168 MB，
   上传到 GitHub 时经常被 RST 或触发「60 秒无数据」超时。现在 `make release-xz`
   构建后自动 `xz -T0 -6`（→ 74/68/110 MB），CI workflow 也只上传 `.xz` 并清理
@@ -26,18 +40,17 @@
   ③ bash 实时输出重绘合并，队列里最多一次待处理刷新。
 - 模型选择器 `j`/`k` 移动方向与注释/测试不一致（j 向下、k 向上）。
 
-### 新增
+### 性能（长任务运行时输入框不再发涩）
 
-- **形态 A 补齐**：插件现在可以通过宿主函数 `wasm_invoke` / `wasm_invoke_b64` /
-  `wasm_kernels` 调用任意符合「通用 ABI」的 Zig wasm 内核（`internal/engine/wasmhost.go`），
-  不再局限于内置的 `count_tokens`/`bigram`。搭配 `extensions/wasm_demo.ts` 示例插件与
-  `internal/plugins/wasm_demo_test.go` 端到端测试（含旧版宿主缺失时的降级验证）。
-- **形态 B 脚手架**：`/zig new-mcp <dir>` 生成零依赖 Zig MCP server 骨架
-  （按行 JSON-RPC 2.0，已实现 `initialize`/`tools/list`/`tools/call`，含 `echo` 与
-  `hostname` 示例工具）；`/zig new-wasm <dir>` 生成 wasm 内核骨架。两者内嵌在
-  `internal/zigboot/templates/`，离线可用。
-- **文档**：`docs/zig-plugin-forms.md` 对比两种形态，并逐层解释「Zig 二进制为什么不能
-  像 .ts 插件那样热加载」以及 `/mcp reload` 为何是「重编译 + reload」级别的近似热加载。
+- **Markdown 渲染结果按内容缓存**：任务运行中聊天区每 60~100ms 全量重绘，
+  此前每次都重跑 glamour。基准实测 30 条 2KB 消息 **52.7ms/次 → 1.28ms/次**，
+  稳态（缓存命中）整体 `renderAllDirect` **0.49ms**。
+- **状态栏「上下文占用」按消息条数缓存**：500 条消息下 **4.82ms → 1.4µs**（3455x）。
+- **全量重绘请求合并**（`renderPending` 原子标记）：钩子/流式/bash 三路来源不再各自
+  排队，事件循环里最多一个待处理重绘；spinner 也不再与重绘争队列。
+- **性能回归测试**：`TestRenderPerfBudget`（稳态 <10ms 硬门槛）、
+  `TestStatusBarCacheEffect`（断言缓存生效并打印倍数）、
+  `TestRenderRequestCoalescing`，以及 `BenchmarkRenderAllDirectCold/Cached`。
 
 ## [v0.7.0] — 2026-11-05
 
@@ -70,6 +83,19 @@
   需要 PATH 里敲 `zig` 自行 `export PATH=...`。
 
 ### 详细变更
+
+### ✨ 新增（形态 A 补齐 + 形态 B 脚手架）
+
+- **形态 A 补齐**：插件现在可以通过宿主函数 `wasm_invoke` / `wasm_invoke_b64` /
+  `wasm_kernels` 调用任意符合「通用 ABI」的 Zig wasm 内核（`internal/engine/wasmhost.go`），
+  不再局限于内置的 `count_tokens`/`bigram`。搭配 `extensions/wasm_demo.ts` 示例插件与
+  `internal/plugins/wasm_demo_test.go` 端到端测试（含旧版宿主缺失时的降级验证）。
+- **形态 B 脚手架**：`/zig new-mcp <dir>` 生成零依赖 Zig MCP server 骨架
+  （按行 JSON-RPC 2.0，已实现 `initialize`/`tools/list`/`tools/call`，含 `echo` 与
+  `hostname` 示例工具）；`/zig new-wasm <dir>` 生成 wasm 内核骨架。两者内嵌在
+  `internal/zigboot/templates/`，离线可用。
+- **文档**：`docs/zig-plugin-forms.md` 对比两种形态，并逐层解释「Zig 二进制为什么不能
+  像 .ts 插件那样热加载」以及 `/mcp reload` 为何是「重编译 + reload」级别的近似热加载。
 
 ### ✨ 新增（内嵌 Zig 工具链 + `/zig` 命令：内网现场编译）
 
