@@ -1,8 +1,11 @@
 name: release-assets
 
-# 在 GitHub Actions 上构建三平台产物并上传到指定 release。
-# 用途：本地到 uploads.github.com 链路不稳定（大文件上传被 RST/超时）时，
-# 用 runner 的高速链路完成资产生成与上传。
+# 在 GitHub Actions 上构建三平台产物、xz 压缩后上传到指定 release。
+#
+# 为什么要压缩：产物含内嵌 Zig 工具链，未压缩 126/119/168 MB。本地上传到
+# uploads.github.com 的链路很不稳定（大文件常被 RST 或触发「60 秒无数据」超时），
+# xz -6 可压到 74/68/110 MB，配合 runner 的高速链路才能可靠完成。
+# 上传后会自动删除 release 上同名的未压缩资产，避免重复占位。
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +17,10 @@ on:
         description: '跳过内嵌 Zig 工具链（产物更小，不含 /zig init）'
         type: boolean
         default: false
+      keep_raw:
+        description: '额外保留未压缩产物（默认只留 .xz）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -21,7 +28,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -40,18 +47,47 @@ jobs:
       - name: 构建三平台产物
         run: make release
 
+      - name: 压缩产物（xz -T0 -6，保留原文件供对比）
+        run: |
+          set -euo pipefail
+          for f in dist/mizar-linux-amd64 dist/mizar-linux-arm64 dist/mizar-windows-amd64.exe; do
+            [ -f "$f" ] || continue
+            xz -T0 -6 -k "$f"
+            before=$(stat -c %s "$f")
+            after=$(stat -c %s "$f.xz")
+            printf '%-28s %6s MB -> %6s MB (%.0f%%)\n' \
+              "$(basename "$f")" $((before/1048576)) $((after/1048576)) \
+              $(awk "BEGIN{print $after*100/$before}")
+          done
+
       - name: 产物清单
         run: ls -lh dist/
 
-      - name: 上传到 release
+      - name: 上传压缩包到 release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          for f in dist/*; do
+          for f in dist/*.xz; do
             [ -f "$f" ] || continue
             echo "uploading $f"
             gh release upload "$TAG" "$f" --clobber
           done
-          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)\t\(.state)"'
+
+      - name: 清理 release 上同名的未压缩资产
+        if: ${{ !inputs.keep_raw }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          for n in mizar-linux-amd64 mizar-linux-arm64 mizar-windows-amd64.exe; do
+            echo "removing raw asset: $n"
+            gh release delete-asset "$TAG" "$n" --yes || true
+          done
+
+      - name: 最终资产清单
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)\t\(.state)"'

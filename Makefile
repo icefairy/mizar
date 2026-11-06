@@ -4,11 +4,14 @@
 #   make debug     本机构建（带调试信息，未 strip）
 #   make test      全量测试
 #   make release   三平台 strip 构建到 dist/（默认发布流程，纯静态）
+#   make release-xz 三平台构建 + xz 压缩（发布上传用，体积减少 40%+）
 #   make upx       UPX 压缩（仅在明确要求压缩时用，平时不用）
 #   make clean     清理 dist/
 #
 # 发布策略：默认只 strip（-s -w + -trimpath），不压 UPX。
 # UPX 压缩会显著拖慢构建且压缩产物不利于符号调试，除非显式要求否则不做。
+# 但**上传到 GitHub 的资产一律用 xz 压缩**（release-xz）：内嵌 Zig 工具链后
+# 未压缩 126/119/168 MB，上传链路极易超时；xz 后约 74/68/110 MB。
 #
 # 静态编译策略：项目无真实 import "C"，强制 CGO_ENABLED=0 产出纯静态二进制，
 # 不依赖宿主 GLIBC，可跨发行版部署（解决 CentOS 7 / glibc 2.17 报
@@ -23,7 +26,7 @@ LDFLAGS := -s -w
 TRIM    := -trimpath
 GOENV   := CGO_ENABLED=0 GOAMD64=v1
 
-.PHONY: all build debug dynamic test release release-amd64 release-arm64 release-windows upx clean zig-kernels zig-fetch zig-embed zig-select zig-clean
+.PHONY: all build debug dynamic test release release-amd64 release-arm64 release-windows release-xz release-xz-amd64 release-xz-arm64 release-xz-windows upx clean zig-kernels zig-fetch zig-embed zig-select zig-clean
 
 all: build
 
@@ -113,6 +116,32 @@ upx: release
 
 clean:
 	rm -rf dist $(BINARY)
+
+# ---- release + xz 压缩（发布上传用）----
+# 为什么要压缩：内嵌 Zig 工具链后未压缩产物 126/119/168 MB，本地上传到
+# GitHub 的链路很容易被重置或触发「60 秒无数据」超时。xz -6 压到约 74/68/110 MB，
+# 传输量减少 40%+，成功率高得多。
+# 用法: make release-xz            （三平台）
+#       make release-xz-arm64     （只 arm64）
+release-xz: release
+	@for f in $(UPX_TARGETS); do \
+		[ -f "$$f" ] || continue; \
+		xz -T0 -6 -k -f "$$f" && \
+		printf "  %-28s %5s MB -> %5s MB\n" "$$(basename $$f)" \
+			$$(( $$(stat -c %s "$$f") / 1048576 )) \
+			$$(( $$(stat -c %s "$$f.xz") / 1048576 )); \
+	done
+	@echo "--- dist/ ---"
+	@ls -lh dist/*.xz | awk '{print $$5, $$9}'
+
+release-xz-arm64: release-arm64
+	@xz -T0 -6 -k -f dist/$(BINARY)-linux-arm64 && ls -lh dist/$(BINARY)-linux-arm64.xz | awk '{print $$5, $$9}'
+
+release-xz-amd64: release-amd64
+	@xz -T0 -6 -k -f dist/$(BINARY)-linux-amd64 && ls -lh dist/$(BINARY)-linux-amd64.xz | awk '{print $$5, $$9}'
+
+release-xz-windows: release-windows
+	@xz -T0 -6 -k -f dist/$(BINARY)-windows-amd64.exe && ls -lh dist/$(BINARY)-windows-amd64.exe.xz | awk '{print $$5, $$9}'
 
 # ---- Zig 工具链（内网现场编译用）----
 # 下载官方 Zig 归档到 ~/.cache/zig（优先复用本地缓存，不联网）。

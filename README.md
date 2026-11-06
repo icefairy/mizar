@@ -517,18 +517,25 @@ scripts/zigdist-select.sh all               # 全放进去（做通用大包时�
 
 ```bash
 make release           # 一次编三个平台，各自内嵌对应 Zig
+make release-xz        # 同上，并额外生成 dist/*.xz（发布上传用这个）
 make release-amd64     # 只编 linux/amd64（内嵌 x86_64-linux）
 make release-arm64     # 只编 linux/arm64（内嵌 aarch64-linux）
 make release-windows   # 只编 windows/amd64（内嵌 x86_64-windows）
+make release-xz-arm64  # 只编 arm64 并压成 dist/mizar-linux-arm64.xz
 ```
+
+> **发布到 GitHub 的资产一律压缩**：release 上只放 `.xz`，不放未压缩的裸二进制。
+> 未压缩 126/119/168 MB 在本地上传链路（经常被 RST 或触发「60 秒无数据」超时）
+> 几乎传不上去；`xz -T0 -6` 后约 74/68/110 MB，成功率高得多。
+> 下载后解压：`xz -d mizar-linux-amd64.xz && chmod +x mizar-linux-amd64`。
 
 实测产物（0.17.1，Zig 只嵌自己那份）：
 
-| 产物 | 大小 | 内嵌归档 |
-|---|---|---|
-| `mizar-linux-amd64` | 126 MB | `zig-x86_64-linux-0.17.1.tar.xz`（55 MB） |
-| `mizar-linux-arm64` | 119 MB | `zig-aarch64-linux-0.17.1.tar.xz`（51 MB） |
-| `mizar-windows-amd64.exe` | 168 MB | `zig-x86_64-windows-0.17.1.zip`（96 MB） |
+| 产物 | 大小 | 内嵌归档 | 下载体积（xz -6） |
+|---|---|---|---|
+| `mizar-linux-amd64` | 126 MB | `zig-x86_64-linux-0.17.1.tar.xz`（55 MB） | 74 MB |
+| `mizar-linux-arm64` | 119 MB | `zig-aarch64-linux-0.17.1.tar.xz`（51 MB） | 68 MB |
+| `mizar-windows-amd64.exe` | 168 MB | `zig-x86_64-windows-0.17.1.zip`（96 MB） | 110 MB |
 
 归档目录 `internal/zigboot/zigdist/` 已被 `.gitignore` 忽略（属构建产物）。
 **未内嵌时二进制照常构建**，只是 `/zig` 会提示未内嵌。
