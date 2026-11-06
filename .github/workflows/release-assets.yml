@@ -1,0 +1,57 @@
+name: release-assets
+
+# 在 GitHub Actions 上构建三平台产物并上传到指定 release。
+# 用途：本地到 uploads.github.com 链路不稳定（大文件上传被 RST/超时）时，
+# 用 runner 的高速链路完成资产生成与上传。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '目标 release tag（如 v0.7.0）'
+        required: true
+        default: 'v0.7.0'
+      skip_zig:
+        description: '跳过内嵌 Zig 工具链（产物更小，不含 /zig init）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 下载 Zig 工具链归档（内嵌用）
+        if: ${{ !inputs.skip_zig }}
+        run: |
+          scripts/fetch-zig.sh --arch x86_64-linux
+          scripts/fetch-zig.sh --arch aarch64-linux
+          scripts/fetch-zig.sh --arch x86_64-windows
+
+      - name: 构建三平台产物
+        run: make release
+
+      - name: 产物清单
+        run: ls -lh dist/
+
+      - name: 上传到 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            echo "uploading $f"
+            gh release upload "$TAG" "$f" --clobber
+          done
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)\t\(.state)"'
