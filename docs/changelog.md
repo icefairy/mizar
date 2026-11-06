@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **发布资产一律 xz 压缩**：内嵌 Zig 工具链后未压缩产物 126/119/168 MB，
+  上传到 GitHub 时经常被 RST 或触发「60 秒无数据」超时。现在 `make release-xz`
+  构建后自动 `xz -T0 -6`（→ 74/68/110 MB），CI workflow 也只上传 `.xz` 并清理
+  release 上同名的裸二进制。下载后 `xz -d` 即可。
+
 ### 修复
 
 - **Windows 滚轮不再误取消任务**：ConPTY 会把泄漏的鼠标事件还原成字符流
