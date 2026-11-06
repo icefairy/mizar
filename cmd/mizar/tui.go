@@ -240,6 +240,14 @@ type tuiModel struct {
 	lastKeyAt     time.Time
 	lastNewlineAt time.Time
 
+	// 原始 VT 序列解码（见 esc_seq.go）：Windows 上方向键/Home/End 等可能以
+	// ESC[D 这类原始序列逐字符到达，此处拼回真正的按键（否则输入框会显示 "[D"）。
+	escSeqDecode bool
+	escSeqBuf    []rune
+	escSeqAt     time.Time
+	escSeqStart  time.Time
+	escSeqGen    int // 半截序列超时落盘的代次（让过期定时器失效）
+
 	// 伪 ESC 防护（见 esc_guard.go）：ESC 可能是 ConPTY 泄漏鼠标序列（ESC[<35;66;61M）
 	// 的开头，先挂起 escJunkWindow，确认不是坐标序列后再真正取消任务。
 	// escPending — 有已挂起、等待确认的 ESC；escSeq — 挂起序号（让旧定时器失效）；
@@ -1053,12 +1061,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		lines: []chatLine{
 			{role: "system", content: banner(), ts: time.Now()},
 		},
-		stats:      tuiStats{ModelName: a.Model()},
-		clip:       newClipboard(),
-		copyMode:   false,
-		pasteGuard: pasteGuardEnabledFor(os.Getenv),
-		pasteBurst: pasteBurstEnabled(),
-		escConfirm: escConfirmEnabled(),
+		stats:        tuiStats{ModelName: a.Model()},
+		clip:         newClipboard(),
+		copyMode:     false,
+		pasteGuard:   pasteGuardEnabledFor(os.Getenv),
+		pasteBurst:   pasteBurstEnabled(),
+		escConfirm:   escConfirmEnabled(),
+		escSeqDecode: escSeqDecodeEnabled(),
 		renderer: func() *glamour.TermRenderer {
 			r, _ := glamour.NewTermRenderer(
 				glamour.WithAutoStyle(),
@@ -1194,6 +1203,17 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		// 注意：本函数返回 nil 表示事件被吞掉（InputCapture 语义），与 MouseCapture 相反。
 		now := time.Now()
 		defer func() { m.lastKeyAt = now }()
+		// 原始 VT 序列解码（见 esc_seq.go）：把 ESC[D 这类逐字符到达的序列拼回
+		// 真正的按键（方向键、Home/End、F 键、Alt+字符），并吞掉泄漏的鼠标序列。
+		// 必须在所有按键逻辑之前——否则序列字符会被当成普通文本塞进输入框。
+		// replacement 可能是「同一个事件」（未变换，例如 Alt+K），此时继续走下面
+		// 的正常处理（滚动键、拷贝模式、输入框……）。
+		if handled, replacement := m.escSeqKey(event, now); handled {
+			if replacement == nil {
+				return nil
+			}
+			event = replacement
+		}
 		// 伪 ESC / ConPTY 鼠标泄漏序列防护（见 esc_guard.go）：吞掉泄漏字符，
 		// 挂起 Esc 待确认，确认不是泄漏后才真正取消任务。
 		seq, guard := m.escGuardKey(event, now)

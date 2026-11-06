@@ -12,9 +12,10 @@
 
 ## [v0.7.2] — 2026-11-06
 
-> 主题：**交互再修一轮**。v0.7.1 的两处修复在 Windows 实机上仍能复现，
-> 这一版把根因补全：滚轮仍然会误取消（泄漏序列被 ConPTY 拆批到达，90ms 窗口等不到），
-> 粘贴多行文本时输入框「一个字一个字地蹦」（每个字符都触发一次全文扫描 + 全屏重绘）。
+> 主题：**Windows 交互三连修**。v0.7.1 的两处修复在 Windows 实机上仍能复现，
+> 这一版把根因补全：滚轮仍然会误取消（泄漏序列被 ConPTY 拆批到达，90ms 窗口等不到）、
+> 粘贴多行文本时输入框「一个字一个字地蹦」（每个字符都触发一次全文扫描 + 全屏重绘），
+> 以及**方向键变成 `[D` / `[A`**（终端把原始 VT 序列逐字符送上来，tview 只认 Key）。
 
 ### 修复
 
@@ -43,8 +44,25 @@
   Unix 有 bracketed paste（一次 `EventPaste` 整段送），默认不启用攒批；
   `MIZAR_PASTE_BURST=1/0` 可强制开关。
 
+- **输入框里方向键变成 `[D` / `[A`（Windows）**。部分 Windows 终端/ConPTY 组合
+  不会把方向键翻译成 tcell 的专用 Key，而是把原始 VT 序列逐字符送上来：
+  左箭头 = `ESC [ D`。tcell 拆成三个事件（KeyEsc、`'['`、`'D'`），tview 只认 Key，
+  于是 `[D` 被当成普通文本塞进输入框；Home/End/Delete/F 键、Ctrl+方向键、
+  Alt+字母也一并失效。现在新增 `cmd/mizar/esc_seq.go`：在 InputCapture 最前面
+  把 ESC 开头的字符按 ≤120ms 的间隔拼回序列，命中已知编码就合成真正的按键
+  （`ESC[A/B/C/D`、`ESC[H/F`、`ESC[1~`…`ESC[24~`、`ESC[1;5C` 带修饰键、
+  `ESC O A`…、小键盘 `ESC O q`→`1`、`ESC` + 单字符 → Alt+字符）；
+  命中 ConPTY 泄漏的鼠标序列（`ESC[<…M`、`ESC[M…`、`ESC[…M`）则整段吞掉并记录
+  「最近在泄漏」；**认不出或半截超时的序列一律按原文补回输入框，绝不吞用户输入**。
+  单击 Esc 行为不变（任务运行中仍走两段式确认；未运行时窗口到期后照常交给 tview
+  收提示条，代价是 ~130ms 延迟）。Windows 默认开启，`MIZAR_ESC_SEQ=0` 可关闭。
+
 ### 测试
 
+- `TestEscSeqArrowLeft`（复现 `[D` 问题）、`TestEscSeqAllArrowsAndNav`（16 种编码）、
+  `TestEscSeqCtrlArrowModifiers`、`TestEscSeqAltLetter`、`TestEscSeqLeakSwallowed`、
+  `TestEscSeqUnknownKeepsInput`、`TestEscSeqArrowWhileIdle`、
+  `TestEscSeqTruncatedFlush`、`TestEscSeqDecodeEnabledFor`
 - `TestPasteBurstMergesIntoOneWrite` / `TestPasteBurstNewlinesKept` /
   `TestPasteBurstHotkeyNotSwallowed` / `TestPasteSkipScreenSuppressesShow` /
   `TestPasteBurstEnabledFor` / `TestPasteBurstGapWindows`
