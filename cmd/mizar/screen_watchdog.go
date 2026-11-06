@@ -57,7 +57,7 @@ func (m *tuiModel) startScreenWatchdog() {
 				if sizeChanged(w, h, lastW, lastH) {
 					lastW, lastH = w, h
 					diag.Logf("tui", "看门狗：终端尺寸变化 %dx%d → 整屏重画", w, h)
-					m.app.QueueUpdate(func() { m.resyncScreen() })
+					m.requestResyncFromGoroutine()
 					lastSync = time.Now()
 					continue
 				}
@@ -71,7 +71,7 @@ func (m *tuiModel) startScreenWatchdog() {
 					idle = screenIdleResync
 				}
 				if idle >= screenIdleResync && time.Since(lastSync) >= screenMinSyncGap {
-					m.app.QueueUpdate(func() { m.resyncScreen() })
+					m.requestResyncFromGoroutine()
 					lastSync = time.Now()
 				}
 			}

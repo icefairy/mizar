@@ -226,6 +226,31 @@ func (m *tuiModel) resyncScreen() {
 	}
 }
 
+// resyncRequest 请求一次强制重绘。
+//
+// ⚠️ 只能在事件循环线程内调用（InputCapture / submitInput / QueueUpdate 回调）。
+// 绝不能在这里再走 m.app.QueueUpdate：tview 的 QueueUpdate 会阻塞等待回调执行完，
+// 而事件循环此刻正被本调用者占据，双方互等 → TUI 死锁，键盘全哑（Ctrl+L 事故）。
+// tview 明确允许在直接事件处理与排队更新中同步执行 ForceDraw。
+func (m *tuiModel) resyncRequest() {
+	if m.resyncScreenFn != nil {
+		m.resyncScreenFn()
+		return
+	}
+	m.resyncScreen()
+}
+
+// requestResyncFromGoroutine 从非事件循环的 goroutine 请求重绘（看门狗等）。
+// tview 的控件操作要求事件循环线程，所以必须投递进更新队列。
+func (m *tuiModel) requestResyncFromGoroutine() {
+	f := func() { m.resyncRequest() }
+	if m.queueUpdateFn != nil {
+		m.queueUpdateFn(f)
+		return
+	}
+	m.app.QueueUpdate(f)
+}
+
 // pasteBurstActive 供 pasteSkipScreen 判断是否需要跳过屏幕输出。
 func (m *tuiModel) pasteBurstActive() bool {
 	return m.pastePending.Load()

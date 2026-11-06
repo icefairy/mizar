@@ -269,6 +269,10 @@ type tuiModel struct {
 	scr *pasteSkipScreen
 	// watchStop — 屏幕看门狗退出信号（见 screen_watchdog.go）
 	watchStop chan struct{}
+	// resyncScreenFn / queueUpdateFn — 重绘与排队入口的可替换实现（测试注入用）。
+	// nil 时分别退回 m.resyncScreen / m.app.QueueUpdate。
+	resyncScreenFn func()
+	queueUpdateFn  func(func())
 
 	// 粘贴突发合并（见 paste_burst.go）：Windows 无 bracketed paste，粘贴的每个
 	// 字符都是独立 KeyRune，若逐个写进输入框就会「一个字一个字地蹦」（每次改文本
@@ -1947,10 +1951,9 @@ func (m *tuiModel) deliverReminderHook() {
 		})
 	}
 	tuiRequestResync = func() {
-		// Sync 会让 tcell 把所有格子标脏并重画整屏——任何被外部写坏的
-		// 区域都会在这一帧被覆盖回正确内容。直接在事件循环里做（QueueUpdate
-		// 的回调本就在事件循环线程执行），不能再排一次 app.Sync() 以免自锁。
-		m.app.QueueUpdate(func() { m.resyncScreen() })
+		// Ctrl+L（InputCapture）与 /redraw（submitInput）都已运行在事件循环线程，
+		// 必须直接重绘；若在此处再 m.app.QueueUpdate 会与事件循环互等而死锁。
+		m.resyncRequest()
 	}
 }
 
