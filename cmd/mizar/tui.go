@@ -397,28 +397,47 @@ func (m *tuiModel) renderAllDirect() {
 		sb.WriteString("\n")
 	}
 
+	// 待回答的提问：把问题与编号选项渲染进聊天区（用户直接在输入框回编号）。
+	// ⚠ 必须在 SetText 之前拼进 sb：早先实现放在 SetText 之后追加，
+	// 导致提示永远不显示——用户看不到题目/选项，只能干等到 5 分钟超时。
+	m.askMu.Lock()
+	pending := m.askPending
+	m.askMu.Unlock()
+	if pending != nil {
+		sb.WriteString(renderAskPrompt(pending))
+	}
+
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
 	// 仅在首次渲染或新 bot 回复时自动滚动到底部
 	if !m.userScrolledUp {
 		m.textView.ScrollToEnd()
 	}
 
-	// 待回答的提问：把问题与编号选项渲染进聊天区（用户直接在输入框回编号）
-	m.askMu.Lock()
-	pending := m.askPending
-	m.askMu.Unlock()
-	if pending != nil {
-		sb.WriteString(sgrColor("yellow", "❓ 需要你的选择（回复编号，如 1；多选 1,3；直接回车 = 第 1 项）\n"))
-		// 多问题时只渲染当前这一问（已答过的不再重复列出）
-		if len(pending.qs) > 1 && pending.idx < len(pending.qs) {
-			sb.WriteString(sgrColor("yellow", fmt.Sprintf("（第 %d/%d 问）\n", pending.idx+1, len(pending.qs))))
-			sb.WriteString(sgrColor("yellow", strings.TrimRight(builtins.RenderPlainQuestions([]builtins.Question{pending.qs[pending.idx]}), "\n")+"\n"))
-		} else {
-			sb.WriteString(sgrColor("yellow", renderQuestions(pending.questions)+"\n"))
-		}
-		sb.WriteString("\n")
-	}
 	m.statusBarDirect()
+}
+
+// renderAskPrompt 把待回答的提问渲染成聊天区文本块（黄色提示 + 题目 + 编号选项）。
+// 多问题时只渲染当前这一问（已答过的不再重复列出）。
+//
+// 抽成纯函数便于单测：“提问必须出现在渲染正文里”这个不变式曾被破坏
+// （旧实现把这段拼在 SetText 之后，用户永远看不到题目）。
+func renderAskPrompt(p *askPending) string {
+	var sb strings.Builder
+	sb.WriteString(sgrColor("yellow", "❓ 需要你的选择（回复编号，如 1；多选 1,3；直接回车 = 第 1 项）\n"))
+	if len(p.qs) > 1 && p.idx < len(p.qs) {
+		sb.WriteString(sgrColor("yellow", fmt.Sprintf("（第 %d/%d 问）\n", p.idx+1, len(p.qs))))
+		sb.WriteString(sgrColor("yellow", strings.TrimRight(builtins.RenderPlainQuestions([]builtins.Question{p.qs[p.idx]}), "\n")+"\n"))
+	} else {
+		body := renderQuestions(p.questions)
+		// questions 原始 JSON 缺失/损坏时 renderQuestions 会返回原字符串（可能为空），
+		// 此时回退到已解析的 qs，否则单问题场景会渲染成空白（用户看不到任何题目）。
+		if strings.TrimSpace(body) == "" {
+			body = strings.TrimRight(builtins.RenderPlainQuestions(p.qs), "\n")
+		}
+		sb.WriteString(sgrColor("yellow", body+"\n"))
+	}
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // statusBarDirect 直接渲染状态栏（事件循环内用）
@@ -1744,11 +1763,12 @@ func (m *tuiModel) askViaChat(questionsJSON string) (string, error) {
 		m.askMu.Unlock()
 	}
 
-	// 轮询 Aborted：用户按 ESC 取消任务时不能干等 5 分钟（工具阻塞会让
-	// canceling 一直是 true，期间所有新输入都被排队）
+	// 轮询 Aborted：用户按 ESC 取消任务时不能干等（工具阻塞会让
+	// canceling 一直是 true，期间所有新输入都被排队）。
+	// 不设等待上限：人在忙时可能几分钟才回来看一眼，固定超时会让用户
+	// 刚看到题目就已过期。退出路径只有「作答」与「ESC 取消任务」。
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.After(5 * time.Minute)
 	for {
 		select {
 		case ans := <-ch:
@@ -1759,11 +1779,6 @@ func (m *tuiModel) askViaChat(questionsJSON string) (string, error) {
 				clearPending()
 				return "[]", nil
 			}
-		case <-deadline:
-			clearPending()
-			// 超时不报错（否则工具失败会打断任务）：返回空答案让模型自行决策
-			m.addChatLineAsync(chatLine{role: "err", content: "提问等待超时（5 分钟），已让模型自行决策", ts: time.Now()})
-			return "[]", nil
 		}
 	}
 }
