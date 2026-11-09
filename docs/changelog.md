@@ -12,9 +12,10 @@
 
 ## [v0.7.3] — 2026-11-09
 
-> 主题：**ask 回答卡死修复 + 状态栏两行化**。上一版让 ask_user_question 的题目能被
-> 看见了，但用户回完编号按回车会**彻底卡死**（键盘全哑）；这一版修掉自死锁，
-> 并给状态栏加了一行项目信息（路径 / 分支 / 改动 / 会话 / 运行时长）。
+> 主题：**让 ask 端到端可用 + 状态栏两行化**。此前的 ask_user_question 连续踩了三坑：
+> 参数形状不符就整轮失败、题目与选项压根没画出来、回完编号按回车又**彻底卡死**
+> （键盘全哑）。这一版把三处一并修掉，并给状态栏加了一行项目信息
+> （路径 / 分支 / 改动 / 会话 / 运行时长）。
 
 ### 修复
 
@@ -24,6 +25,19 @@
   事件循环里执行完」，事件循环线程正在这里等自己 → 自死锁，表现就是「输入 1 回车后
   啥操作也不能做」。改为事件循环内直接 `addChatLine` / `renderAllDirect`。
   与 v0.7.2 的 Ctrl+L 自锁是同一个模式。
+- **ask_user_question 此前两处「看不见 / 答不了」的修复也一并进入本版**（均在本版
+  之前的开发提交里完成，二进制与 v0.7.3 同源）：
+  1. **提问必失败：参数形状不匹配**（`internal/builtins/ask.go`）。工具 Description 里
+     没写 `Args` 段，`ArgsSchema()` 兜底成 `{args: string}`，模型只能猜参数形状，一次
+     不符就整轮失败。现在补全 Description 的 Args 说明，并新增 `parseQuestions` 宽容
+     归一化（裸数组 / `{questions:…}` / `{args:…}` / 字符串化 JSON / 双层包装都能吃下），
+     缺 `id` 自动补序号、`title`/`text` 兼容为 `question`；报错文案改为给出正确调用示例，
+     不再只说「不合法」让模型原样重试。
+  2. **题目与选项不显示 + 5 分钟固定超时**（`cmd/mizar/tui.go`）。提问块被拼在
+     `m.textView.SetText()` **之后**，追加的内容永远不会被绘制，用户看不到题目自然
+     无法作答 —— 移到 `SetText` 之前并抽成 `renderAskPrompt` 纯函数便于单测；同时去掉
+     `askViaChat` 的 5 分钟 deadline（超时会静默返回空答案让模型自行决策，人在忙时几分钟
+     才回来看一眼，题目刚被看到就已过期）。退出路径只剩「作答」与「ESC 取消任务」。
 
 ### 新增
 
@@ -43,6 +57,10 @@
   另覆盖单问/多问/重复作答的答案推进。
 - `project_info_test.go`：项目行渲染、`shortDir` 末两级、时长格式、真实 git 仓库采集，
   以及 `windowPath` 的「每帧不超宽 + 末端一定完整可见 + 滚动时带 … 前缀」。
+- `internal/builtins/ask_test.go`：`parseQuestions` 的各种宽容形状（裸数组 / 包装 /
+  字符串化 JSON / 缺 id 补序号）。
+- `cmd/mizar/ask_render_test.go`：`renderAskPrompt` 渲染出编号选项、`questions` 原始
+  JSON 为空时回退用已解析的 `qs` 渲染（避免单问题场景渲染成空白）。
 - `version` 提升到 **v0.7.3**（`cmd/mizar/main.go`）。
 
 ## [v0.7.2] — 2026-11-06
@@ -108,12 +126,24 @@
      （任务运行中/流式输出/拷贝模式一律不打扰）。
   3. **手动兜底**：`Ctrl+L` 或 `/redraw` 随时强制整屏重画（`resyncScreen` =
      重建内容 + `ForceDraw` + `Screen.Sync()`）。任务结束时也会自动 Sync 一次。
+- **Ctrl+L / `/redraw` 触发整屏重绘时自锁，TUI 彻底无响应**（`cmd/mizar/tui.go`，
+  与 v0.7.3 那次 ask 自死锁同一模式，此处是它第一次出现）。tview 的
+  `Application.QueueUpdate` 语义是「投递后**阻塞等待**回调执行完」（`updates <- …` 后
+  `<-ch`）。Ctrl+L 的 InputCapture 与 `/redraw` 的 `submitInput` 本身就跑在事件循环
+  线程里，它们经 `tuiRequestResync` 再调 `QueueUpdate` —— 事件循环正卡在该回调内，
+  永远回不到 `select` 消费队列，双方互等即成死锁：键盘全哑，只能杀进程。
+  修复：按调用来源拆成两个入口，语义显式化 —— `resyncRequest()`（事件循环线程内同步
+  重绘，tview 允许在直接事件处理与 queued update 中调用 `ForceDraw`）与
+  `requestResyncFromGoroutine()`（非事件循环线程，如看门狗，才投递更新队列），
+  重绘/排队入口做成可替换字段（`resyncScreenFn` / `queueUpdateFn`）便于测试注入。
 
 ### 测试
 
 - `TestSizeChanged` / `TestResyncScreenRebuildsContent` / `TestResyncScreenNilSafe` /
   `TestPasteSkipScreenSyncPasses` / `TestTUIOutputDisciplineRedirectsLog` /
   `TestResyncScreenWatchdogStops`
+- `resync_deadlock_test.go`：证明事件循环内请求重绘立即返回、goroutine 路径仍投递队列
+  （锁住「Ctrl+L 自锁」这条不变式）。
 - `TestEscSeqArrowLeft`（复现 `[D` 问题）、`TestEscSeqAllArrowsAndNav`（16 种编码）、
   `TestEscSeqCtrlArrowModifiers`、`TestEscSeqAltLetter`、`TestEscSeqLeakSwallowed`、
   `TestEscSeqUnknownKeepsInput`、`TestEscSeqArrowWhileIdle`、

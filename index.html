@@ -148,8 +148,9 @@
       <h2>最新动态</h2>
       <div class="grid cols-2">
         <div class="card">
-          <h3>v0.7.3 · ask 回答卡死修复 + 状态栏两行化</h3>
-          <p>上一版让 <code>ask_user_question</code> 的题目能被看见了，但回完编号按回车会<strong>彻底卡死</strong>。（1）<strong>回答后 TUI 无响应</strong>：<code>submitInput</code> 整体运行在 tcell 事件循环线程（InputCapture → Enter → submitInput），而回答分支用了 <code>app.QueueUpdateDraw</code> —— tview 的 <code>QueueUpdate</code> 语义是「投递后<strong>阻塞等待</strong>回调在事件循环里执行完」，事件循环正在这里等自己，于是自死锁。改为事件循环内直接 <code>addChatLine</code> / <code>renderAllDirect</code>；并用 AST 扫描测试把「<code>submitInput</code> 同步路径不得出现 <code>QueueUpdate</code>」锁进 CI。（2）<strong>状态栏新增项目行</strong>：<code>📁 codes/mizar  ⎇ main ✱3  │ 会话 a1b2c3d4  │ 已运行 12m</code>。路径只取末两级、家目录折叠为 <code>~</code>；带 git 分支（detached 显示短 SHA）与未提交改动数；路径超宽时<strong>只对目录段横向滞动</strong>，分支/会话/时长固定，且窗口末端对齐路径末尾并停留，<strong>项目名始终看得全</strong>。git 命令只在启动与任务结束时各跑一次，渲染只读缓存。</p>
+          <h3>v0.7.3 · ask 三连修 + 状态栏两行化</h3>
+          <p><code>ask_user_question</code> 此前连着踩三个坑，本版一并修掉：（0）<strong>参数形状不符就整轮失败</strong>——Description 没写 <code>Args</code> 段，schema 兜底成 <code>{args:string}</code>，模型只能猜；现补全说明并加 <code>parseQuestions</code> 宽容归一化（裸数组 / 包装 / 字符串化 JSON / 缺 <code>id</code> 都能吃下）。（1）<strong>提问后界面没反应、等一会自己走了</strong>——提问块拼在 <code>SetText()</code> <em>之后</em> 永远不被绘制，且 <code>askViaChat</code> 有 5 分钟固定超时；现移到 <code>SetText()</code> 之前并抽成 <code>renderAskPrompt</code>，<strong>去掉 5 分钟超时</strong>。（2）<strong>回答后 TUI 无响应</strong>：<code>submitInput</code> 运行在 tcell 事件循环线程（InputCapture → Enter → submitInput），而回答分支用了 <code>app.QueueUpdateDraw</code> —— tview 的 <code>QueueUpdate</code> 语义是「投递后<strong>阻塞等待</strong>回调在事件循环里执行完」，事件循环正在这里等自己，于是自死锁。改为事件循环内直接 <code>addChatLine</code> / <code>renderAllDirect</code>；并用 AST 扫描测试把「<code>submitInput</code> 同步路径不得出现 <code>QueueUpdate</code>」锁进 CI。同一死锁模式在 v0.7.2 的 Ctrl+L 上先出现过，本版按「事件循环内同步重绘 / goroutine 投递队列」两个入口显式拆开，根治这一类问题。</p>
+          <p><strong>状态栏新增项目行</strong>：<code>📁 codes/mizar  ⎇ main ✱3  │ 会话 a1b2c3d4  │ 已运行 12m</code>。路径只取末两级、家目录折叠为 <code>~</code>；带 git 分支（detached 显示短 SHA）与未提交改动数；路径超宽时<strong>只对目录段横向滞动</strong>，分支/会话/时长固定，且窗口末端对齐路径末尾并停留，<strong>项目名始终看得全</strong>。git 命令只在启动与任务结束时各跑一次，渲染只读缓存。</p>
         </div>
         <div class="card">
           <h3>v0.7.2 · Windows 交互四连修：滚轮 / 粘贴 / 方向键 / 残留文字</h3>
