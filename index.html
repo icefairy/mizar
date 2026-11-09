@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.7.2</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.7.3</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -147,6 +147,10 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.7.3 · ask 回答卡死修复 + 状态栏两行化</h3>
+          <p>上一版让 <code>ask_user_question</code> 的题目能被看见了，但回完编号按回车会<strong>彻底卡死</strong>。（1）<strong>回答后 TUI 无响应</strong>：<code>submitInput</code> 整体运行在 tcell 事件循环线程（InputCapture → Enter → submitInput），而回答分支用了 <code>app.QueueUpdateDraw</code> —— tview 的 <code>QueueUpdate</code> 语义是「投递后<strong>阻塞等待</strong>回调在事件循环里执行完」，事件循环正在这里等自己，于是自死锁。改为事件循环内直接 <code>addChatLine</code> / <code>renderAllDirect</code>；并用 AST 扫描测试把「<code>submitInput</code> 同步路径不得出现 <code>QueueUpdate</code>」锁进 CI。（2）<strong>状态栏新增项目行</strong>：<code>📁 codes/mizar  ⎇ main ✱3  │ 会话 a1b2c3d4  │ 已运行 12m</code>。路径只取末两级、家目录折叠为 <code>~</code>；带 git 分支（detached 显示短 SHA）与未提交改动数；路径超宽时<strong>只对目录段横向滞动</strong>，分支/会话/时长固定，且窗口末端对齐路径末尾并停留，<strong>项目名始终看得全</strong>。git 命令只在启动与任务结束时各跑一次，渲染只读缓存。</p>
+        </div>
         <div class="card">
           <h3>v0.7.2 · Windows 交互四连修：滚轮 / 粘贴 / 方向键 / 残留文字</h3>
           <p>v0.7.1 的两处修复在 Windows 实机上仍能复现，这一版补全根因。（1）<strong>滚轮仍会误取消任务</strong>：ConPTY 把泄漏的鼠标序列<strong>拆成多条输入记录分批 flush</strong>，批次间隔可达几百毫秒，90ms 窗口等不到 <code>[</code> 就当成用户真按了 Esc。现在三层兜底——Windows 确认窗口 90ms→<strong>300ms</strong>；最近 3 秒内见过泄漏序列时放宽到 <strong>1.2s</strong> 且到点仍在泄漏就放弃取消；Windows 上 Esc 改为<strong>两段式</strong>（第一次只提示「再按一次 Esc 取消」，2.5 秒内再按才真正取消），滚轮即使漏判最多出现一行提示，<strong>绝不停任务</strong>（<code>MIZAR_ESC_CONFIRM=0</code> 可关闭）。（2）<strong>粘贴多行文本「一个字一个字地蹦」</strong>：Windows 没有 bracketed paste，每个字符都是独立按键 → <code>replace()</code> → <code>changedFunc</code> 全文扫描 → 一次全屏重绘，几百字就是几百次。现在间隔 &lt;8ms 判定为粘贴并<strong>攒批</strong>，空闲 30ms 后一次性 <code>SetText</code>；攒批期间跳过 <code>root.Draw()</code> 并吞掉屏幕输出，只重画一次，快捷键（Alt+K/J、Ctrl+U/D）到达时先落盘再立即生效。（3）<strong>方向键变成 <code>[D</code></strong>：部分 Windows 终端把原始 VT 序列逐字符送上来（左箭头 = <code>ESC [ D</code>），tview 只认 Key，于是 <code>[D</code> 落进输入框。现在新增 raw-VT 解码层：<code>ESC[A/B/C/D</code>、<code>ESC[1~</code>…<code>ESC[24~</code>、<code>ESC[1;5C</code>（Ctrl+方向）、<code>ESC O A</code>、<code>ESC</code>+单字符→Alt+字符都能正确还原；<strong>认不出或半截超时的序列一律按原文补回输入框，绝不吞用户输入</strong>。（4）<strong>聊天区残留文字擦不掉</strong>：① 标准 <code>log</code>／<code>fmt.Printf</code>／OSC52 序列绕过 tcell 直写终端，tcell 以为那些格子是自己画的，增量重绘永不覆盖；② 窗口调整后 tcell 的 CellBuffer 宽度落后于终端实际宽度，右侧永远保留上一次更宽窗口的内容。现在 TUI 下 log 全部改道诊断日志、定时提醒改走聊天区、OSC52 不再直写；新增<strong>屏幕看门狗</strong>（每 2 秒比对尺寸，变化即整屏强制重画，空闲 5 秒再兜底重画一次），另可用 <strong>Ctrl+L / /redraw</strong> 手动一键清干净。</p>

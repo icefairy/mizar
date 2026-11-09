@@ -10,6 +10,41 @@
 
 - 无（下一版待记录）。
 
+## [v0.7.3] — 2026-11-09
+
+> 主题：**ask 回答卡死修复 + 状态栏两行化**。上一版让 ask_user_question 的题目能被
+> 看见了，但用户回完编号按回车会**彻底卡死**（键盘全哑）；这一版修掉自死锁，
+> 并给状态栏加了一行项目信息（路径 / 分支 / 改动 / 会话 / 运行时长）。
+
+### 修复
+
+- **回答 ask_user_question 后 TUI 卡死**（`cmd/mizar/tui.go`）。`submitInput` 整体运行在
+  tcell 事件循环线程（InputCapture → Enter → submitInput），而回答分支用了
+  `m.app.QueueUpdateDraw(...)`。tview 的 `QueueUpdate` 语义是「投递后**阻塞等待**回调在
+  事件循环里执行完」，事件循环线程正在这里等自己 → 自死锁，表现就是「输入 1 回车后
+  啥操作也不能做」。改为事件循环内直接 `addChatLine` / `renderAllDirect`。
+  与 v0.7.2 的 Ctrl+L 自锁是同一个模式。
+
+### 新增
+
+- **状态栏第一行：项目信息**。显示 `📁 codes/mizar  ⎇ main ✱3  │ 会话 a1b2c3d4  │ 已运行 12m`：
+  - 路径只取末两级，家目录前缀折叠为 `~`；
+  - git 分支（detached 显示短 SHA）+ 未提交改动条数（干净时不显示）；
+  - 会话短号、进程运行时长；
+  - 路径放不下时**只对目录段做横向滞动**，分支/会话/时长固定不动；窗口末端对齐路径末尾
+    并停留，保证**项目名（末端）始终能被完整看清**；
+  - git 命令只在启动与任务结束时各跑一次，渲染只读缓存（状态栏高频重绘不能跑命令）。
+- `cmd/mizar/applyAnswer` 抽成纯函数承载「推进答案 / 生成 payload」，便于单测覆盖多问题逐问推进。
+
+### 测试
+
+- `ask_deadlock_test.go`：AST 扫描断言 `submitInput` **同步路径**不得出现
+  `QueueUpdate`/`QueueUpdateDraw`（`go func` 内允许），把这次事故的不变式锁进 CI；
+  另覆盖单问/多问/重复作答的答案推进。
+- `project_info_test.go`：项目行渲染、`shortDir` 末两级、时长格式、真实 git 仓库采集，
+  以及 `windowPath` 的「每帧不超宽 + 末端一定完整可见 + 滚动时带 … 前缀」。
+- `version` 提升到 **v0.7.3**（`cmd/mizar/main.go`）。
+
 ## [v0.7.2] — 2026-11-06
 
 > 主题：**Windows 交互四连修**。v0.7.1 的两处修复在 Windows 实机上仍能复现，

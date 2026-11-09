@@ -169,6 +169,11 @@ type tuiModel struct {
 	autoComplete     *tview.TextView // 自动提示条（输入 / 或 @ 时显示匹配命令/文件）
 	autoCompleteList []string        // 当前补全候选列表（用于 Tab 填入）
 	statusBar        *tview.TextView
+	projBar          *tview.TextView // 状态栏第一行：项目路径 / 分支 / 会话 / 运行时长
+	projScrollOn     atomic.Bool     // 路径超宽时的滞动循环是否运行中
+	projScrollTick   atomic.Int64    // 滞动帧序号（由滞动循环推进）
+	project          projectInfo     // 项目信息快照（启动与任务结束时采集，渲染只读）
+	startedAt        time.Time       // 进程启动时刻（项目行「已运行」用）
 	flex             *tview.Flex
 	userScrolledUp   bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
 
@@ -304,6 +309,22 @@ type askPending struct {
 	answers   []builtins.Answer   // 已收集的答案
 	idx       int                 // 当前等待第几问（0-based）
 	answerCh  chan string         // 全部答完后单发 answers JSON
+}
+
+// applyAnswer 把用户输入作为当前问题的答案推进一问（调用方需持 askMu）。
+// 返回全部答完时应发给 answerCh 的 payload（空串 = 还没答完）；done 表示是否已答完。
+// 抽成纯函数便于单测：本函数不碰 UI，因为调用方运行在事件循环线程。
+func applyAnswer(p *askPending, input string) (payload string, done bool) {
+	if p == nil || p.idx >= len(p.qs) {
+		return "", false
+	}
+	p.answers = append(p.answers, answerFor(p.qs[p.idx], input))
+	p.idx++
+	if p.idx < len(p.qs) {
+		return "", false
+	}
+	b, _ := json.Marshal(p.answers)
+	return string(b), true
 }
 
 // sgrColor 生成 tview 动态颜色标记：[color]text[::-]
@@ -442,6 +463,7 @@ func renderAskPrompt(p *askPending) string {
 
 // statusBarDirect 直接渲染状态栏（事件循环内用）
 func (m *tuiModel) statusBarDirect() {
+	m.projBarDirect()
 	s := &m.stats
 	var sb strings.Builder
 
@@ -551,6 +573,77 @@ func (m *tuiModel) statusBarDirect() {
 	m.statusBar.SetText(sb.String()).SetDynamicColors(true)
 }
 
+// projBarDirect 渲染状态栏第一行（项目行）。
+// 只读缓存快照，不跑 git 命令：这行跟着状态栏高频重绘。
+//
+// 宽度不够时只对【目录段】做滞动：分支/会话/时长等短而重要的段始终固定，
+// 目录段末端（项目名）比开头重要，所以窗口末端对齐路径末尾并在那里停留。
+func (m *tuiModel) projBarDirect() {
+	if m.projBar == nil {
+		return // 单测中手工构造的 tuiModel 可能没建组件
+	}
+	dir := redactHome(m.project.Dir)
+	line := projectLine(m.project, m.sessionID, m.startedAt, time.Now())
+	if _, _, w, _ := m.projBar.GetInnerRect(); w > 0 {
+		// 固定段宽度 = 完整行 + 目录段 + 「📁 」前缀 → 用空白目录算出的固定部分
+		// （不用空串避免 fallback "?" 干扰宽度）
+		idx := strings.Index(line, dir)
+		if idx >= 0 {
+			head := "📁 "
+			tail := line[idx+len(dir):]
+			avail := w - len([]rune(head)) - len([]rune(tail))
+			if avail > 0 && len([]rune(dir)) > avail {
+				shown := windowPath(dir, avail, int(m.projScrollTick.Load()))
+				line = head + shown + tail
+				m.startProjScroll()
+			} else {
+				m.stopProjScroll()
+			}
+		}
+	}
+	m.projBar.SetText(sgrColor("grey", line)).SetDynamicColors(true)
+}
+
+// startProjScroll 启动项目行滞动循环（仅路径超宽时需要）。
+// 复用 spinnerLoop 的既有模式：独立 goroutine + QueueUpdateDraw 回事件循环重绘。
+func (m *tuiModel) startProjScroll() {
+	if m.projScrollOn.Swap(true) {
+		return // 已在跑
+	}
+	go func() {
+		t := time.NewTicker(400 * time.Millisecond)
+		defer t.Stop()
+		for range t.C {
+			if !m.projScrollOn.Load() {
+				return
+			}
+			m.projScrollTick.Add(1)
+			// 只重绘项目行，不动整屏
+			m.app.QueueUpdateDraw(func() { m.projBarDirect() })
+		}
+	}()
+}
+
+func (m *tuiModel) stopProjScroll() {
+	m.projScrollOn.Store(false)
+}
+
+// refreshProjectInfo 重新采集项目信息（会跑 git 命令，勿在事件循环里高频调用）。
+// 调用点：启动时、每次任务结束（工作区可能因工具调用变脏）。
+func (m *tuiModel) refreshProjectInfo() {
+	wd, _ := os.Getwd()
+	m.project = collectProjectInfo(wd)
+}
+
+// redactHome 把家目录前缀换成 ~，省一行宽度也更符合终端习惯。
+func redactHome(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	return strings.ReplaceAll(p, home, "~")
+}
+
 // sameUsage 判断两个用量是否等同（用于流内 usage 分片入账与任务结束时补账的去重）。
 // 值比较而非仅指针：同一 OpenAI 实例可能复用 lastUsage 对象指针（逐步覆盖）。
 func sameUsage(a, b *agent.Usage) bool {
@@ -654,6 +747,8 @@ func (m *tuiModel) setLoading(loading bool) {
 		m.startSpinner()
 	} else {
 		m.stopSpinner()
+		// 任务结束：工具可能改动了工作区，刷新项目行的 ✱改动 计数
+		m.refreshProjectInfo()
 	}
 	m.renderAllDirect()
 }
@@ -741,6 +836,8 @@ func (m *tuiModel) setLoadingAsync(loading bool) {
 		m.loading = loading
 		if !loading {
 			m.stopSpinner()
+			// 任务结束：工具可能改动了工作区，刷新项目行的 ✱改动 计数
+			m.refreshProjectInfo()
 		}
 		if !loading {
 			// 任务收尾：整屏 Sync 一次。任务运行期间可能有过绕过 tcell 的输出
@@ -1093,6 +1190,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		sessionID: sid,
 		userColor: "white",
 		aiColor:   "green",
+		startedAt: time.Now(),
 		lines: []chatLine{
 			{role: "system", content: banner(), ts: time.Now()},
 		},
@@ -1112,6 +1210,8 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return r
 		}(),
 	}
+	// 项目行初值：工作目录 + git 分支 + 改动计数（仅启动时跑一次 git）
+	m.refreshProjectInfo()
 	// 从配置加载颜色设置
 	if cfg, err := config.Load(config.DefaultPath()); err == nil {
 		if cfg.UserColor != "" {
@@ -1176,6 +1276,13 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		SetDynamicColors(true).
 		SetRegions(false)
 
+	// 项目行（状态栏第一行）：📁 目录 ⎇ 分支 ✱改动 │ 会话 xxx │ 已运行 12m
+	// 与状态栏分开两个 TextView，是兔在拷贝模式/模型选择器那些临时提示
+	// （直接 statusBar.SetText 覆盖整行）把项目信息冲掉。
+	m.projBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(false)
+
 	// 排队消息列表（显示在输入框上方，无边框）
 	m.queueView = tview.NewTextView().
 		SetDynamicColors(true).
@@ -1196,6 +1303,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		AddItem(m.queueView, 0, 0, false).
 		AddItem(m.autoComplete, 1, 0, false).
 		AddItem(m.inputField, 5, 0, false).
+		AddItem(m.projBar, 1, 0, false).
 		AddItem(m.statusBar, 1, 0, false)
 
 	// 应用
@@ -1821,29 +1929,29 @@ func (m *tuiModel) submitInput(s string) {
 	}
 	// 若当前有 ask_user_question 等待回答，将输入作为答案（优先于正常任务流）。
 	// 多问题时逐问收集：未答完不发 channel，只在聊天区提示进入下一问。
+	//
+	// ⚠ 本函数整体运行在 tcell 事件循环线程（InputCapture → Enter → submitInput），
+	// 此处绝不能调 m.app.QueueUpdateDraw：它投递后阻塞等待回调在事件循环里执行完，
+	// 而事件循环线程正在这里等 → 自死锁，表现就是「回答完第一个问题后键盘全哑」。
+	// 事件循环内直接用 addChatLine / renderAllDirect。
 	m.askMu.Lock()
 	pending := m.askPending
 	var askPayload string
 	askDone := false
-	if pending != nil && pending.idx < len(pending.qs) {
-		pending.answers = append(pending.answers, answerFor(pending.qs[pending.idx], s))
-		pending.idx++
-		if pending.idx >= len(pending.qs) {
-			b, _ := json.Marshal(pending.answers)
-			askPayload = string(b)
+	if pending != nil {
+		askPayload, askDone = applyAnswer(pending, s)
+		if askDone {
 			m.askPending = nil
-			askDone = true
 		}
 	}
 	m.askMu.Unlock()
 	if pending != nil {
-		m.app.QueueUpdateDraw(func() {
-			m.addChatLine(chatLine{role: "user", content: "【回答问题】" + s, ts: time.Now()})
-		})
+		m.addChatLine(chatLine{role: "user", content: "【回答问题】" + s, ts: time.Now()})
 		if askDone {
+			// answerCh 有 1 槽缓冲，事件循环内发送不会阻塞。
 			pending.answerCh <- askPayload
 		} else {
-			m.app.QueueUpdateDraw(func() { m.renderAllDirect() })
+			m.renderAllDirect()
 		}
 		return
 	}
