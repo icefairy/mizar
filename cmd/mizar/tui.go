@@ -165,6 +165,8 @@ type tuiModel struct {
 	app              *tview.Application
 	textView         *tview.TextView
 	queueView        *tview.TextView // 排队消息列表（显示在输入框上方）
+	todoView         *tview.TextView // 待办清单（显示在输入框上方，有未办才出现）
+	todoVisible      bool            // todoView 当前是否在 flex 中可见
 	inputField       *tview.TextArea
 	autoComplete     *tview.TextView // 自动提示条（输入 / 或 @ 时显示匹配命令/文件）
 	autoCompleteList []string        // 当前补全候选列表（用于 Tab 填入）
@@ -830,6 +832,57 @@ func (m *tuiModel) renderQueue() {
 	m.queueVisible = true
 }
 
+// renderTodos 渲染待办清单（仅从事件循环调用）。
+// 显示在输入框上方（autoComplete 之下），有未完成待办时出现，全部完成或无待办时隐藏。
+// 状态来自 builtins 包内的 pi 式 todo 全局状态，todo 工具每次 add/toggle/clear 后调用本函数刷新。
+func (m *tuiModel) renderTodos() {
+	if m.todoView == nil || m.flex == nil {
+		return
+	}
+	todos := builtins.PiTodoList()
+	// 只展示未完成项；没有未完成项就不占用屏幕（用户随时可 /todos 看全量）
+	var pending []builtins.PiTodo
+	for _, t := range todos {
+		if !t.Done {
+			pending = append(pending, t)
+		}
+	}
+	if len(pending) == 0 {
+		m.todoView.SetText("")
+		m.flex.ResizeItem(m.todoView, 0, 0)
+		m.todoVisible = false
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString(sgrColor("fuchsia", fmt.Sprintf("待办 (%d项未完成)  /todos 查看全部：", len(pending))))
+	body := 0
+	for i, t := range pending {
+		if i >= 5 {
+			sb.WriteString("\n")
+			sb.WriteString(sgrColor("fuchsia", fmt.Sprintf("... 还有 %d 项", len(pending)-i)))
+			body++
+			break
+		}
+		line := fmt.Sprintf("[ ] #%d %s", t.ID, t.Text)
+		if r := []rune(line); len(r) > 60 {
+			line = string(r[:57]) + "..."
+		}
+		sb.WriteString("\n")
+		sb.WriteString(sgrColor("yellow", tview.Escape(line)))
+		body++
+	}
+	m.todoView.SetText(sb.String()).SetDynamicColors(true)
+	m.flex.ResizeItem(m.todoView, body+1, 0) // 标题 1 行 + 正文
+	m.todoVisible = true
+}
+
+// refreshTodosAsync 从任意 goroutine 安全刷新待办清单（todo 工具在 agent goroutine 中执行）。
+func (m *tuiModel) refreshTodosAsync() {
+	m.app.QueueUpdateDraw(func() {
+		m.renderTodos()
+	})
+}
+
 // setLoadingAsync 从 goroutine 安全设置加载状态（loading 赋值挪入事件循环回调，避免数据竞争）
 func (m *tuiModel) setLoadingAsync(loading bool) {
 	m.app.QueueUpdateDraw(func() {
@@ -1288,6 +1341,12 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		SetDynamicColors(true).
 		SetRegions(false)
 
+	// 待办清单（显示在输入框上方，仅在有待办时出现）
+	m.todoView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetRegions(false).
+		SetText("")
+
 	// 自动提示条（显示在输入框上方，仅在输入 / 时出现）
 	m.autoComplete = tview.NewTextView().
 		SetDynamicColors(true).
@@ -1301,6 +1360,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		SetDirection(tview.FlexRow).
 		AddItem(m.textView, 0, 1, true).
 		AddItem(m.queueView, 0, 0, false).
+		AddItem(m.todoView, 0, 0, false).
 		AddItem(m.autoComplete, 1, 0, false).
 		AddItem(m.inputField, 5, 0, false).
 		AddItem(m.projBar, 1, 0, false).
@@ -1314,12 +1374,20 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 	m.app.EnableMouse(shouldEnableMouse())
 	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理（Unix 生效；Windows 由 pasteGuard 兜底）
 
-	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮正常传递
+	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮自己处理
 	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
 		// 左键点击/拖拽：消耗掉，焦点保持在输入框
-		// 鼠标滚轮滚动：正常传递（TextView 自带 MouseHandler 处理）
 		// 文本选择：按住 Shift 拖动，由终端模拟器处理（tcell 鼠标跟踪模式下不拦截 Shift+拖拽）
 		switch action {
+		case tview.MouseScrollUp, tview.MouseScrollDown:
+			// 滚轮**必须自己处理**，不能交给 TextView 的 MouseHandler：
+			// 它只改自己的 lineOffset，我们完全不知情 → userScrolledUp 仍是 false，
+			// 而流式/看门狗每次 renderAllDirect 都会「不在底部就 ScrollToEnd」，
+			// 于是滚轮刚滚上去就被拽回底部，观感就是「滚轮没反应 / 用不了」。
+			if m.wheelScroll(action, event) {
+				return nil, tview.MouseConsumed
+			}
+			return event, action
 		case tview.MouseLeftDown, tview.MouseLeftUp, tview.MouseLeftClick, tview.MouseLeftDoubleClick:
 			return nil, tview.MouseConsumed
 		case tview.MouseRightDown, tview.MouseRightUp, tview.MouseRightClick:
@@ -1816,6 +1884,10 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			if ctx.Err != nil {
 				m.addChatLineAsync(chatLine{role: "err", content: ctx.Tool + " 失败: " + ctx.Err.Error(), ts: time.Now()})
 			} else if ctx.Result != "" {
+				// todo 工具返回后刷新输入框上方的待办清单
+				if ctx.Tool == "todo" {
+					m.refreshTodosAsync()
+				}
 				// 工具结果：从 ToolResult JSON 中提取 output 字段，并折叠为单行缩略，避免长输出喧宾夺主
 				result := builtins.StripTodoMarker(ctx.Result)
 				result = strings.TrimSpace(result)
@@ -1828,6 +1900,9 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 			return nil
 		})
 	}
+
+	// 恢复会话后（SetTodosFromHistory 已在构造前回放）立即按当前状态显示待办清单
+	m.renderTodos()
 
 	return m
 }
@@ -2014,6 +2089,9 @@ func (m *tuiModel) submitInput(s string) {
 				}
 				if strings.HasPrefix(s, "/color") {
 					m.renderAllDirect()
+				} else if strings.HasPrefix(s, "/todos") {
+					// 已在事件循环回调整内，直接渲染（QueueUpdateDraw 会自死锁）
+					m.renderTodos()
 				} else {
 					m.statusBarDirect()
 				}
@@ -2121,12 +2199,41 @@ func (m *tuiModel) Run() error {
 	return err
 }
 
+// wheelScroll 处理鼠标滚轮（MouseCapture 内调用，已在事件循环线程）。
+//
+// 为什么不能让 TextView 自己处理：tview 的 TextView.MouseHandler 只调整内部的
+// lineOffset，不通知任何人，我们的 userScrolledUp 保持 false。之后每次
+// renderAllDirect（流式回复 60ms 一次、bash 实时输出 80ms 一次、看门狗重绘）
+// 都会「不跟随就 ScrollToEnd」把视图拽回底部——滚轮滚动被瞬间撤销，用户感知就是
+// 「内容区滚轮彻底没用」。这里统一走 scrollChat，顺带维护 userScrolledUp。
+//
+// 返回 true 表示已消费该滚轮事件（指针不在聊天区内时返回 false，交回默认处理）。
+func (m *tuiModel) wheelScroll(action tview.MouseAction, event *tcell.EventMouse) bool {
+	if m.textView == nil || event == nil {
+		return false
+	}
+	if !m.textView.InRect(event.Position()) {
+		return false
+	}
+	if m.copyMode {
+		return false // 拷贝模式有自己的视图，滚轮交给 tview 默认逻辑
+	}
+	if action == tview.MouseScrollUp {
+		m.scrollChat(-wheelScrollLines)
+	} else {
+		m.scrollChat(wheelScrollLines)
+	}
+	return true
+}
+
+// wheelScrollLines 滚轮一格的滚动行数（3 行是终端/浏览器通行的手感）。
+const wheelScrollLines = 3
+
 // scrollChat 按行滚动聊天区：delta>0 向下、delta<0 向上；量级足够大时等价于跳到底/顶。
 // 所有滚动键位（PgUp/PgDn、Ctrl+U/D、Alt+K/J、gg/G）统一走这里，避免多份偏移逻辑。
 // userScrolledUp 的语义：向上滚不改变它（可能本来就在翻历史），滚到底则恢复自动跟随。
 func (m *tuiModel) scrollChat(delta int) {
 	row, _ := m.textView.GetScrollOffset()
-	total := m.textView.GetWrappedLineCount()
 	if delta < 0 {
 		m.userScrolledUp = true
 		if row+delta < 0 {
@@ -2136,12 +2243,26 @@ func (m *tuiModel) scrollChat(delta int) {
 		m.textView.ScrollTo(row+delta, 0)
 		return
 	}
-	if row+delta >= total {
+	// 「到底」的判据是「再加 delta 会超过最大偏移」，而不是「超过总行数」：
+	// 总行数含视口高度，row 最大只能到 total-viewHeight。早先拿 total 比会
+	// 永远判不到底 → userScrolledUp 不复位，滚轮往下滚到底后仍被当成「停在历史里」。
+	if row+delta >= m.maxScrollRow() {
 		m.userScrolledUp = false
 		m.textView.ScrollToEnd()
 		return
 	}
 	m.textView.ScrollTo(row+delta, 0)
+}
+
+// maxScrollRow 聊天区可用的最大滚动偏移（总行数 - 视口高度，至少 0）。
+func (m *tuiModel) maxScrollRow() int {
+	total := m.textView.GetWrappedLineCount()
+	_, _, _, h := m.textView.GetInnerRect()
+	max := total - h
+	if max < 0 {
+		return 0
+	}
+	return max
 }
 
 // =============================================================================

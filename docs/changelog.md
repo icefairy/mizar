@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **TUI 内容区鼠标滚轮失效**（`cmd/mizar/tui.go`）。滚轮事件原先交给
+  `TextView.MouseHandler` 处理，它只改自己的 `lineOffset`，外部状态
+  `userScrolledUp` 保持 `false`；而流式回复（60ms）、bash 实时输出（80ms）、
+  屏幕看门狗每次 `renderAllDirect` 都会「不在底部就 `ScrollToEnd`」，把刚滚上去的
+  视图立刻拽回底部 —— 观感就是「内容区滚轮完全没用」。现在 `MouseCapture` 自己
+  接管滚轮（指针在聊天区内时），统一走 `scrollChat`：一格 3 行、维护
+  `userScrolledUp`、到底自动恢复跟随。
+  顺带修掉 `scrollChat` 的「到底」判据错误：原先拿 `row+delta >= 总行数` 比较，
+  而 `row` 最大只能到 `总行数-视口高度`，条件永远不成立 → 下滚到底也不恢复自动
+  跟随。改为与 `maxScrollRow()`（总行数 − 视口高度）比较。新增 `wheel_test.go`
+  以 SimulationScreen 端到端覆盖：滚轮上滚、滚后重绘不被拽回、下滚到底复位跟随、
+  指针在聊天区外不劫持。
+
 ### 变更
 
 - 无（下一版待记录）。
