@@ -9,8 +9,12 @@ import (
 // spinnerFrames 等待指示动画帧（Braille spinner）。
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// spinnerLines 等待期间轮换展示的「开阳」特性宣传语（每 4 秒切换一条）。
+// spinnerLines 等待期间轮换展示的「开阳」提示语（每 4 秒切换一条）。
+//
+// 内容分两段：前半是长期特性，后半是近期新增能力（新功能上线时往「近期新增」
+// 段落里补，旧的可以下移或删掉，保持一轮 4 秒 × 条数 ≈ 1 分钟内不重复）。
 var spinnerLines = []string{
+	// 长期特性
 	"零依赖 · 单文件二进制，拷进去就能跑",
 	"自举 Agent · 让模型自己写插件，扩展自己",
 	"插件热重载 · .ts 改完立即生效，无需重启",
@@ -23,6 +27,19 @@ var spinnerLines = []string{
 	"goja 沙箱 · 插件安全执行，运行时隔离",
 	"离线部署 · 数据不出内网，适合私有化",
 	"内置 bash/read/write · 开箱即用的编码能力",
+	// 近期新增（v0.7.x）
+	"mizar -c · 一条命令续接全局最后一次退出的会话",
+	"交互提问 · ask_user_question 编号作答，TUI 内直接选",
+	"计划模式 · /plan 先出方案再动手，exit_plan_mode 审批",
+	"会话目标 · /goal + 自动 judge 续跑，长任务不半途而废",
+	"定时提醒 · schedule 到点自动叫醒，不必守着终端",
+	"子代理委派 · delegate_task 并行拆活，上下文互不污染",
+	"长期记忆 · mem_write/搜索语义检索，跨会话记得住",
+	"知识库 · kb_* 文档分块嵌入，语义检索秒级命中",
+	"状态栏项目行 · 路径/分支/改动/会话号/运行时长一眼可见",
+	"滚动与重绘 · 鼠标滚轮平滑滚动，Ctrl+L 一键清残留",
+	"Web UI + Server · HTTP/JSON-RPC/WebSocket 多端接入",
+	"内嵌 Zig 工具链 · /zig 内网现场编译，无需装 SDK",
 }
 
 // classicSpinner 经典（liner/readline）模式的等待提示：单行覆盖刷新
