@@ -1916,7 +1916,7 @@ func (m *tuiModel) addQuitHint() {
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		hint = fmt.Sprintf("会话 %s: 用 mizar -session %s 续接", short, m.sessionID)
+		hint = fmt.Sprintf("会话 %s: 用 mizar -session %s 续接\n下次可直接 mizar -c 续接最后一次退出的会话", short, m.sessionID)
 	}
 	// addChatLine 会立即 renderAllDirect（事件循环内调用，提交在 app.Stop 前的最后一次绘制）
 	m.addChatLine(chatLine{role: "system", content: hint, ts: time.Now()})
@@ -2834,7 +2834,7 @@ func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *ses
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接（或 mizar -c 续接最后一次退出的会话）\n", short, sessionID)
 	}
 }
 

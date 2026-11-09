@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`mizar -c` 续接最后一次退出的会话**（`cmd/mizar/main.go` + `internal/session/last.go`）。
+  退出时（TUI / 经典模式 / `-task` 单次执行）把当前会话 ID + 所在作用域写进
+  **会话根目录的唯一状态文件** `~/.mizar/sessions/last-session.json`（`{id, scope}`，
+  原子写）；下次启动用 `-c`（或 `-continue`）即可续接该会话，无需记 UUID。
+  **`-c` 续接的是「全局最后一次退出的会话」**——一份全局状态直接给出结果，与当前
+  工作路径无关，并自动切换到该会话所在作用域。无记录时回退为新建会话；仅记录已落盘
+  （有消息）的会话。旧版散落在 `<scope>/last-session` 的纯文本记录会被兼容读取。
+
 ### 修复
 
 - **TUI 内容区鼠标滚轮失效**（`cmd/mizar/tui.go`）。滚轮事件原先交给

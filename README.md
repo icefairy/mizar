@@ -182,6 +182,10 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 ### 7. 会话记忆（Path-Scoped）
 - 按工作目录自动恢复/创建会话（类似 Pi 的 path-scoped session memory）
 - JSONL 格式会话日志：追加 / 加载 / 列表 / 删除 / 续接
+- **退出记账**：每次退出（TUI/经典模式）自动把当前会话 ID 记到会话根目录的
+  唯一状态文件 `~/.mizar/sessions/last-session.json`（含 `{id, scope}`）；下次用
+  **`mizar -c`**（或 `-continue`）即可直接续接「**全局**最后一次退出的会话」，
+  自动切到该会话所在的作用域，无需记住 UUID。没有记录时回退为新建会话。
 - 每条消息带 `timestamp`（RFC3339 毫秒），落盘即打点，无需调用方关心
 - AbortReason 归一化与分类（8 种原因）
 

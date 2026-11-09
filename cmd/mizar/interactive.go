@@ -80,7 +80,7 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接（或 mizar -c 续接最后一次退出的会话）\n", short, sessionID)
 	}
 
 	// 渲染已加载的历史消息
@@ -155,7 +155,7 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 				if len(short) > 8 {
 					short = short[:8]
 				}
-				fmt.Printf("会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+				fmt.Printf("会话 %s: 用 mizar -session %s 续接（或 mizar -c）\n", short, sessionID)
 			}
 			return // EOF / Ctrl-C
 		}
@@ -219,7 +219,7 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 				if len(short) > 8 {
 					short = short[:8]
 				}
-				fmt.Printf("会话 %s: 用 mizar -session %s 续接\n", short, sessionID)
+				fmt.Printf("会话 %s: 用 mizar -session %s 续接（或 mizar -c）\n", short, sessionID)
 			}
 			return
 		}

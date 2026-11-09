@@ -74,6 +74,8 @@ func main() {
 		workDir   = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
 		sessDir   = flag.String("sessions", "~/.mizar/sessions", "会话目录 (默认 ~/.mizar/sessions，按工作路径自动分目录)")
 		sessionID = flag.String("session", "", "会话 ID (续接对话)")
+		contLast  = flag.Bool("c", false, "续接最后一次退出的会话（等同 -continue）")
+		contLast2 = flag.Bool("continue", false, "续接最后一次退出的会话（-c 的长写法）")
 		history   = flag.Int("history", 50, "会话恢复的最大历史消息数")
 		ctxWindow = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
 		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
@@ -452,6 +454,27 @@ func main() {
 	if pathKey != "" {
 		st = st.Scoped(pathKey)
 		log.Printf("路径记忆: 会话目录 %s/%s", sessAbs, pathKey)
+	}
+	// -c / -continue：续接「全局最后一次退出的会话」。
+	// 状态记录在会话根目录（~/.mizar/sessions/last-session.json）这一唯一文件中，
+	// 与当前工作路径无关（用户要求：全局最后一个，而不是某个路径下的最后一个）。
+	// 未指定 -session 时生效。
+	if (*contLast || *contLast2) && *sessionID == "" {
+		if id, scope := st.Last(); id != "" {
+			// 该会话可能位于其它路径作用域（或平铺存储），切换到对应作用域以便加载
+			st = session.New(sessAbs)
+			if scope != "" {
+				st = st.Scoped(scope)
+			}
+			pathKey = scope
+			if st.Exists(id) {
+				*sessionID = id
+				log.Printf("-c: 续接全局最后退出的会话 %s（作用域 %q）", id, scope)
+			}
+		}
+		if *sessionID == "" {
+			log.Printf("-c: 未找到上次退出的会话，改为新建会话")
+		}
 	}
 	// 路径记忆：未指定 -session 时，自动创建新 UUID 会话（不再自动恢复 latest）
 	// 用户需显式用 -session <id> 续接历史会话
@@ -1696,11 +1719,12 @@ func main() {
 				}
 			}
 			log.Printf("会话 %s 已保存", *sessionID)
+			_ = st.SetLast(*sessionID)
 			short := *sessionID
 			if len(short) > 8 {
 				short = short[:8]
 			}
-			fmt.Printf("\n会话 %s: 用 mizar -session %s 续接\n", short, *sessionID)
+			fmt.Printf("\n会话 %s: 用 mizar -session %s 续接（或 mizar -c 续接最后一次退出的会话）\n", short, *sessionID)
 		}
 		return
 	}
@@ -1802,7 +1826,7 @@ func main() {
 				fmt.Fprintf(&sb, "  %-12s  %-40s%s\n", short, title, suffix)
 			}
 			fmt.Fprintf(&sb, "\n当前会话: %s\n", *sessionID)
-			fmt.Fprintf(&sb, "续接会话: /session <id> 或 mizar -session <id>\n")
+			fmt.Fprintf(&sb, "续接会话: /session <id> 或 mizar -session <id>（mizar -c 续接最后一次退出的会话）\n")
 			return sb.String(), nil
 		},
 	})
@@ -1885,6 +1909,14 @@ func main() {
 		diag.Logf("tui", "runTUI 返回，进程结束")
 	} else {
 		interactive(a, st, *sessionID)
+	}
+
+	// 退出时记录当前会话 ID，供下次 `mizar -c` 直接续接最后一次（已退出的）会话。
+	// 仅记录已落盘（有消息）的会话，避免记录空会话后 -c 续接不到内容。
+	if *sessionID != "" && st != nil && st.Exists(*sessionID) {
+		if err := st.SetLast(*sessionID); err != nil {
+			log.Printf("记录最后会话失败: %v", err)
+		}
 	}
 }
 
