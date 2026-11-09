@@ -61,8 +61,60 @@ func TestAskUserQuestionRejectsBadArgs(t *testing.T) {
 	if _, err := toolAskUser().Run(`[]`); err == nil {
 		t.Fatal("空数组应报错")
 	}
-	if _, err := toolAskUser().Run(`[{"id":"","question":"x"}]`); err == nil {
-		t.Fatal("缺 id 应报错")
+	// 缺 id 不再报错：容错补序号 id（id 仅用于回填答案），避免整轮交互失败
+	out, err := toolAskUser().Run(`[{"question":"x"}]`)
+	if err != nil {
+		t.Fatalf("缺 id 应被容错补全，不应报错: %v", err)
+	}
+	if out == "" {
+		t.Fatal("应有回答汇总输出")
+	}
+	// 缺 question 文本无法弥补，仍应报错
+	if _, err := toolAskUser().Run(`[{"id":"a"}]`); err == nil {
+		t.Fatal("缺 question 应报错")
+	}
+}
+
+// 模型传参形状不一定是裸数组：Description 缺 Args 段时 schema 兜底成 {args:string}，
+// 实测活体出现过 {"questions":[...]} 与字符串化 JSON。以下用例钉住容错行为。
+func TestParseQuestionsAcceptsWrappedShapes(t *testing.T) {
+	q := `[{"id":"pick","question":"选哪个？","options":[{"label":"A"}]}]`
+	cases := map[string]string{
+		"裸数组":        q,
+		"questions 键": `{"questions":` + q + `}`,
+		"args 键":      `{"args":` + q + `}`,
+		"字符串化数组":    `"` + strings.ReplaceAll(strings.ReplaceAll(q, `\`, `\\`), `"`, `\"`) + `"`,
+		"双层包装":      `{"args":{"questions":` + q + `}}`,
+	}
+	for name, in := range cases {
+		qs, err := parseQuestions(in)
+		if err != nil {
+			t.Fatalf("%s: 应解析成功: %v (输入 %s)", name, err, in)
+		}
+		if len(qs) != 1 || qs[0].ID != "pick" || qs[0].Question != "选哪个？" {
+			t.Fatalf("%s: 解析结果不对: %+v", name, qs)
+		}
+	}
+}
+
+func TestParseQuestionsTitleAsQuestion(t *testing.T) {
+	qs, err := parseQuestions(`[{"id":"a","title":"项目名？"}]`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if qs[0].Question != "项目名？" {
+		t.Fatalf("title 应兼容为 question: %+v", qs[0])
+	}
+}
+
+func TestAskUserQuestionSchemaDeclaresQuestions(t *testing.T) {
+	schema := toolAskUser().ArgsSchema()
+	if schema == nil {
+		t.Fatal("Description 应含 Args 段，否则 schema 会兜底成 {args:string}")
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if _, ok := props["questions"]; !ok {
+		t.Fatalf("schema 应声明 questions 属性: %+v", props)
 	}
 }
 
