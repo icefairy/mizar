@@ -732,6 +732,13 @@ func (m *Manager) Call(name, args string) (string, error) {
 	}
 	ch := make(chan res, 1)
 	go func() {
+		// 工具实现（内置与插件）可能 panic（如第三方解析库遇到畸形文件）。
+		// 这里兜底 recover，避免单个工具 panic 直接终止整个进程。
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- res{"", fmt.Errorf("tool %q panicked: %v", name, r)}
+			}
+		}()
 		out, err := t.Run(args)
 		ch <- res{out, err}
 	}()

@@ -25,7 +25,17 @@ const maxFileSize = 10 * 1024 * 1024
 // ExtractPDF 从 PDF 文件提取文本内容。
 // 返回逐页文本，页面间用 \f 分隔。
 // 文本按 PDF 坐标系排序：Y 降序（从上到下）→ X 升序（从左到右）。
-func ExtractPDF(path string) (string, error) {
+func ExtractPDF(path string) (text string, err error) {
+	// rsc.io/pdf 是纯 Go 的宽松解析器，遇到损坏 / 非常规结构（如缺少 stream、
+	// 非法 xref、加密等）时会在内部直接 panic（见 lex.go 的 buffer.errorf）。
+	// 这里统一 recover，把 panic 转成普通错误，避免拖垮整个进程。
+	defer func() {
+		if r := recover(); r != nil {
+			text = ""
+			err = fmt.Errorf("parse PDF: malformed or unsupported PDF (%v)", r)
+		}
+	}()
+
 	if err := checkSize(path); err != nil {
 		return "", err
 	}

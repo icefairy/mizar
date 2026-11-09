@@ -110,3 +110,20 @@ export function tool_slow(args: string): string {
 		t.Fatal("expected timeout error")
 	}
 }
+
+// TestCallRecoversPanic 验证工具 panic 时转为错误返回而不是崩溃进程。
+func TestCallRecoversPanic(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(dir, host())
+	m.RegisterBuiltin(Tool{
+		Name: "boom",
+		Run:  func(args string) (string, error) { panic("kaboom") },
+	})
+	out, err := m.Call("boom", "{}")
+	if err == nil {
+		t.Fatalf("expected error, got out=%q", out)
+	}
+	if out != "" {
+		t.Fatalf("expected empty out, got %q", out)
+	}
+}
