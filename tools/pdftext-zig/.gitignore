@@ -1,0 +1,6 @@
+pdftext
+pdftext.exe
+pdftext-*
+zig-out/
+.zig-cache/
+*.o

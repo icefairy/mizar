@@ -96,6 +96,12 @@ func (m *Manager) CallCommand(name, args string) (string, error) {
 	}
 	ch := make(chan res, 1)
 	go func() {
+		// 兜底 recover（同 Manager.Call）：命令实现 panic 不能杀进程。
+		defer func() {
+			if rec := recover(); rec != nil {
+				ch <- res{"", fmt.Errorf("command %q panicked: %v", name, rec)}
+			}
+		}()
 		out, err := c.Run(args)
 		ch <- res{out, err}
 	}()

@@ -67,7 +67,20 @@ func (r *Registry) Start(kind, label string, run func() (string, error)) string 
 	r.jobs[id] = rec
 	// 在独立 goroutine 执行任务
 	go func() {
-		out, err := run()
+		// 后台任务里的 panic 没有任何调用方可以 recover，
+		// 不兜底就是整个进程退出（用户看到的"mizar 突然挂了"）。
+		var out string
+		var err error
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					out = ""
+					err = fmt.Errorf("job panicked: %v", rec)
+				}
+			}()
+			out, err = run()
+		}()
+
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		rec.Output = out

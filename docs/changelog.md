@@ -6,7 +6,45 @@
 
 ## [Unreleased]
 
-### 新增
+（暂无）
+
+## [v0.7.4] — 2026-11-10
+
+> 主题：**单个工具失败不再拖垮整个进程 + 读不了的东西自己造工具**。
+> 起因是一份 WPS 导出的中文简历 PDF 读不出来 —— 排查发现 `read` 直接让 mizar
+> 进程退出（Go 里 goroutine panic / 栈溢出是 fatal error，`recover()` 救不了）。
+> 这一版把**所有**可能被不可信输入触发的崩溃面逐条堵上，重写了 PDF 解析，
+> 并让 Agent 在「现有工具做不到」时有明确的降级阶梯（换语言 → 造工具 → 沉淀技能）。
+
+### 💥 破坏性变更
+
+- **`rsc.io/pdf` 依赖移除**，改为仓库内 `internal/pdftext`（BSD-3，内联上游 v0.1.1 源码并修复）。
+  对外 API（`utils.ExtractPDF`）不变，签名与返回语义保持兼容。
+
+### ✨ 新增
+
+- **`tools/pdftext-zig`：纯 Zig 单文件 PDF 文本提取器**（2100 行，零依赖，约 256KB 静态二进制）。
+  从零实现词法/语法分析、传统 xref 表与 xref 流（含 `/Prev` 链、`/XRefStm`）、
+  ObjStm 压缩对象、页面树、`/Contents` 流数组、FlateDecode + PNG/TIFF predictor、
+  Form XObject 递归、Type0/CID + Identity-H + ToUnicode CMap、CID 字宽 `/W`/`/DW`、
+  水印 OCG 过滤。`zig build-exe pdftext.zig -OReleaseSmall` 一行构建，
+  可交叉编译到 `aarch64-linux` / `x86_64-windows`。
+- **`read` 的 PDF 解析采用双引擎**：优先外部 Zig 二进制（`MIZAR_PDF_ZIG` 或可执行文件
+  同目录 / 源码树 `tools/pdftext-zig/pdftext` 自动探测），失败则回退内置 Go 解析器。
+  实测单份 4 页简历 Zig 版 0.04s、Go 版 1.27s，输出内容一致。
+- **系统提示词新增「能力不足时：换语言 / 造工具」降级阶梯**（`internal/agent/loop.go`）。
+  明确规定：① 先看错误本身修参数；② 换系统里已有的 python3 / node / awk / jq / pdftotext；
+  ③ 用内置 Zig 工具链自己造工具；④ 用 `skill_manage` 沉淀成技能。
+  并加硬性要求：**禁止因为某个工具报错就宣称「做不到」**，至少试过 ②③ 再说；
+  若仍失败须说明「试了什么、卡在哪、还差什么」。
+- **两个随附技能**：`pdf-text-extract`（PDF 四级降级方案 + 常见坑对照表）、
+  `build-tool-with-zig`（Zig 造工具流程 + 0.15+ API 陷阱表 + 防崩溃写法）。
+- **回归测试矩阵**（7 个新测试文件）：
+  `internal/utils/pdf_robust_test.go`（10 类畸形 PDF + 200 份随机变异样本，断言
+  「要么返回文本、要么返回 error，30s 内必须返回」）、`internal/pdftext/robust_test.go`、
+  `internal/utils/doc_robust_test.go`、`internal/builtins/robust_tools_test.go`、
+  `internal/plugins/loader_robust_test.go`、`internal/jobs/jobs_robust_test.go`、
+  `internal/agent/run_recover_test.go`。
 
 - **`mizar -c` 续接最后一次退出的会话**（`cmd/mizar/main.go` + `internal/session/last.go`）。
   退出时（TUI / 经典模式 / `-task` 单次执行）把当前会话 ID + 所在作用域写进
@@ -16,7 +54,35 @@
   工作路径无关，并自动切换到该会话所在作用域。无记录时回退为新建会话；仅记录已落盘
   （有消息）的会话。旧版散落在 `<scope>/last-session` 的纯文本记录会被兼容读取。
 
-### 修复
+### 🐛 修复
+
+- **读畸形 PDF 导致 mizar 进程直接退出**。根因有两层：
+  （1）`internal/pdftext` 里 `readArray` 把 `io.EOF` 当成普通元素反复 `append`
+  → **死循环 + 内存无限增长**（未闭合数组 `[1 2 3` 即可触发，实测卡死 8s 以上）；
+  （2）对象递归无深度限制，深层嵌套 → 栈溢出，这是 **fatal error，`recover()` 无效**。
+  现已显式处理 EOF、加 `maxObjectDepth=64`、数组 100 万 / 字典 6.5 万 / 单 token 8MB 上限。
+- **PNG/TIFF predictor 用 goroutine + `io.Pipe` 实现**：生产者端的 panic 无法被调用方
+  `recover()` 捕获，畸形数据直接杀进程。改为同步实现，并加行宽 64KB / 累计 64MB 上限。
+- **`Value.Reader()` 遇未知滤镜直接 `panic`**：一条坏流能让整份文档失败。改为返回错误
+  reader，仅该流失败。Flate 解码失败也给出独立错误信息（不再与「不支持的滤镜」混淆）。
+- **页面树 `/Kids` 自引用导致无限递归**：加深度 64 / 节点 20 万 / 单节点 1 万子项上限。
+- **xref 字段可伪造**：`/W` 宽度校验 0~8、`/Size` 加 800 万条上限、`/Length` 单流 32MB、
+  ToUnicode CMap 4MB 上限 —— 避免伪造字段触发巨量内存分配。
+- **`plugins.Manager.CallCommand` / RPC 调用 / `jobs.Registry.Start` 后台任务 /
+  `mcp.StdioTransport.readLoop` / `agent.Hooks.fire` / `agent.Agent.Run` 六处
+  goroutine 内 panic 无兜底**，任一触发即整个进程退出。全部补上 `recover`：
+  工具/命令/hook 转成 `error` 返回并继续，后台任务置 `errored` 状态，
+  `Agent.Run` 作为唯一收口点额外落盘完整堆栈。
+- **`utils.ExtractDOCX / ExtractXLSX / DescribeImage` 无 panic 兜底**：补 `recover`，
+  并加 zip 单条目 64MB 上限（防 zip 炸弹）、XLSX 输出 5000 行 / 2MB 截断。
+- **PDF 中文字体解出乱码**（WPS / iText 导出的简历普遍）：
+  `ToUnicode` 在 PDF 里是 **Stream** 而原实现只认 `Dict`；`Identity-H` 没有解码器；
+  CMap 只解析 `bfrange` 不解析 `bfchar`；`/Contents` 为流数组时按单流读报
+  `stream not present`；Form XObject 内的文字完全不解析。逐条修复后
+  4 份中文简历全部正常输出（此前要么报错、要么满屏水印串）。
+- **康熙部首未归一**：部分 PDF 的 CMap 把常用汉字映射到 `U+2F00..U+2FD5`
+  （如「大」→ `U+2F24`），显示异常且检索失效。`internal/pdftext` 与 Zig 版都加了
+  214 个部首 + 全角数字字母的 NFKC 归一。
 
 - **提问工具不再受 30s 工具超时限制，用户不回答就一直等**（`internal/plugins/loader.go` +
   `internal/builtins/ask.go` + `internal/builtins/plan_tool.go`）。此前插件管理器 `Call`
@@ -38,8 +104,10 @@
   以 SimulationScreen 端到端覆盖：滚轮上滚、滚后重绘不被拽回、下滚到底复位跟随、
   指针在聊天区外不劫持。
 
-### 变更
+### 🔧 变更
 
+- **`docs/todo.md`** 补齐「健壮性加固」小节，按「位置 / 风险 / 处理 / 测试」四列
+  列出全部加固点，便于后续审计。
 - **等待态轮播提示语补充近期新功能**（`cmd/mizar/stream.go`）。等待模型响应时状态栏 /
   经典模式会每 4 秒轮换一条提示语，此前只讲长期特性（自举、插件热重载、会话压缩等），
   近期上线的能力一条没露。现在分成「长期特性」与「近期新增（v0.7.x）」两段，

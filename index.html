@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.7.3</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.7.4</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -147,6 +147,12 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.7.4 · 工具失败不再拖垮进程 + 读不了就自己造工具</h3>
+          <p><strong>起因</strong>：一份 WPS 导出的中文简历 PDF 读不出来，结果<strong>整个 mizar 进程直接退出</strong>。排查发现不是 PDF 一个点，而是整条工具链缺少崩溃隔离——Go 里有两类错误 <code>recover()</code> 根本救不了：<strong>goroutine 内 panic</strong> 与<strong>栈溢出</strong>。本版把六处无兜底的 goroutine（<code>CallCommand</code>、RPC 调用、<code>jobs</code> 后台任务、MCP <code>readLoop</code>、<code>Hooks.fire</code>、<code>Agent.Run</code>）全部补上 <code>recover</code>，并挖出 PDF 解析里 6 个真·杀手：<code>readArray</code> 把 <code>io.EOF</code> 当普通元素导致<strong>死循环 + 内存无限增长</strong>（未闭合数组 <code>[1 2 3</code> 即可触发，实测卡死 8s 以上）、对象递归无深度限制导致<strong>栈溢出</strong>（fatal，recover 无效）、predictor 用 goroutine + <code>io.Pipe</code> 导致生产者 panic 不可捕获、<code>/Kids</code> 自引用无限递归、未知滤镜直接 panic、<code>/W</code>‧<code>/Size</code>‧<code>/Length</code> 可伪造触发巨量分配。DOCX/XLSX 同步补 recover + zip 炸弹 64MB 上限 + 超大表格输出截断。</p>
+          <p><strong>重写 PDF 解析</strong>：中文乱码的 5 条根因逐条修掉——<code>ToUnicode</code> 是 Stream 却只认 Dict、<code>Identity-H</code> 无解码器、CMap 只解析 bfrange 不解析 <strong>bfchar</strong>、<code>/Contents</code> 流数组按单流读、Form XObject 内的文字完全不解析。现在<strong>双引擎</strong>：外部 <code>tools/pdftext-zig</code>（纯 Zig 单文件，2100 行，<strong>256KB</strong> 静态二进制，0.04s/份，可交叉编译 arm64/windows）优先，失败回退内置 <code>internal/pdftext</code>（1.27s/份，无外部依赖）。4 份中文简历实测 <strong>零乱码、零水印残留</strong>；TeX 英文 PDF 与 <code>pdftotext</code> 逐行一致。</p>
+          <p><strong>能力不足时的阶梯</strong>：系统提示词新增四级降级——① 先看错误修参数；② 换系统里已有的 <code>python3</code> / <code>node</code> / <code>awk</code> / <code>jq</code> / <code>pdftotext</code>；③ 用内置 Zig 工具链<strong>自己造工具</strong>；④ 用 <code>skill_manage</code> 沉淀成技能。硬性要求：<strong>禁止因为某个工具报错就宣称「做不到」</strong>。配套落地 <code>pdf-text-extract</code> 与 <code>build-tool-with-zig</code> 两个技能。回归测试矩阵覆盖 10 类恶意 PDF + 200 份随机变异样本 + 17 组畸形工具参数。</p>
+        </div>
         <div class="card">
           <h3>v0.7.3 · ask 三连修 + 状态栏两行化</h3>
           <p><code>ask_user_question</code> 此前连着踩三个坑，本版一并修掉：（0）<strong>参数形状不符就整轮失败</strong>——Description 没写 <code>Args</code> 段，schema 兜底成 <code>{args:string}</code>，模型只能猜；现补全说明并加 <code>parseQuestions</code> 宽容归一化（裸数组 / 包装 / 字符串化 JSON / 缺 <code>id</code> 都能吃下）。（1）<strong>提问后界面没反应、等一会自己走了</strong>——提问块拼在 <code>SetText()</code> <em>之后</em> 永远不被绘制，且 <code>askViaChat</code> 有 5 分钟固定超时；现移到 <code>SetText()</code> 之前并抽成 <code>renderAskPrompt</code>，<strong>去掉 5 分钟超时</strong>。（2）<strong>回答后 TUI 无响应</strong>：<code>submitInput</code> 运行在 tcell 事件循环线程（InputCapture → Enter → submitInput），而回答分支用了 <code>app.QueueUpdateDraw</code> —— tview 的 <code>QueueUpdate</code> 语义是「投递后<strong>阻塞等待</strong>回调在事件循环里执行完」，事件循环正在这里等自己，于是自死锁。改为事件循环内直接 <code>addChatLine</code> / <code>renderAllDirect</code>；并用 AST 扫描测试把「<code>submitInput</code> 同步路径不得出现 <code>QueueUpdate</code>」锁进 CI。同一死锁模式在 v0.7.2 的 Ctrl+L 上先出现过，本版按「事件循环内同步重绘 / goroutine 投递队列」两个入口显式拆开，根治这一类问题。</p>

@@ -18,13 +18,43 @@
 
 - **文件**：`internal/utils/document.go`
 - **说明**：
-  - `ExtractPDF()` — 用 `rsc.io/pdf` 提取 PDF 文本，按 PDF 坐标系排序（Y 降序 → X 升序）
+  - `ExtractPDF()` — 双引擎：
+    1. 外部 `tools/pdftext-zig/pdftext`（纯 Zig 单文件实现，260KB，可交叉编译），
+       通过 `MIZAR_PDF_ZIG` 或可执行文件同目录探测；
+    2. 内置 `internal/pdftext`（rsc.io/pdf 修复分支），外部引擎缺失/失败时回退。
+    两者都修复了：ToUnicode 只认 Dict 不认 Stream、Identity-H 双字节 CID 无解码器、
+    `/Contents` 流数组按单流读取、Form XObject 内文字不解析、CID 字宽缺失；
+    并跳过水印 OCG 图层。文本按 PDF 坐标系排序（Y 降序 → X 升序）后按行输出。
   - `ExtractDOCX()` — 用 `archive/zip` + `encoding/xml` 解析 `word/document.xml`，提取段落文本（零外部依赖）
   - `ExtractXLSX()` — 用 `github.com/xuri/excelize/v2` 提取每个 sheet 的行列数据（tab 分隔）
   - `DescribeImage()` — 识别图片格式和大小
 - **接入点**：`internal/builtins/files.go` → `toolRead()` 自动检测 `.pdf`/`.docx`/`.xlsx` 扩展名
-- **依赖**：`rsc.io/pdf v0.1.1`、`github.com/xuri/excelize/v2 v2.11.0`
+- **依赖**：`internal/pdftext`（内联 rsc.io/pdf v0.1.1 BSD 源码）、`tools/pdftext-zig`（Zig 0.15+）、`github.com/xuri/excelize/v2 v2.11.0`
 - **参考**：openclaude `FileReadTool`（PDF/图片检测）
+
+### 2.1 [x] 健壮性加固：工具失败不得拖垮主进程
+
+- **背景**：早期 `read` 一个畸形 PDF 就让 mizar 整个进程退出（Go 里 goroutine panic /
+  栈溢出是 fatal error，`recover()` 无效）。
+- **加固点（含新增回归测试）**：
+  | 位置 | 风险 | 处理 | 测试 |
+  |---|---|---|---|
+  | `plugins.Manager.Call` | 工具 panic | goroutine 内 recover → error | `loader_robust_test.go` |
+  | `plugins.Manager.CallCommand` | 命令 panic | 新增 recover | 同上 |
+  | `plugins` RPC 调用 | RPC panic | 新增 recover | — |
+  | `jobs.Registry.Start` | 后台任务 panic | 新增 recover，状态置 errored | `jobs_robust_test.go` |
+  | `mcp.StdioTransport.readLoop` | 畸形响应 panic | 新增 recover | — |
+  | `agent.Hooks.fire` | 插件 hook panic | 单个 hook 隔离，转 error 继续 | `run_recover_test.go` |
+  | `agent.Agent.Run` | 任意内部 panic | 唯一收口点兜底 + 落盘堆栈 | 同上 |
+  | `internal/pdftext` 数组/字典解析 | 未闭合时 `io.EOF` 被当元素 → **死循环 + OOM** | 显式处理 EOF + 元素上限 | `pdftext/robust_test.go` |
+  | `internal/pdftext` 对象递归 | 深层嵌套 → 栈溢出（fatal） | `maxObjectDepth=64` + 容器大小上限 | 同上 |
+  | `internal/pdftext` predictor | goroutine + io.Pipe 无法 recover | 改为同步实现 + 行宽/字节上限 | 同上 |
+  | `internal/pdftext` 页面树 | `/Kids` 自引用 → 无限递归 | 深度 64 / 节点 20 万上限 | — |
+  | `internal/pdftext` 未知滤镜 | `Value.Reader()` 直接 panic | 返回错误 reader，单流失败 | 同上 |
+  | `internal/pdftext` xref | `/W`、`/Size` 伪造 → 巨量分配 | 宽度 0~8 校验 + 条目上限 | — |
+  | `utils.ExtractDOCX/XLSX/DescribeImage` | 库 panic / zip 炸弹 / 超大表格 | recover + 单条目 64MB + 输出截断 | `doc_robust_test.go` |
+- **端到端**：`pdf_robust_test.go` 用 10 类畸形 PDF + 200 份随机变异样本验证
+  「要么返回文本、要么返回 error，30s 内必须返回」。
 
 ### 3. [x] LSP 依赖引入
 

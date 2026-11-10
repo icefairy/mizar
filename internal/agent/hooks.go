@@ -210,12 +210,24 @@ func (h *Hooks) fire(name string, hooks []HookFunc, ctx *HookContext, log func(s
 		if f == nil {
 			continue
 		}
-		if err := f(ctx); err != nil {
+		// 单个 hook 的实现（含插件脚本）可能 panic。挂载点是"旁路增强"，
+		// 绝不能因为一个 hook 出错就中断整条 Agent 循环。
+		if err := runHookSafely(f, ctx); err != nil {
 			if log != nil {
 				log(fmt.Sprintf("hook %s[%d] error: %v", name, i, err))
 			}
 		}
 	}
+}
+
+// runHookSafely 执行单个 hook，把 panic 转成 error。
+func runHookSafely(f HookFunc, ctx *HookContext) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return f(ctx)
 }
 
 func (h *Hooks) fireRunStart(ctx *HookContext, log func(string)) {

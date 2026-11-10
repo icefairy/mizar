@@ -23,7 +23,6 @@ require (
 	go.lsp.dev/protocol v1.0.1
 	go.lsp.dev/uri v1.0.1
 	modernc.org/sqlite v1.56.0
-	rsc.io/pdf v0.1.1
 )
 
 require (

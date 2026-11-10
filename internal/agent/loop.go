@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"runtime/debug"
+
 	"mizar/internal/context"
 	"mizar/internal/diag"
 	"mizar/internal/engine"
@@ -320,6 +322,32 @@ const stableBasePrompt = `你是开阳(Mizar) Agent，一个自举的编码智�
 - 搜索文件时优先用 grep/find 在当前目录递归，不要盲目向上层目录或全局搜索。
 - 只有在当前目录找不到目标时，才扩大搜索范围并说明原因。
 - 使用绝对路径时优先使用相对于当前目录的路径（如 ./src/main.go 而不是 /home/user/project/src/main.go）。
+
+## 能力不足时：换语言 / 造工具（重要）
+工具失败、或现有工具压根不覆盖这类任务时，**不要反复重试同一个工具，也不要直接放弃**。
+按下面的阶梯逐级降级，直到解决：
+
+1. **先看错误本身**：参数写错 / 路径不对 / 前置条件缺失，先修参数重试一次。
+2. **换系统里已有的语言或工具做**：mizar 跑在真实操作系统上，可以用 bash 直接调
+   python3、node、perl、awk、jq、pdftotext、ffmpeg 等。例如：
+   - PDF / 图片 / Office 解析 → python3 -c "import fitz ..." 或 pdftotext
+   - 复杂文本 / 数据加工 → python3、awk、jq
+   - 系统信息、批量文件操作 → bash + coreutils
+   调用前先用 command -v <tool> 确认是否安装；没装可尝试 pip install --quiet 或
+   apt-get install -y 装一次，装不上就走第 3 步。
+3. **用自带 Zig 工具链自己造工具**：系统内置 Zig（zig version 直接可用，已在 PATH）。
+   适合写**无依赖、可交叉编译、体积小**的独立命令行工具。典型场景：现有库都不支持
+   某种二进制格式、需要长期复用的解析器、对性能或内存有严格控制的处理。
+   构建：zig build-exe tool.zig -OReleaseSmall --name tool（纯标准库，勿引第三方包）。
+4. **沉淀成技能便于复用**：解决一次后，用 skill_manage（operation=create）把
+   「什么场景 + 怎么判断 + 完整命令或代码 + 踩过的坑」写成技能，下次同类问题直接命中。
+
+### 硬性要求
+- **禁止因为某个工具报错就宣称"做不到"**：至少尝试过上面第 2、3 条再说。
+- 新建的工具或脚本放到工作目录内（如 ./tools/），并在回复里写清路径与用法。
+- 造出来的工具要能**独立运行**（不依赖一次性会话状态），并留最小用法说明。
+- 若第 2、3 条都试过仍失败，要明确说明「已经试了什么、卡在哪、还差什么」，
+  而不是笼统地说失败。
 `
 
 // replyFormatSection 回复格式要求（稳定部分，不随工具变化）。
@@ -472,7 +500,19 @@ func (a *Agent) ReloadTools() {
 }
 
 // Run 执行任务。返回最终回复。
-func (a *Agent) Run(task string) (string, error) {
+func (a *Agent) Run(task string) (reply string, err error) {
+	// 最外层兜底：Agent 循环内部虽然已对子步骤做了恢复处理，但第三方代码
+	// （LLM SDK / 插件引擎 / MCP 客户端）仍可能在任意位置 panic。Agent.Run
+	// 是所有入口（TUI / HTTP / RPC / WebUI）的唯一收口点，这里再兜一层，
+	// 保证「一次任务出错」永远不会升级成「整个 mizar 进程消失」。
+	defer func() {
+		if r := recover(); r != nil {
+			reply = ""
+			err = fmt.Errorf("agent run panicked: %v", r)
+			diag.Logf("panic", "Agent.Run panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+
 	// MaxSteps 语义：>0 有限步数；-1 表示无限（用户通过 /config max_steps -1 设置）；
 	// 0 表示未设置 → 落到默认 maxStepsDefault。
 	// 注意不能用 <=0，否则会把 -1（无限）误当成“未设置”而改写回默认值。

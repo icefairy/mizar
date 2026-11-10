@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -186,8 +187,9 @@ func NewStdioTransport(ctx context.Context, command string, args ...string) (*St
 	}
 	stderr, _ := cmd.StderrPipe()
 	go func() {
+		defer func() { _ = recover() }()
 		// 丢弃 stderr，避免管道阻塞
-		io.Copy(io.Discard, stderr)
+		_, _ = io.Copy(io.Discard, stderr)
 	}()
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", command, err)
@@ -203,6 +205,12 @@ func NewStdioTransport(ctx context.Context, command string, args ...string) (*St
 }
 
 func (t *StdioTransport) readLoop() {
+	// 后台读循环里的 panic 没人能 recover —— 一个畸形 MCP 响应就能带走整个进程。
+	defer func() {
+		if rec := recover(); rec != nil {
+			fmt.Fprintf(os.Stderr, "mcp readLoop panicked: %v\n", rec)
+		}
+	}()
 	t.scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for t.scanner.Scan() {
 		line := t.scanner.Bytes()

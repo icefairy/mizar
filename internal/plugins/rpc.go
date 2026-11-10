@@ -88,6 +88,13 @@ func (m *Manager) CallRPC(name, paramsJSON string) (string, error) {
 	}
 	ch := make(chan res, 1)
 	go func() {
+		// 兜底 recover：插件实现可能 panic（第三方库遇到畸形输入）。
+		// goroutine 里的 panic 不会被调用方 recover 到，必须自己兜。
+		defer func() {
+			if rec := recover(); rec != nil {
+				ch <- res{"", fmt.Errorf("rpc %q panicked: %v", name, rec)}
+			}
+		}()
 		out, err := r.Run(paramsJSON)
 		ch <- res{out, err}
 	}()

@@ -42,6 +42,81 @@
 
 ---
 
+## v0.7.4 亮点：工具失败不再拖垮进程 + 读不了就自己造工具
+
+起因很具体：一份 WPS 导出的中文简历 PDF 读不出来，结果**整个 mizar 进程直接退出**。
+排查下来不是 PDF 一个点的问题，而是整条工具链缺少崩溃隔离 —— Go 里有两类错误
+`recover()` 根本救不了：**goroutine 内 panic** 和**栈溢出**。
+
+### 一、堵住所有崩溃面
+
+| 位置 | 原风险 | 处理 |
+|---|---|---|
+| `plugins.CallCommand` / RPC 调用 | 命令/RPC 实现 panic | 新增 `recover` |
+| `jobs.Registry.Start` | 后台任务 panic → 进程退出 | 新增 `recover` + 状态置 `errored` |
+| `mcp.StdioTransport.readLoop` | 畸形 MCP 响应 panic | 新增 `recover` |
+| `agent.Hooks.fire` | 插件 hook panic 中断整个循环 | 单 hook 隔离，转 error 继续 |
+| `agent.Agent.Run` | 任意内部 panic | 唯一收口点兜底 + 落盘堆栈 |
+
+PDF 解析器里还藏着 6 个真·杀手：
+
+| 缺陷 | 后果 | 修复 |
+|---|---|---|
+| `readArray` 把 `io.EOF` 当普通元素 | **死循环 + 内存无限增长**（未闭合数组 `[1 2 3` 即可触发） | 显式处理 EOF |
+| 对象递归无深度限制 | 深层嵌套 → 栈溢出（**fatal，recover 无效**） | `maxObjectDepth=64` |
+| predictor 用 goroutine + `io.Pipe` | 生产者 panic 无法被 recover | **改同步实现** + 行宽/字节上限 |
+| `/Kids` 自引用 | 页面树无限递归 | 深度 64 / 节点 20 万上限 |
+| `Value.Reader()` 未知滤镜直接 panic | 一条坏流拖垮整份文档 | 返回错误 reader |
+| `/W`、`/Size`、`/Length` 可伪造 | 巨量内存分配 | 宽度 0~8 校验 + 条目/字节上限 |
+
+DOCX/XLSX 同时补了 `recover`、zip 炸弹 64MB 上限、超大表格输出截断。
+
+**实测**：10 类恶意 PDF + 200 份随机变异样本，全部「要么返回文本、要么返回 error，
+30s 内必须返回」；那份让测试进程卡死 8 秒以上的样本现在 249µs 返回。
+
+### 二、重写 PDF 解析（双引擎）
+
+中文 PDF 读不出来/乱码的根因有 5 条，逐条修：
+
+1. `ToUnicode` 在 PDF 里是 **Stream**，原实现只认 `Dict` → 中文全乱码
+2. `Identity-H`（双字节 CID）没有解码器 → 输出原始字节
+3. CMap 只解析 `bfrange` 不解析 **`bfchar`** → WPS 导出的文件等于无映射
+4. `/Contents` 是**流数组**时按单流读 → 报 `stream not present`
+5. 不递归 **Form XObject** → 文字藏在表单里时整页为空
+
+现在两条独立实现互为后备：
+
+```
+MIZAR_PDF_ZIG=/path/to/pdftext   （或放在 mizar 二进制同目录）
+        ↓ 命中
+  tools/pdftext-zig  纯 Zig 单文件，2100 行，256KB 静态二进制，0.04s/份
+        ↓ 未配置 / 失败 / 空输出
+  internal/pdftext   rsc.io/pdf 修复分支，无外部依赖，1.27s/份
+```
+
+Zig 版从零实现词法/语法分析、xref 表与 xref 流、ObjStm 压缩对象、页面树、
+Flate+PNG/TIFF predictor、Form XObject、ToUnicode CMap、CID 字宽、水印 OCG 过滤。
+`zig build-exe pdftext.zig -OReleaseSmall` 一行构建，可交叉编译到
+`aarch64-linux`（244KB）/ `x86_64-windows`（PE32+）。
+
+4 份中文简历实测：3.0k~4.9k 字符，**零乱码、零水印残留**；TeX 生成的英文 PDF
+与 `pdftotext` 逐行一致。
+
+### 三、能力不足时有明确阶梯
+
+系统提示词新增「能力不足时：换语言 / 造工具」：
+
+1. 先看错误本身，修参数重试一次
+2. 换系统里已有的语言 —— `python3` / `node` / `awk` / `jq` / `pdftotext`（没装先尝试装）
+3. 用内置 Zig 工具链自己造工具（`zig build-exe tool.zig -OReleaseSmall`）
+4. 用 `skill_manage` 沉淀成技能，下次直接命中
+
+硬性要求：**禁止因为某个工具报错就宣称「做不到」**，至少试过 2、3 条再说；
+仍失败须说明「试了什么、卡在哪、还差什么」。
+
+配套落了两个技能：`pdf-text-extract`（四级降级 + 常见坑对照表）、
+`build-tool-with-zig`（造工具流程 + Zig 0.15+ API 陷阱表 + 防崩溃写法）。
+
 ## v0.7.3 亮点：ask 真正能用 + 状态栏两行化
 
 这一版先让 `ask_user_question` 端到端可用，再给状态栏补上「我在哪个项目里」。
