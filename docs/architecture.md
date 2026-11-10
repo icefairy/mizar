@@ -289,7 +289,7 @@ export function plugin_cleanup(): void {
 | 热重载原子性 | 新引擎成功才替换，失败保留旧 | 改坏不丢 |
 | 删除自动卸载 | loadAll 对比目录发现文件消失 → plugin_cleanup + 注销 | 无幽灵插件 |
 | **panic 隔离** | Call / RunScript / FireHook 全部 defer recover | 宿主函数 panic 不拖垮主程序 |
-| **执行超时** | Call / RunScript 默认 30s，goja Interrupt 打断 | 死循环插件被中断，引擎可继续用 |
+| **执行超时** | Call / RunScript 默认 30s，goja Interrupt 打断；`Tool.NoTimeout` 工具（ask_user_question、exit_plan_mode）为例外，无限等待用户作答 | 死循环插件被中断，引擎可继续用；提问不会因等不到人而整轮失败 |
 
 ## 4. 自举闭环（核心卖点）
 ```

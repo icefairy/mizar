@@ -18,6 +18,13 @@
 
 ### 修复
 
+- **提问工具不再受 30s 工具超时限制，用户不回答就一直等**（`internal/plugins/loader.go` +
+  `internal/builtins/ask.go` + `internal/builtins/plan_tool.go`）。此前插件管理器 `Call`
+  对所有工具统一套 `maxExec`（30s），`ask_user_question` / `exit_plan_mode` 这类阻塞等待
+  人类作答的工具会被直接判"tool execution timeout"——用户离开几分钟回来，题目早已过期、
+  整轮失败。新增 `Tool.NoTimeout` 声明：声明该字段的工具执行不设上限，一直等到 `Run` 返回
+  （退出路径仍由 TUI 的 ESC 取消任务负责）。`ask_user_question` 与 `exit_plan_mode` 已置位。
+  新增 `TestNoTimeoutTool` 覆盖。
 - **TUI 内容区鼠标滚轮失效**（`cmd/mizar/tui.go`）。滚轮事件原先交给
   `TextView.MouseHandler` 处理，它只改自己的 `lineOffset`，外部状态
   `userScrolledUp` 保持 `false`；而流式回复（60ms）、bash 实时输出（80ms）、

@@ -33,6 +33,10 @@ type Tool struct {
 	// 自定义 finish 工具）。执行失败时忽略此声明——错误需回填给模型让它纠正。
 	// 注意：respond 工具由循环特判处理，不依赖本字段。
 	Terminate bool
+	// NoTimeout 声明：本工具执行不受 maxExec 限制，一直等到 Run 返回。
+	// 适合「阻塞等待人类回答」类工具（如 ask_user_question）——用户可能几分钟
+	// 才回来看一眼，30s 的默认超时会让提问还没等人作答就整轮失败。
+	NoTimeout bool
 }
 
 // 插件生命周期钩子：插件导出 plugin_init() 在加载成功后调用（初始化），
@@ -742,6 +746,11 @@ func (m *Manager) Call(name, args string) (string, error) {
 		out, err := t.Run(args)
 		ch <- res{out, err}
 	}()
+	// NoTimeout 工具（如 ask_user_question）不设上限，一直等到 Run 返回。
+	if t.NoTimeout {
+		r := <-ch
+		return r.out, r.err
+	}
 	select {
 	case r := <-ch:
 		return r.out, r.err

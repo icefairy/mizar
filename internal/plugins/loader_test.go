@@ -127,3 +127,24 @@ func TestCallRecoversPanic(t *testing.T) {
 		t.Fatalf("expected empty out, got %q", out)
 	}
 }
+
+// TestNoTimeoutTool 声明 NoTimeout 的工具不受 maxExec 限制，一直等到 Run 返回。
+func TestNoTimeoutTool(t *testing.T) {
+	m := NewManager(t.TempDir(), host())
+	m.SetMaxExec(50 * time.Millisecond)
+	m.RegisterBuiltin(Tool{
+		Name:      "wait",
+		NoTimeout: true,
+		Run: func(args string) (string, error) {
+			time.Sleep(300 * time.Millisecond)
+			return "answered", nil
+		},
+	})
+	out, err := m.Call("wait", "")
+	if err != nil {
+		t.Fatalf("NoTimeout tool should not time out, got %v", err)
+	}
+	if out != "answered" {
+		t.Fatalf("got %q", out)
+	}
+}

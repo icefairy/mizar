@@ -18,6 +18,7 @@ import (
 func toolExitPlanMode() plugins.Tool {
 	return plugins.Tool{
 		Name:        "exit_plan_mode",
+		NoTimeout:   true, // 等待用户审批计划，不设超时（同 ask_user_question）
 		Description: "Submit your completed plan for user review. Call this when you have a finished plan ready. The user will approve it (start executing) or ask you to keep planning with feedback.",
 		Run: func(args string) (string, error) {
 			if agent.CurrentPlanMode == nil || !agent.CurrentPlanMode.IsActive() {

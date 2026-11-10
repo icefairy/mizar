@@ -38,6 +38,7 @@ type Answer struct {
 func toolAskUser() plugins.Tool {
 	return plugins.Tool{
 		Name:        "ask_user_question",
+		NoTimeout:   true,
 		Description: "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. Send one or more questions with stable ids. When options are provided the user answers by picking a number (interactive terminals) or by replying with the number in a follow-up message (non-interactive environments). Args: {questions: array(of question objects: id string, question string, header? string, options? array of label/description, multi_select? bool)}",
 		Run: func(args string) (string, error) {
 			if agentAskUser == nil {
