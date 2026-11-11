@@ -39,11 +39,18 @@
 
 ### 🔧 其他
 
+- **WebUI 会话列表显示最后活动时间并按时间倒序**：左侧会话项改为两行（标题 + 元信息），
+  元信息行含最后活动时间与模式标签；时间按「今天 HH:MM / 昨天 HH:MM / 今年 M月D日 /
+  更早 YYYY-MM-DD」智能格式化，列表在前端再按 `updated_at` 倒序兜底。
+- **WebUI 状态栏补齐项目行（对齐 TUI）**：新增工作目录、git 分支（含 `✱改动数`）、
+  MCP 状态（「已连/配置」）；`GET /web/api/status` 新增 `project` 字段，
+  非 git 仓库时只显示目录与 MCP，MCP 未配置显示 `MCP -`。
 - **`version` 提升到 v0.7.6**（`cmd/mizar/main.go`），Web UI 通过 `/web/api/version`
   与 `/web/api/me` 展示同一版本号。
 - 新增单测：`internal/config/provider_test.go`（旧配置自动升级 / 收藏夹 CRUD / 名字推导）、
   `internal/server/webproviders_test.go`（version/providers/status 接口）、
   `internal/server/ws_conv_test.go`（跨会话 steer 归属校验）。
+- 修复 `TestReleaseWithoutEmbedded` 在本机已释放 Zig 缓存时被幂等短路误判（测试内隔离 `MIZAR_ZIG_CACHE`）。
 
 ## [v0.7.5] — 2026-11-11
 
