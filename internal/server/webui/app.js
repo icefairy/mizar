@@ -88,6 +88,20 @@
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
+  // 会话最后活动时间：今天显示 HH:MM，今年显示 M月D日，更早显示 YYYY-MM-DD。
+  function fmtConvTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    const now = new Date();
+    const p2 = (n) => String(n).padStart(2, "0");
+    const hm = p2(d.getHours()) + ":" + p2(d.getMinutes());
+    if (d.toDateString() === now.toDateString()) return hm;          // 今天
+    const y = new Date(now); y.setDate(now.getDate() - 1);
+    if (d.toDateString() === y.toDateString()) return "昨天 " + hm;   // 昨天
+    if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + "月" + d.getDate() + "日";
+    return d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate());
+  }
   // 行内 markdown（输入已转义的纯文本）
   function inline(t) {
     let x = esc(t);
@@ -443,14 +457,18 @@
   }
   function renderConvList() {
     convList.innerHTML = "";
+    // 按最后更新时间倒序（服务端已排序，这里再兜一次，避免本地插入新会话后顺序错乱）
+    convs.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
     convs.forEach((c) => {
       const el = document.createElement("div");
       el.className = "conv-item" + (c.id === curConv ? " active" : "");
-      el.innerHTML = '<span class="title">' + esc(c.title || "新会话") + '</span>' +
-        '<span class="tag">' + (c.mode === "agent" ? "Agent" : "对话") + '</span>' +
-        '<button class="del" title="删除">✕</button>';
+      el.innerHTML = '<div class="row"><span class="title">' + esc(c.title || "新会话") + '</span>' +
+        '<button class="del" title="删除">✕</button></div>' +
+        '<div class="meta"><span class="time" title="' + esc(c.updated_at || "") + '">' +
+        esc(fmtConvTime(c.updated_at)) + '</span>' +
+        '<span class="tag">' + (c.mode === "agent" ? "Agent" : "对话") + '</span></div>';
       el.querySelector(".title").addEventListener("click", () => selectConv(c.id));
-      el.querySelector(".tag").addEventListener("click", () => selectConv(c.id));
+      el.querySelector(".meta").addEventListener("click", () => selectConv(c.id));
       el.querySelector(".del").addEventListener("click", async (ev) => {
         ev.stopPropagation();
         if (!confirm("删除该会话？")) return;
@@ -566,6 +584,20 @@
   function renderStatus(j) {
     if (!statusbar) return;
     const seg = [];
+    // 项目行（对齐 TUI）：📁 目录 ⎇ 分支 ✱改动 │ MCP 已连/配置
+    const pj = j.project || {};
+    if (pj.dir || pj.dir_full) {
+      let proj = '<span class="seg"><span class="v teal">📁 ' + esc(pj.dir || pj.dir_full) + '</span>';
+      if (pj.dir) proj += '<span class="k" title="' + esc(pj.dir_full || "") + '"></span>';
+      if (pj.is_git && pj.branch) {
+        proj += '<span class="k"> ⎇ </span><span class="v">' + esc(pj.branch) + '</span>';
+        if (pj.dirty > 0) proj += '<span class="v yellow"> ✱' + pj.dirty + '</span>';
+      }
+      const mc = (pj.mcp_conf || 0) > 0 ? ('MCP ' + (pj.mcp_conn || 0) + '/' + pj.mcp_conf)
+                                        : 'MCP -';
+      proj += '<span class="k"> │ </span><span class="v">' + mc + '</span></span>';
+      seg.push(proj);
+    }
     const t = j.tokens || {};
     seg.push('<span class="seg"><span class="k">tokens: </span><span class="v">' + fmtTok(t.total) +
       '</span><span class="k">(in:' + fmtTok(t.in) + ' out:' + fmtTok(t.out) + ')</span></span>');

@@ -199,7 +199,24 @@ func (s *Server) handleWebStatus(w http.ResponseWriter, r *http.Request) {
 		cacheHit = float64(snap.CumCached) / float64(snap.CumPrompt) * 100
 	}
 
+	// 工作目录 / git 分支 / MCP 状态（对齐 TUI 项目行）
+	workDir := s.agent.WorkDir
+	git := collectGitInfo(workDir)
+	mcpConf, mcpConn := 0, 0
+	if s.cfg.MCPStats != nil {
+		mcpConf, mcpConn = s.cfg.MCPStats()
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
+		"project": map[string]any{
+			"dir":      shortDirPath(workDir),
+			"dir_full": workDir,
+			"is_git":   git.IsGit,
+			"branch":   git.Branch,
+			"dirty":    git.Dirty,
+			"mcp_conf": mcpConf,
+			"mcp_conn": mcpConn,
+		},
 		"tokens": map[string]any{
 			"total":      snap.CumTotal,
 			"in":         snap.CumPrompt,

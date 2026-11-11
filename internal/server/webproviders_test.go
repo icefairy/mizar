@@ -140,7 +140,7 @@ func TestWebStatusEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := readAll(t, r)
-	for _, key := range []string{"tokens", "context", "speed", "model", "thinking", "running"} {
+	for _, key := range []string{"project", "tokens", "context", "speed", "model", "thinking", "running"} {
 		if !strings.Contains(body, key) {
 			t.Fatalf("status 缺少字段 %s: %s", key, body)
 		}

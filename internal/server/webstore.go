@@ -40,8 +40,8 @@ type webSettings struct {
 	TopP          *float64 `json:"top_p,omitempty"`
 	MaxTokens     int      `json:"max_tokens,omitempty"`
 	System        string   `json:"system,omitempty"`
-	Thinking      string   `json:"thinking,omitempty"`      // auto/off/low/medium/high
-	MaxHistory    int      `json:"max_history,omitempty"`   // 普通对话模式最多发送的历史消息条数（默认 50；agent 模式不生效）
+	Thinking      string   `json:"thinking,omitempty"`        // auto/off/low/medium/high
+	MaxHistory    int      `json:"max_history,omitempty"`     // 普通对话模式最多发送的历史消息条数（默认 50；agent 模式不生效）
 	ShowCacheMiss bool     `json:"show_cache_miss,omitempty"` // 是否显示缓存命中率下跌提示（默认关闭）
 }
 
@@ -51,6 +51,26 @@ type webStore struct {
 	path  string
 	Convs []*conversation `json:"conversations"`
 	Set   *webSettings    `json:"settings,omitempty"`
+	// stamp 最近一次「读到/写下的」磁盘文件指纹。用于发现外部修改：
+	// 若磁盘指纹与 stamp 不一致，说明文件被别的进程/编辑器改过，下次访问前自动重载，
+	// 避免用内存里的旧数据把外部修改覆盖回去。
+	stamp fileStamp
+	// dirty 自上次成功落盘以来是否有本进程的内存改动。无改动时不回写。
+	dirty bool
+}
+
+// fileStamp 文件指纹（mtime 纳秒 + size），用于廉价检测外部修改。
+type fileStamp struct {
+	modNano int64
+	size    int64
+}
+
+func statStamp(path string) (fileStamp, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}, false
+	}
+	return fileStamp{modNano: fi.ModTime().UnixNano(), size: fi.Size()}, true
 }
 
 func newWebStore(path string) *webStore {
@@ -59,7 +79,22 @@ func newWebStore(path string) *webStore {
 	return s
 }
 
+// ensureFreshLocked 若磁盘文件指纹变化（被外部修改），则重新加载，
+// 保证外部编辑（手工删会话、其他进程写入）不会被内存旧数据覆盖。
+// 调用方需持锁。
+func (s *webStore) ensureFreshLocked() {
+	if s.dirty {
+		return // 本进程有未落盘改动，以内存为准
+	}
+	st, ok := statStamp(s.path)
+	if ok && st == s.stamp {
+		return
+	}
+	s.load()
+}
+
 func (s *webStore) load() {
+	s.stamp, _ = statStamp(s.path)
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		return
@@ -100,10 +135,23 @@ func (s *webStore) saveLocked() error {
 	return os.WriteFile(s.path, data, 0o600)
 }
 
+// saveIfDirtyLocked 仅在内存有改动时落盘，成功则刷新指纹并清除 dirty。
+// 调用方需持锁。
+func (s *webStore) saveIfDirtyLocked() {
+	if !s.dirty {
+		return
+	}
+	if err := s.saveLocked(); err == nil {
+		s.dirty = false
+		s.stamp, _ = statStamp(s.path)
+	}
+}
+
 // list 返回会话摘要（按更新时间倒序）。
 func (s *webStore) list() []*conversation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	out := make([]*conversation, len(s.Convs))
 	copy(out, s.Convs)
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
@@ -114,6 +162,7 @@ func (s *webStore) list() []*conversation {
 func (s *webStore) get(id string) *conversation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	for _, c := range s.Convs {
 		if c.ID == id {
 			cp := *c
@@ -128,6 +177,7 @@ func (s *webStore) get(id string) *conversation {
 func (s *webStore) create(mode string) *conversation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	c := &conversation{
 		ID:        "c" + time.Now().Format("20060102150405") + randHex(4),
 		Title:     "新会话",
@@ -136,7 +186,8 @@ func (s *webStore) create(mode string) *conversation {
 		UpdatedAt: time.Now(),
 	}
 	s.Convs = append(s.Convs, c)
-	_ = s.saveLocked()
+	s.dirty = true
+	s.saveIfDirtyLocked()
 	return c
 }
 
@@ -144,10 +195,12 @@ func (s *webStore) create(mode string) *conversation {
 func (s *webStore) delete(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	for i, c := range s.Convs {
 		if c.ID == id {
 			s.Convs = append(s.Convs[:i], s.Convs[i+1:]...)
-			_ = s.saveLocked()
+			s.dirty = true
+			s.saveIfDirtyLocked()
 			return true
 		}
 	}
@@ -158,11 +211,13 @@ func (s *webStore) delete(id string) bool {
 func (s *webStore) rename(id, title string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	for _, c := range s.Convs {
 		if c.ID == id {
 			c.Title = title
 			c.UpdatedAt = time.Now()
-			_ = s.saveLocked()
+			s.dirty = true
+			s.saveIfDirtyLocked()
 			return true
 		}
 	}
@@ -173,6 +228,7 @@ func (s *webStore) rename(id, title string) bool {
 func (s *webStore) appendMsg(id string, m convMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	for _, c := range s.Convs {
 		if c.ID == id {
 			if m.Ts == "" {
@@ -183,7 +239,8 @@ func (s *webStore) appendMsg(id string, m convMessage) {
 			if m.Role == "user" && (c.Title == "新会话" || c.Title == "") {
 				c.Title = titleFrom(m.Content)
 			}
-			_ = s.saveLocked()
+			s.dirty = true
+			s.saveIfDirtyLocked()
 			return
 		}
 	}
@@ -193,10 +250,12 @@ func (s *webStore) appendMsg(id string, m convMessage) {
 func (s *webStore) setMode(id, mode string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	for _, c := range s.Convs {
 		if c.ID == id {
 			c.Mode = mode
-			_ = s.saveLocked()
+			s.dirty = true
+			s.saveIfDirtyLocked()
 			return
 		}
 	}
@@ -206,11 +265,13 @@ func (s *webStore) setMode(id, mode string) {
 func (s *webStore) setMessages(id string, msgs []convMessage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	for _, c := range s.Convs {
 		if c.ID == id {
 			c.Messages = msgs
 			c.UpdatedAt = time.Now()
-			_ = s.saveLocked()
+			s.dirty = true
+			s.saveIfDirtyLocked()
 			return
 		}
 	}
@@ -220,6 +281,7 @@ func (s *webStore) setMessages(id string, msgs []convMessage) {
 func (s *webStore) getSettings() webSettings {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	if s.Set == nil {
 		return webSettings{}
 	}
@@ -230,8 +292,10 @@ func (s *webStore) getSettings() webSettings {
 func (s *webStore) saveSettings(v webSettings) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureFreshLocked()
 	s.Set = &v
-	_ = s.saveLocked()
+	s.dirty = true
+	s.saveIfDirtyLocked()
 }
 
 // titleFrom 从消息内容生成标题（取首行前 24 字符）。

@@ -22,6 +22,10 @@ type Config struct {
 
 	// Version 程序版本号（v0.7.6 之类），Web UI 标题展示用（空=不展示）。
 	Version string
+
+	// MCPStats 可选：返回（已配置数, 已连接数），供 Web UI 状态栏展示 MCP 状态。
+	// 由调用方注入（MCP 注册表在 main 包），nil 时 Web UI 显示「-」。
+	MCPStats func() (configured, connected int)
 }
 
 // WebAuth Web UI 登录鉴权配置。

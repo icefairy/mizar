@@ -1763,6 +1763,13 @@ func main() {
 		cfg := server.NewConfig(*addr, *token)
 		cfg.SetAll(*httpOn, *rpcOn, *wsOn)
 		cfg.Version = version
+		// Web UI 状态栏：MCP 连接统计（对齐 TUI 项目行）
+		cfg.MCPStats = func() (int, int) {
+			if runtimeMCPRegistry == nil {
+				return 0, 0
+			}
+			return runtimeMCPRegistry.Stats()
+		}
 		// Web UI：启用 + 登录鉴权（密码优先取配置，空则随机生成并写回）
 		webCfg := &config.WebConfig{}
 		diskCfg, _ := config.Load(config.DefaultPath())
