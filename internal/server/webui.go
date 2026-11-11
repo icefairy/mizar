@@ -325,6 +325,8 @@ func (s *Server) handleConversation(w http.ResponseWriter, r *http.Request) {
 			errJSON(w, http.StatusNotFound, "conversation not found")
 			return
 		}
+		// 用户手动改名：之后不再自动覆盖
+		st.markTitleManual(id, true)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -552,6 +554,7 @@ func (s *Server) chatOnce(convID, msg string) (string, error) {
 		s.web.store.appendMsg(convID, convMessage{Role: "user", Content: msg})
 		s.web.store.appendMsg(convID, convMessage{Role: "assistant", Content: reply})
 		s.web.store.setMode(convID, "chat")
+		s.maybeAutoTitle(convID)
 	}
 	return reply, nil
 }
@@ -644,6 +647,7 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.ConversationID != "" {
 		s.web.store.appendMsg(body.ConversationID, convMessage{Role: "assistant", Content: reply})
+		s.maybeAutoTitle(body.ConversationID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reply": reply})
 }

@@ -144,6 +144,12 @@
       </label>
 
       <label class="field">
+        <span>标题提炼模型（自动会话主题）</span>
+        <input id="setTitleModel" type="text" placeholder="留空=用当前主模型，建议填免费小模型" list="modelList" spellcheck="false">
+        <small class="hint">对话超过 3 条后会自动提炼 12 字以内的会话主题作为标题。可单独指定一个小/免费模型降低成本。</small>
+      </label>
+
+      <label class="field">
         <span>最大历史条数（普通对话）</span>
         <input id="setMaxHistory" type="number" min="1" step="1" placeholder="50">
         <small class="hint">普通对话模式最多发送的历史消息条数，默认 50；Agent 模式不受此限制。</small>

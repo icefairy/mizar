@@ -22,6 +22,21 @@
   // busyConv：当前正在跑一轮的会话 id（null=空闲）。用它代替全局 busy，
   // 这样切换到别的会话时不会「假忙碌」，也避免不同会话的流式增量互相串台。
   let busyConv = null;
+  // runningConv：服务端「当前正在运行」的会话 id（来自 /web/api/status）。
+  // Agent 是单实例，全局只有一个循环在跑；用它区分「哪个会话占着循环」，
+  // 这样在 B 会话发送时能明确提示「A 会话正在运行」，而不是莫名其妙排队。
+  let runningConv = null;
+  // evtLog：按会话缓存运行中事件。切走期间 A 会话持续输出，前端仍会收 WS 事件
+  // （只是不渲染到 DOM），先缓存起来；切回 A 时重放，避免「切走期间的内容丢失」。
+  // 结构：{ convId: [ {kind, ...} ] }，每轮开始时清空对应会话。
+  let evtLog = {};
+  function pushEvt(conv, e) {
+    const key = conv == null ? "" : conv;
+    const arr = evtLog[key] || (evtLog[key] = []);
+    // 防御性上限，避免极端长任务把内存撑爆（保留最近的）
+    arr.push(e);
+    if (arr.length > 4000) arr.splice(0, arr.length - 4000);
+  }
   // 打断/排队模式：true=打断（等待期间发送=注入当前循环），false=排队（本轮结束再发）。
   // 默认打断，选择持久化到 localStorage。
   let interruptMode = true;
@@ -43,6 +58,14 @@
   let historySaved = "";  // 历史导航前的临时内容
   let curConv = null;  // 当前会话 id
   let convs = [];      // 会话摘要列表
+  // 浏览器标题：保留原有「开阳 Mizar 版本号」，前面加上当前会话主题。
+  let baseTitle = "开阳 Mizar";
+  function setBaseTitle(t) { baseTitle = t || "开阳 Mizar"; applyBrowserTitle(); }
+  function applyBrowserTitle() {
+    const c = convs.find((x) => x.id === curConv);
+    const t = c && c.title && c.title !== "新会话" ? c.title : "";
+    document.title = t ? (t + " · " + baseTitle) : baseTitle;
+  }
   let streamBody = null;   // 当前流式正文目标（.《text》）
   let streamBuf = "";      // 流式正文累计
   let streamStep = -1;     // 当前流式 step
@@ -259,7 +282,11 @@
     let j = null;
     try { j = await r.json(); } catch (e) {}
     if (r.status === 401) { showLogin(); throw new Error("未登录"); }
-    if (!r.ok) throw new Error((j && j.error && j.error.message) || ("HTTP " + r.status));
+    if (!r.ok) {
+      const err = new Error((j && j.error && j.error.message) || ("HTTP " + r.status));
+      err.status = r.status;
+      throw err;
+    }
     return j;
   }
 
@@ -403,7 +430,7 @@
     setModelTag(j.model);
     if (brandVer && j.version) {
       brandVer.textContent = j.version;
-      document.title = "开阳 Mizar " + j.version;
+      setBaseTitle("开阳 Mizar " + j.version);
     }
     input.focus();
     connectWS();
@@ -483,6 +510,7 @@
       });
       convList.appendChild(el);
     });
+    applyBrowserTitle();
   }
   async function selectConv(id) {
     curConv = id;
@@ -493,8 +521,9 @@
     renderQueueBar();
     if (askState) closeAsk();
     restorePendingAsks();
-    // 中止按钮只反映「当前会话是否正在运行」，切到别的会话时隐藏，避免误以为卡住
-    abortBtn.classList.toggle("hidden", busyConv === null);
+    // 中止按钮只反映「当前会话是否正在运行」，切到别的会话时隐藏，避免误以为卡住；
+    // busyConv（本标签页发起的运行）或 runningConv（服务端正在跑且属于本会话）都算。
+    abortBtn.classList.toggle("hidden", !(busyConv === id || runningConv === id));
     try {
       const j = await api("/web/api/conversation?id=" + encodeURIComponent(id));
       const c = j.conversation;
@@ -526,7 +555,28 @@
       });
       finalizeTurn();
       setMode(c.mode === "agent" ? "agent" : "chat");
+      applyBrowserTitle();
+      // 切回本会话：如果该会话仍在后台运行（本标签页发起 busyConv，或服务端正在跑
+      // 该会话 runningConv——可能来自别的标签页），把切走期间缓存的事件重放到界面，
+      // 否则用户会看到「切回来要等一会才有新内容 / 中间内容缺失」。
+      const liveHere = (busyConv === id || runningConv === id);
+      if (liveHere) { newTurn(); replayEvtLog(id); }
+      // 切回本会话：若服务端空闲且有本会话排队的消息，立即补发（不再需要等下一轮）
+      drainPending();
     } catch (e) { addMsg("error", "错误", e.message); }
+  }
+  // replayEvtLog 把某会话缓存的运行中事件重新渲染到当前 DOM（切回时补齐）。
+  // 落盘的历史 + 缓存增量可能重复，这里只重放「历史之后」的增量即可，
+  // 因为最后与服务端的完整答复会用 runTurn 的返回值校正。
+  function replayEvtLog(convId) {
+    const arr = evtLog[convId];
+    if (!arr || !arr.length) return;
+    arr.forEach((e) => {
+      if (e.kind === "tool_call") onToolCall(e.tool, e.args);
+      else if (e.kind === "tool_result") onToolResult(e.tool, e.result);
+      else if (e.kind === "stream") handleStream(e.step, e.delta, e.skind);
+    });
+    scrollLog();
   }
   async function createConv() {
     try {
@@ -576,6 +626,15 @@
         const q = curConv ? ("?id=" + encodeURIComponent(curConv)) : "";
         const j = await api("/web/api/status" + q);
         renderStatus(j);
+        // 记录服务端当前运行的会话：用于区分「哪个会话在跑」，并在空闲时补发排队消息
+        const rc = (j && j.running) ? (j.running_conv || "") : null;
+        if (rc !== runningConv) {
+          // 某个会话的运行结束了：清掉它的增量缓存（内容已落盘，切回时从历史加载）
+          if (runningConv && runningConv !== rc) evtLog[runningConv] = [];
+          runningConv = rc;
+          renderQueueBar();
+        }
+        if (j && !j.running) drainPending();
         // 运行中更快刷新速度/上下文
         statusTimer = setTimeout(tick, j && j.running ? 700 : 1500);
       } catch (e) {
@@ -633,15 +692,20 @@
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.type !== "event") return;
-      // 会话过滤：服务端事件携带 conversation_id。当前打开的会话与之不符时丢弃，
-      // 修复「切到新会话后，旧运行（或新会话收到的）流式内容出现在别的会话窗口」的串台。
-      if (m.conversation_id != null && m.conversation_id !== "" && m.conversation_id !== curConv) return;
+      // 会话过滤：服务端事件携带 conversation_id。当前打开的会话与之不符时，
+      // 不再直接丢弃 —— 先按会话缓存（A 会话在后台持续输出的内容不能丢），
+      // 等用户切回该会话时再从缓存重放。修复「切到 B 期间 A 的内容丢失 / 切回要等一会才出现」。
+      const evConv = m.conversation_id == null ? "" : m.conversation_id;
+      const forCurrent = (evConv === "" || evConv === curConv);
       if (m.event === "tool_call") {
-        onToolCall(m.tool, m.args);
+        pushEvt(evConv, { kind: "tool_call", tool: m.tool, args: m.args });
+        if (forCurrent) onToolCall(m.tool, m.args);
       } else if (m.event === "tool_result") {
-        onToolResult(m.tool, m.result);
+        pushEvt(evConv, { kind: "tool_result", tool: m.tool, result: m.result });
+        if (forCurrent) onToolResult(m.tool, m.result);
       } else if (m.event === "stream") {
-        handleStream(m.step, m.delta, m.kind);
+        pushEvt(evConv, { kind: "stream", step: m.step, delta: m.delta, skind: m.kind });
+        if (forCurrent) handleStream(m.step, m.delta, m.kind);
       } else if (m.event === "ask_user") {
         showAsk(m.id, m.questions, m.conversation_id);
       } else if (m.event === "ask_close") {
@@ -885,7 +949,10 @@
     const nQueue = mine.length - nSteer;
     let head = [];
     if (nSteer) head.push(nSteer + " 条已注入当前任务");
-    if (nQueue) head.push(nQueue + " 条等待本轮结束后发送");
+    if (nQueue) {
+      const otherBusy = (busyConv !== null || runningConv !== null) && busyConv !== curConv && runningConv !== curConv;
+      head.push(nQueue + " 条" + (otherBusy ? "等待其它会话结束后发送" : "等待本轮结束后发送"));
+    }
     let html = '<div class="qhead">待处理消息 · ' + esc(head.join(" · ")) + '</div>';
     mine.forEach((it) => {
       html += '<div class="qitem" data-qid="' + it.id + '">' +
@@ -923,8 +990,17 @@
     input.value = "";
     autoGrow();
     const convId = curConv;
+    // 服务端当前正在跑的会话（可能不是本会话，也可能来自别的浏览器标签）。
+    const serverRunning = (busyConv !== null) ? busyConv : runningConv;
+    if (serverRunning !== null && serverRunning !== convId) {
+      // 别的会话正在占用 Agent（单实例）：本会话消息排到「本会话」队列，
+      // 并明确告知用户是谁在跑 —— 不是莫名排队，也不是串台。
+      pushQueue(text, convId, "queue");
+      flashQuick("其它会话正在运行，已排队，该会话结束后自动发送");
+      return;
+    }
     if (busyConv !== null) {
-      // 正在跑一轮。若该轮属于别的会话（Agent 单实例），打断会串台 → 一律排队。
+      // 本会话正在跑一轮。
       const runningHere = busyConv === convId;
       if (!interruptMode || mode !== "agent" || !runningHere) {
         pushQueue(text, convId, "queue");
@@ -967,6 +1043,7 @@
     const myConv = curConv;
     newTurn();
     addUserMsg(text);
+    evtLog[myConv] = [];   // 新一轮开始：清掉上一轮缓存的增量事件
     busyConv = myConv;
     // 注意：不禁用发送按钮——等待期间用户可继续发送消息（打断/排队）。
     abortBtn.classList.remove("hidden");
@@ -1000,7 +1077,12 @@
         }
       }
     } catch (e) {
-      if (curConv === myConv) {
+      if (e && e.status === 409) {
+        // 服务端仍在跑（别的标签页/竞态）：不当错误展示，改为排队，稍后自动补发。
+        if (turnEl) { try { turnEl.remove(); } catch (e2) {} }
+        pushQueue(text, myConv, "queue");
+        flashQuick("其它会话正在运行，已排队，结束后自动发送");
+      } else if (curConv === myConv) {
         const body = ensureReply();
         const wrap = body.parentElement.parentElement;
         wrap.className = "msg error";
@@ -1012,19 +1094,38 @@
   function finish(myConv) {
     if (curConv === myConv) finalizeTurn();
     busyConv = null;
+    evtLog[myConv] = [];   // 本轮已结束，增量事件已并入最终答复，清空缓存避免重复渲染
     abortBtn.classList.add("hidden");
     // 本轮结束后清理属于本会话的待处理项：
     //   - "steer"（已注入当前循环）：已被消费或已由服务端落盘，不能再补发（否则重复）；
     //   - "queue"（排队）：本轮结束后补发为新任务。
     const mine = pendingQueue.filter((it) => it.conv === myConv);
     pendingQueue = pendingQueue.filter((it) => it.conv !== myConv);
+    const resend = mine.filter((it) => it.kind === "queue");
+    // 本会话待发消息放回队首，保持顺序；随后统一 drain（也覆盖别的会话排队的消息）
+    if (resend.length) pendingQueue = resend.concat(pendingQueue);
     renderQueueBar();
     input.focus();
     api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
-    const resend = mine.filter((it) => it.kind === "queue");
-    if (resend.length) {
-      runTurn(resend.map((it) => it.text).join("\n"), myConv);
-    }
+    // 自动标题由服务端异步生成（小模型），稍后再拉一次即可显示新标题
+    setTimeout(() => {
+      api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
+    }, 4000);
+    drainPending();
+  }
+  // drainPending 服务端空闲时补发「当前会话」的排队消息。
+  // 只补发当前打开会话的消息：运行 streaming 直接写当前 DOM，后台跑别的会话会串台。
+  // 别的会话的排队消息保留在队列条里，等用户切回该会话时再自动发出。
+  let draining = false;
+  function drainPending() {
+    if (draining) return;
+    if (busyConv !== null || runningConv !== null) return;
+    const items = pendingQueue.filter((it) => it.conv === curConv && it.kind === "queue");
+    if (!items.length) return;
+    pendingQueue = pendingQueue.filter((it) => !(it.conv === curConv && it.kind === "queue"));
+    renderQueueBar();
+    draining = true;
+    runTurn(items.map((it) => it.text).join("\n"), curConv).finally(() => { draining = false; });
   }
   // 短暂提示（复用快捷栏的 quickMsg 区域）
   let quickTimer = null;
@@ -1073,7 +1174,7 @@
   // ---------- 设置面板 ----------
   const setModel = $("setModel"), setThinking = $("setThinking"), setTemp = $("setTemp"),
     setTopp = $("setTopp"), setMaxTokens = $("setMaxTokens"), setSystem = $("setSystem"),
-    setMaxHistory = $("setMaxHistory"),
+    setMaxHistory = $("setMaxHistory"), setTitleModel = $("setTitleModel"),
     tempVal = $("tempVal"), toppVal = $("toppVal"), modelList = $("modelList"), modelHint = $("modelHint");
   let curSettings = {};
   let tempTouched = false, toppTouched = false;
@@ -1084,6 +1185,7 @@
     setThinking.value = curSettings.thinking || "auto";
     setMaxTokens.value = curSettings.max_tokens || "";
     setMaxHistory.value = curSettings.max_history || 50;
+    setTitleModel.value = curSettings.title_model || "";
     setSystem.value = curSettings.system || "";
     // 快捷行同步
     qkModel.value = curSettings.model || "";
@@ -1134,6 +1236,7 @@
       thinking: setThinking.value,
       max_tokens: parseInt(setMaxTokens.value || "0", 10) || 0,
       max_history: parseInt(setMaxHistory.value || "50", 10) || 50,
+      title_model: setTitleModel.value.trim(),
       system: setSystem.value,
     };
     if (tempTouched) v.temperature = parseFloat(setTemp.value);
@@ -1246,7 +1349,7 @@
     .then((r) => (r.ok ? r.json() : null))
     .then((j) => {
       if (!j || !j.version) return;
-      document.title = "开阳 Mizar " + j.version;
+      setBaseTitle("开阳 Mizar " + j.version);
       const sub = document.querySelector(".login-card .sub");
       if (sub) sub.textContent = "Agent Web UI · " + j.version;
     })

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +32,11 @@ type conversation struct {
 	Messages  []convMessage `json:"messages"`
 	CreatedAt time.Time     `json:"created_at"`
 	UpdatedAt time.Time     `json:"updated_at"`
+	// TitleGenAt 上次自动生成标题时的消息条数（0 = 从未生成）。
+	// 用于避免每轮都调一次小模型：新增消息达到阈值才重新提炼。
+	TitleGenAt int `json:"title_gen_at,omitempty"`
+	// TitleManual 用户手动改过标题（PATCH）；为 true 时不再自动覆盖。
+	TitleManual bool `json:"title_manual,omitempty"`
 }
 
 // webSettings 对话参数设置（进程级，全局生效）。
@@ -43,6 +49,9 @@ type webSettings struct {
 	Thinking      string   `json:"thinking,omitempty"`        // auto/off/low/medium/high
 	MaxHistory    int      `json:"max_history,omitempty"`     // 普通对话模式最多发送的历史消息条数（默认 50；agent 模式不生效）
 	ShowCacheMiss bool     `json:"show_cache_miss,omitempty"` // 是否显示缓存命中率下跌提示（默认关闭）
+	// TitleModel 自动会话标题提炼用的模型（空 = 用当前主模型）。
+	// 建议填一个免费/小尺寸模型，避免额外费用与延迟。
+	TitleModel string `json:"title_model,omitempty"`
 }
 
 // webStore 会话 + 设置存储（带文件持久化）。
@@ -222,6 +231,46 @@ func (s *webStore) rename(id, title string) bool {
 		}
 	}
 	return false
+}
+
+// setAutoTitle 写入自动提炼的标题（不覆盖用户手动标题）。
+// genAt 记录生成时的消息条数，供下次判断是否需要重新提炼。返回是否写入。
+func (s *webStore) setAutoTitle(id, title string, genAt int) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureFreshLocked()
+	for _, c := range s.Convs {
+		if c.ID == id {
+			if c.TitleManual {
+				return false
+			}
+			c.Title = title
+			c.TitleGenAt = genAt
+			s.dirty = true
+			s.saveIfDirtyLocked()
+			return true
+		}
+	}
+	return false
+}
+
+// markTitleManual 标记该会话标题已被用户手动指定（之后不再自动覆盖）。
+func (s *webStore) markTitleManual(id string, manual bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureFreshLocked()
+	for _, c := range s.Convs {
+		if c.ID == id {
+			c.TitleManual = manual
+			s.dirty = true
+			s.saveIfDirtyLocked()
+			return
+		}
+	}
 }
 
 // appendMsg 追加一条消息（首条 user 消息自动作为标题）。

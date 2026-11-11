@@ -230,5 +230,8 @@ func (s *Server) handleWebStatus(w http.ResponseWriter, r *http.Request) {
 		"model":    s.agent.Model(),
 		"thinking": thinking,
 		"running":  s.agent.Running(),
+		// 当前正在运行的会话 id（空=无归属/空闲）。前端据此区分「哪个会话在跑」，
+		// 多会话下把消息排到对应会话的队列，而不是笼统地全局排队。
+		"running_conv": s.RunConv(),
 	})
 }
