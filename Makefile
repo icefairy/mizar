@@ -1,6 +1,7 @@
 # Mizar 构建脚本
 # 用法：
-#   make           本机构建（strip，纯静态）并安装到 /usr/local/bin
+#   make           本机构建（strip，纯静态，**不内嵌 Zig**）并安装到 /usr/local/bin
+#   make build-zig 本机构建 + 内嵌本机平台的 Zig 工具链（体积 +55 MB，离线可用 /zig）
 #   make debug     本机构建（带调试信息，未 strip）
 #   make test      全量测试
 #   make release   三平台 strip 构建到 dist/（默认发布流程，纯静态）
@@ -26,7 +27,7 @@ LDFLAGS := -s -w
 TRIM    := -trimpath
 GOENV   := CGO_ENABLED=0 GOAMD64=v1
 
-.PHONY: all build debug dynamic test release release-amd64 release-arm64 release-windows release-xz release-xz-amd64 release-xz-arm64 release-xz-windows upx clean zig-kernels zig-fetch zig-embed zig-select zig-clean
+.PHONY: all build debug dynamic test build-zig release release-amd64 release-arm64 release-windows release-xz release-xz-amd64 release-xz-arm64 release-xz-windows upx clean zig-kernels zig-fetch zig-embed zig-select zig-clean
 
 all: build
 
@@ -46,8 +47,17 @@ zig-kernels:
 	@ls -l internal/wasmkern/*.wasm | awk '{print "  "$$5, $$9}'
 
 build:
+	@scripts/zigdist-select.sh none >/dev/null 2>&1 || true
 	$(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o $(BINARY) $(PKG)
 	@install -m 0755 $(BINARY) /usr/local/bin/$(BINARY) && echo "已安装: /usr/local/bin/$(BINARY)"
+
+# 本机构建但内嵌**本机平台**的 Zig 工具链（目标机执行 /zig init 可离线释放）。
+# 体积约 126 MB（linux/amd64），只在需要"单文件自带 zig"时用。
+build-zig:
+	@scripts/zigdist-select.sh host
+	$(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o $(BINARY) $(PKG)
+	@install -m 0755 $(BINARY) /usr/local/bin/$(BINARY) && echo "已安装: /usr/local/bin/$(BINARY)"
+	@ls -lh $(BINARY) | awk '{print "  体积: "$$5}'
 
 # 本机构建（带调试信息，适合 gdb/dlv；静态）
 debug:
@@ -78,7 +88,7 @@ release:
 	@echo ">>> windows/amd64（内嵌 x86_64-windows Zig）"
 	@scripts/zigdist-select.sh x86_64-windows || true
 	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
-	@scripts/zigdist-select.sh all >/dev/null 2>&1 || true
+	@scripts/zigdist-select.sh none >/dev/null 2>&1 || true
 	@echo "--- dist/ ---"
 	@ls -lh dist/ | awk '{print $$5, $$9}'
 

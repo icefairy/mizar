@@ -13,6 +13,7 @@
 #   scripts/zigdist-select.sh x86_64-linux aarch64-linux   # 保留多个（通用大包）
 #   scripts/zigdist-select.sh all                   # 把所有已下载的归档都放进 zigdist/
 #   scripts/zigdist-select.sh none                  # 清空（只剩 .gitkeep，二进制不嵌任何 Zig）
+#   scripts/zigdist-select.sh host                  # 只保留本机当前平台的归档（make build-zig 用）
 #
 # 归档来源：~/.cache/zig/zig-<平台>-<版本>.tar.xz（可选 ZIG_CACHE_DIR 覆盖）。
 set -euo pipefail
@@ -25,7 +26,7 @@ CACHE_DIR="${ZIG_CACHE_DIR:-$HOME/.cache/zig}"
 VERSION="$(grep -oP 'const Version = "\K[0-9.]+' "$ROOT/internal/zigboot/zigboot.go" 2>/dev/null || echo 0.17.1)"
 
 if [ $# -eq 0 ]; then
-  echo "用法: $0 <平台名... | all | none>" >&2
+  echo "用法: $0 <平台名... | host | all | none>" >&2
   echo "  平台名即官方归档名去掉 zig- 前缀与版本后缀，如 x86_64-linux、aarch64-linux" >&2
   echo "  例:  $0 x86_64-linux" >&2
   exit 1
@@ -36,6 +37,30 @@ mkdir -p "$EMBED_DIR"
 touch "$EMBED_DIR/.gitkeep"
 
 MODE="$1"
+
+# host：只保留「本机当前平台」的归档（make build-zig 用）。
+# 平台名按 uname -s/-m 推算，与 zigboot.target() 的命名保持一致。
+if [ "$MODE" = "host" ]; then
+  case "$(uname -s)" in
+    Linux)   OS=linux ;;
+    Darwin)  OS=macos ;;
+    MINGW*|MSYS*|CYGWIN*) OS=windows ;;
+    *)       echo "⚠ 无法识别系统 $(uname -s)，按 linux 处理" >&2; OS=linux ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)  ARCH=x86_64 ;;
+    aarch64|arm64) ARCH=aarch64 ;;
+    armv7l|armv8l) ARCH=arm ;;
+    i386|i686)     ARCH=x86 ;;
+    riscv64)       ARCH=riscv64 ;;
+    ppc64le)       ARCH=powerpc64le ;;
+    loongarch64)   ARCH=loongarch64 ;;
+    s390x)         ARCH=s390x ;;
+    *)             echo "⚠ 无法识别架构 $(uname -m)" >&2; ARCH="$(uname -m)" ;;
+  esac
+  set -- "${ARCH}-${OS}"
+  echo "  本机平台: ${ARCH}-${OS}"
+fi
 
 if [ "$MODE" = "all" ]; then
   n=0

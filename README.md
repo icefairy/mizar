@@ -663,7 +663,7 @@ Zig 二进制本身**不能**像 .ts 插件那样在进程内热替换（Linux �
 
 ```bash
 make zig-fetch      # 按当前架构下载到 ~/.cache/zig（缓存优先，可复用）
-make zig-embed      # 下载并复制到 internal/zigboot/zigdist/，随后 make build 内嵌
+make zig-embed      # 下载并复制到 internal/zigboot/zigdist/，随后 make build-zig 内嵌
 make zig-clean      # 清理缓存
 ```
 
@@ -691,8 +691,18 @@ scripts/zigdist-select.sh aarch64-linux     # 只留 aarch64 归档
 scripts/zigdist-select.sh x86_64-windows    # 只留 Windows 归档
 scripts/zigdist-select.sh none              # 清空，不嵌任何 Zig
 scripts/zigdist-select.sh all               # 全放进去（做通用大包时用）
+scripts/zigdist-select.sh host              # 只留本机当前平台（按 uname 自动判断）
 # 也支持简写 amd64 / arm64
 ```
+
+**本地构建默认不嵌 Zig**：`make build` 会先 `zigdist-select.sh none`，产物约 71 MB；
+需要「单文件自带 Zig、目标机离线 `/zig init`」时才用 `make build-zig`（产物约 126 MB）。
+这样即使之前跑过 `make release`，本地日常构建也不会被 200 MB 的归档撑大。
+
+> **体积异常（本地二进制 270+ MB）怎么查**：先看 `du -sh internal/zigboot/zigdist/`。
+> `make build` 不嵌 Zig 时应为 0；只有在跑 `build-zig` / `release-*` 期间才会临时放归档，
+> 随后自动恢复为 `none`。历史上 `make release` 结尾会把三个平台全量 `select all`，
+> 导致之后每次 `make build` 都吞下 201 MB 归档（71 + 201 ≈ 272 MB），现已改为 `none`。
 
 `make release` 已自动串好这套流程：
 
