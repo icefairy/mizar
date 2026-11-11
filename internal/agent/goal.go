@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"mizar/internal/shell"
 )
 
 // ============================================================================
@@ -127,7 +129,7 @@ func (g *GoalGate) RunGateCtx(ctx context.Context, cwd string) (bool, int, strin
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, "sh", "-c", g.Command)
+	cmd := shell.CommandContext(cctx, g.Command)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	// 独立进程组 + 整组 kill：否则 sh 的子进程会拖住 CombinedOutput 直到自然结束。

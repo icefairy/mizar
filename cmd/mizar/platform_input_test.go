@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// TestShouldEnableMouseFor Windows 默认禁用鼠标上报（避免 ConPTY 把鼠标事件
-// 双重编码成字符泄漏进输入框），MIZAR_MOUSE=1 可强制开启。
+// TestShouldEnableMouseFor 现在各平台默认启用鼠标上报（tcell ≥ v2.13 在 Windows
+// 上走 win32-input-mode + VT 解析，鼠标事件能正确还原）；MIZAR_MOUSE=0 可关闭。
 func TestShouldEnableMouseFor(t *testing.T) {
 	cases := []struct {
 		name string
@@ -14,8 +14,8 @@ func TestShouldEnableMouseFor(t *testing.T) {
 		env  map[string]string
 		want bool
 	}{
-		{"windows 默认关闭", "windows", nil, false},
-		{"windows WT 下关闭", "windows", map[string]string{"WT_SESSION": "xxx"}, false},
+		{"windows 默认开启", "windows", nil, true},
+		{"windows WT 下开启", "windows", map[string]string{"WT_SESSION": "xxx"}, true},
 		{"windows MIZAR_MOUSE=1 强制开启", "windows", map[string]string{"MIZAR_MOUSE": "1"}, true},
 		{"windows MIZAR_MOUSE=0 强制关闭", "windows", map[string]string{"MIZAR_MOUSE": "0"}, false},
 		{"linux 默认开启", "linux", nil, true},

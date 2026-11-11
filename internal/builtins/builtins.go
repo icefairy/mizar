@@ -19,11 +19,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"mizar/internal/plugins"
+	"mizar/internal/shell"
 	"mizar/internal/zigboot"
 )
 
@@ -56,7 +56,7 @@ func All(skillsDir string, onPluginFileChanged func(path string) string) []plugi
 func toolBash() plugins.Tool {
 	return plugins.Tool{
 		Name:        "bash",
-		Description: "Execute a bash/shell command. Args: {command: string, timeout?: number(seconds)}. Returns combined stdout+stderr. No default timeout; pass timeout if the command may hang, or prefix the command with `timeout <sec>`. Use for building, running tests, git, package managers.",
+		Description: bashToolDescription(),
 		Run: func(args string) (string, error) {
 			var p struct {
 				Command string `json:"command"`
@@ -65,8 +65,9 @@ func toolBash() plugins.Tool {
 			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Command == "" {
 				return "", fmt.Errorf("bash: args {command} required")
 			}
+			// 跨平台 shell 选择：Unix bash/sh，Windows PowerShell(pwsh/5.1)→cmd。
 			// pi-lens-ignore: go-command-injection (bash tool is designed to execute shell commands)
-			cmd := exec.Command("bash", "-c", p.Command)
+			cmd := shell.Command(p.Command)
 			// 内嵌 Zig 工具链：已释放时把其目录前置到子进程 PATH，
 			// 让 `zig build-exe ...` 直接可用，不必每次写绝对路径。
 			cmd.Env = zigboot.Env(os.Environ())
@@ -105,7 +106,8 @@ func toolBash() plugins.Tool {
 					return out.String(), fmt.Errorf("bash: timeout after 60s (default)")
 				}
 			}
-			full := out.String()
+			// PowerShell 会把重定向到管道的错误流序列化成 CLIXML，先清理成纯文本。
+			full := shell.CleanOutput(out.String())
 			// 输出截断（对齐 pi truncateHead）：50KB / 2000 行双限，保留头部（bash 输出按时间顺序看头部最有意义）
 			truncated, show, truncBy, totalLines, totalBytes := truncateOutput(full)
 			if truncated {
@@ -121,6 +123,19 @@ func toolBash() plugins.Tool {
 			return strings.TrimSpace(full), nil
 		},
 	}
+}
+
+// bashToolDescription 工具描述。
+//
+// 注意：具体用哪个 shell 会随平台自动探测、也可能被 /shell 手动切换改变，
+// 所以这里只给通用说明 + 指向系统提示的「命令行环境」一节（那一节每次
+// SystemPrompt 重建都会按 shell.Current() 重新生成，切换后调用 ReloadTools
+// 即刷新）。不要在这里硬编码 PowerShell/bash 语法——切换后会变成错误提示。
+func bashToolDescription() string {
+	return "Execute a shell command. Args: {command: string, timeout?: number(seconds)}. " +
+		"Returns combined stdout+stderr. Default 60s timeout; pass timeout to override if the command may run longer. " +
+		"Syntax depends on the current shell (bash/sh on Unix; PowerShell or cmd on Windows) — " +
+		"see the 命令行环境 section of the system prompt for the active one; the user can change it with /shell."
 }
 
 // truncateOutput 截断 bash 输出，保留头部（对齐 pi truncateHead）。

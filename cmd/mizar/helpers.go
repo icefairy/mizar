@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	"mizar/internal/agent"
 	"mizar/internal/plugins"
+	"mizar/internal/shell"
 )
 
 // completeAtRaw 根据 @ 后面的输入提供补全建议。
@@ -390,22 +390,21 @@ func onPluginFileWritten(pluginDir string, pm *plugins.Manager, a *agent.Agent) 
 	}
 }
 
-// runUserBash 以 bash -c 执行用户以 ! 前缀输入的命令，返回合并后的 stdout+stderr。
-// 超时由 context 控制；找不到 bash 时回退到直接 exec 命令本身（不经过 shell）。
-// 输出按原样返回（不裁剪），由调用方决定展示与历史入账。
+// runUserBash 用平台默认 shell（internal/shell：Unix=bash/sh，Windows=PowerShell/cmd）
+// 执行用户以 ! 前缀输入的命令，返回合并后的 stdout+stderr。
+// 超时由 context 控制（30s）。输出按原样返回（不裁剪），由调用方决定展示与历史入账。
 func runUserBash(cmd string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c := exec.CommandContext(ctx, "bash", "-c", cmd)
+	c := shell.CommandContext(ctx, cmd)
 	var buf bytes.Buffer
 	c.Stdout = &buf
 	c.Stderr = &buf
 	c.Stdin = nil
 	c.Env = os.Environ()
-	if err := c.Run(); err != nil {
-		return buf.String(), err
-	}
-	return buf.String(), nil
+	err := c.Run()
+	// PowerShell 的错误流被重定向到管道时会变成 CLIXML 噪声，清理成纯文本。
+	return shell.CleanOutput(buf.String()), err
 }
 
 // buildBashEchoContent 生成 bash 命令执行结果的 assistant 回显文本，

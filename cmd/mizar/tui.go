@@ -1607,10 +1607,23 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 
 	// 应用
 	m.app = tview.NewApplication()
-	// Windows（ConPTY/Windows Terminal）下默认不启用鼠标上报：conhost 的
-	// win32-input-mode 双重编码缺陷会把鼠标事件还原成字符泄漏进输入框，
-	// 既产生乱码又会被误判成 ESC → 无辜「任务已取消」。详见 platform_input.go。
-	m.app.EnableMouse(shouldEnableMouse())
+	// 鼠标上报跟随运行期开关（/mouse 可切；MIZAR_MOUSE / config.mouse 设初值）。
+	// tcell ≥ v2.13 在 Windows 上走 win32-input-mode + VT 解析，鼠标事件能正确还原；
+	// 万一遇到会泄漏字符的老终端，esc_guard/esc_seq 会兜底吞掉泄漏序列。详见 platform_input.go。
+	m.app.EnableMouse(MouseEnabled())
+	// 让 /mouse 命令在 TUI 里能真正切换鼠标（Application.EnableMouse 是线程安全的）。
+	// 这里不做重画：/mouse 走 DispatchAsync（goroutine）→ 完成后调用方已经用
+	// QueueUpdateDraw 刷新界面；在这里再 QueueUpdate 一次反而可能死锁
+	// （若调用方在事件循环线程内，QueueUpdate 会阻塞等待事件循环本身）。
+	registerTUISetMouse(func(on bool) error {
+		// 屏幕尚未装配时（Run 之前 / 单测）只记状态，别碰 Application：
+		// tview 的 QueueUpdate 在事件循环未启动时会永久阻塞。
+		if m.scr == nil {
+			return nil
+		}
+		m.app.EnableMouse(on)
+		return nil
+	})
 	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理（Unix 生效；Windows 由 pasteGuard 兜底）
 
 	// 鼠标事件捕获：滚轮自己处理、左键自己拖选（见 selection.go）、右键粘贴。
@@ -2194,7 +2207,7 @@ func (m *tuiModel) submitInput(s string) {
 	if s == "" {
 		return
 	}
-	// "!" 前缀：本地 bash 命令直接执行（不经模型），命令与输出都纳入对话历史。
+	// "!" 前缀：本地命令经平台默认 shell 直接执行（不经模型），命令与输出都纳入对话历史。
 	if strings.HasPrefix(s, "!") {
 		cmd := strings.TrimSpace(strings.TrimPrefix(s, "!"))
 		if cmd == "" {

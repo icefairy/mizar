@@ -806,6 +806,56 @@ wasm 该用在「不可信计算 + 低频 + 单次 >10ms」的窄交集里（如
 
 ### ✨ 新增
 
+- **Windows 恢复鼠标支持（滚轮滚动 / 拖选复制 / 右键粘贴）**：此前 Windows 默认关闭鼠标上报
+  ——tcell v2.8.x 在 ConPTY 下会把鼠标事件双重编码成字符泄漏进输入框（`[<35;66;61M…`），
+  且序列以 ESC 开头会被误判成「取消任务」（见 `platform_input.go` 注释）。
+  - **根因已消除**：升级 `tcell v2.8.1 → v2.13.10`。新版在 Windows 上改用 terminfo 屏 +
+    win32-input-mode，输入走 VT 字节流解析，X10/SGR 鼠标序列由 `inputProcessor` 正确还原为
+    `EventMouse`；Windows Terminal 也把鼠标作为标准 VT 序列回传。故**各平台默认开启鼠标**，
+    体验与 pi 等 agent 一致。
+  - **保留全部兜底**：万一碰到仍会泄漏字符的老终端，`esc_guard.go` 吞掉泄漏序列（滚轮不误杀）、
+    `esc_seq.go` 整段吞掉、Windows 的 Esc 取消默认两段式确认。
+  - **新增 `/mouse` 命令**（`cmd/mizar/mousecmd.go`）：`/mouse` 查看状态、`/mouse on|off|toggle`
+    立即切换并持久化到 `config.json` 的 `mouse` 字段；启动时恢复。仍支持 `MIZAR_MOUSE=0/1`。
+  - 关闭鼠标后自动提示改用终端原生拖选 + `Ctrl+Shift+C/V`，键盘 `Alt+C` 拷贝模式与 `PgUp/PgDn` 不受影响。
+  - 顺带修：`registerTUISetMouse` 在屏幕未装配（单测/Run 之前）时不碰 Application，
+    避免 tview `QueueUpdate` 在事件循环未启动时永久阻塞（曾导致 `/mouse` 测试挂死）。
+
+- **跨平台 shell 适配（Windows 命令行兼容性）**：此前 `bash` 工具、目标门禁（QualityGate）、
+  TUI 的 `!` 前缀命令都硬编码 `bash -c` / `sh -c`，在 Windows（以 PowerShell 启动、未装
+  WSL/Git-Bash 的机器）上直接 `exec: "bash": executable file not found`，AI 侧表现为「命令全挂」。
+  现新增 `internal/shell` 包统一选择执行器：
+  - **Unix**：`bash` → `sh`
+  - **Windows**：`pwsh.exe`（PowerShell 7）→ `powershell.exe`（系统自带 5.1）→ `cmd.exe`
+  - 可用环境变量 `MIZAR_SHELL` 覆盖（如 `MIZAR_SHELL=C:\Program Files\Git\bin\bash.exe` 走 Git-Bash）
+  - **为什么优先 PowerShell 而非 cmd**：cmd 只有极简批处理语法（无变量表达式/无对象管道/错误处理弱），
+    模型输出的稍复杂命令几乎必然失败；PowerShell 语义完整、Win10+ 系统自带，模型先验知识也更充分。
+    cmd 仅作最后兜底。
+  - **PowerShell 用 `-EncodedCommand`（base64/UTF-16LE）**：绕开 Windows 命令行参数二次转义，
+    命令中含双引号、换行、中文、`&` 时不再被拆坏。
+  - **输出编码统一 UTF-8**：PowerShell 前导 `[Console]::OutputEncoding=UTF8`、cmd 前导 `chcp 65001`，
+    减少中文输出乱码。
+  - **CLIXML 噪声清理**：`powershell.exe` 的错误流被重定向到管道时会序列化成
+    `#< CLIXML … <S S="Error">…</S>`（难读且耗 token）。`shell.CleanOutput` 把其中的错误文本
+    抽出、反转义成普通 `ERROR: …` 行，bash 工具与 `!` 命令的输出都经过它。
+  - **退出码透传**：PowerShell 不把原生程序（git/go/npm）的退出码当作自身退出码，命令失败也返回 0。
+    追加后置语句 `if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }` 修正，AI 不再误判成功。
+  - **插件 `shell_exec` 同样走平台 shell**：`HostFuncs.ShellExec` 在 `main.go` 里接线为
+    `shell.Command`，插件在 Windows 上不必再依赖 bash。
+  - **Windows 门禁超时整树终止**：`configureGateCmd`（windows）改用 `taskkill /T /F`，避免 PowerShell/cmd
+    派生的子进程拖住输出管道导致超时失效。
+  - **系统提示与工具描述随平台自适应**：稳定层新增「命令行环境」一节，`bash` 工具 Description 指向它，
+    提示模型按当前执行器（PowerShell / cmd / POSIX）写命令，Windows 上不要写 bash 专有语法。
+  - **`/shell` 命令（手动切换执行器）**：平台自动顺序不总合适（老脚本只认 cmd、装了 Git-Bash 想走
+    POSIX、公司策略删了 PowerShell…），此前只能设环境变量 `MIZAR_SHELL`。现在：
+    - `/shell` 查看当前执行器（含来源：自动探测 / `MIZAR_SHELL` / `/shell` 手动）与本机可用清单
+    - `/shell <名字|路径>` 切换，如 `/shell cmd`、`/shell pwsh`、`/shell C:\Program Files\Git\bin\bash.exe`
+    - `/shell auto` 恢复平台自动探测
+    - 切换后**立即用探针命令验证**（`echo mizar-shell-ok` / `Write-Output mizar-shell-ok`），
+      shell 起不来回显 ⚠ 而不是让 AI 后面才发现命令全挂；切换成功持久化到 `config.json` 的
+      `shell` 字段（重启后仍生效），并刷新系统提示让模型改用对应语法。
+    - 选择优先级：`/shell` 手动 > `MIZAR_SHELL` 环境变量 > 平台自动探测。
+
 - **诊断日志（排查「任务莫名中止/卡死/退出」）**：新增 `internal/diag` 包，把关键事件落盘到 `~/.mizar/logs/mizar-YYYYMMDD.log`（单文件超 8MB 自动停写）。默认开启（TUI 下 stderr 就是终端，诊断信息不能写那儿）；`MIZAR_DIAG=0` 或 `config.json` 的 `"diag_log": false` 可关闭。日志标签与埋点：
   - `[tui ]` 启动参数/日志路径、TUI 进入与退出（含 `app.Run()` 的 error）、**ESC 取消的按键到达**
   - `[agent]` 每次 `Run` 的开始与结束（ok / aborted / err）、循环内两处 abort 检查点命中

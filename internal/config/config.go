@@ -53,6 +53,12 @@ type Config struct {
 	Providers []Provider `json:"providers,omitempty"`
 	// ActiveProvider 当前生效的 provider 名字（空=未使用收藏机制）。
 	ActiveProvider string `json:"active_provider,omitempty"`
+	// Shell 命令执行器选择（/shell 命令写入；空=平台自动探测）。
+	// 可填名字（powershell/pwsh/cmd/bash/sh）或可执行文件路径。
+	Shell string `json:"shell,omitempty"`
+	// Mouse 是否启用鼠标上报（TUI 滚轮/拖选/右键粘贴；nil=平台默认，现在各平台默认开）。
+	// /mouse on|off 写入本字段，启动时恢复。
+	Mouse *bool `json:"mouse,omitempty"`
 }
 
 // Provider 一个已记住的 LLM 供应商配置。

@@ -36,7 +36,7 @@ func banner() string {
   ◆ TUI 模式：Enter 发送 / Alt+Enter 换行 / Esc 取消(Windows 下需连按两次) / Ctrl+T 思考等级
   ◆ 强制重绘：Ctrl+L（屏幕出现残留文字时一键清干净；也可输入 /redraw）
   ◆ 复制粘贴：鼠标直接拖选即复制 ｜ Alt+C 拷贝模式(↑↓ 选区→y 复制) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+Q 复制
-  ◆ 本地 bash：!开头直接执行（如 !ls -la），命令与输出纳入对话历史
+  ◆ 本地命令：!开头直接执行（交给平台默认 shell：Unix=bash，Windows=PowerShell/cmd），命令与输出纳入对话历史
   ◆ 命令行模式：Enter 发送 ｜ 多行粘贴自动合并 ｜ /send 手动提交
 %s`, version, scrollHint())
 	if startupHint != "" {
@@ -46,15 +46,14 @@ func banner() string {
 }
 
 // scrollHint 生成「怎么看已经滚上去的内容」提示行。
-// 鼠标是否可用随平台不同（Windows 下鼠标上报被主动关闭，见 platform_input.go），
-// 提示行必须跟着变，否则 Windows 用户会以为滚轮只是刚好坏了。
+// 鼠标是否可用取决于运行期开关（/mouse、MIZAR_MOUSE、config.mouse，见 platform_input.go），
+// 提示行必须跟着变，否则关掉鼠标的用户会以为滚轮只是刚好坏了。
 func scrollHint() string {
 	scroll := "  ◆ 翻页：PgUp/PgDn ｜ vim 风格 Ctrl+U/Ctrl+D、Alt+K/Alt+J 上/下 10 行，Alt+G/Alt+Shift+G 到顶/底\n"
-	if shouldEnableMouse() {
+	if MouseEnabled() {
 		return scroll + "  ◆ 鼠标：直接拖选即复制（双击选整行，Esc 取消选区）｜ Shift+拖拽交给终端选择 ｜ 滚轮滚动\n"
 	}
-	return scroll + "  ◆ 鼠标：本平台滚轮不用于滚动（ConPTY 会把它误编码成字符，故禁用鼠标上报）；" +
-		"复制改用终端原生拖选 + Ctrl+Shift+C/V，或 Alt+C 拷贝模式\n"
+	return scroll + "  ◆ 鼠标：已关闭鼠标上报（/mouse on 开启）；复制改用终端原生拖选 + Ctrl+Shift+C/V，或 Alt+C 拷贝模式\n"
 }
 
 // interactive 运行交互式对话（readline 支持：退格删除 / 历史上下键 / Tab 补全）。
@@ -185,7 +184,7 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		}
 		rl.AppendHistory(trimmed)
 
-		// "!" 前缀：作为本地 bash 命令直接执行（不经模型）。
+		// "!" 前缀：作为本地命令经平台默认 shell 直接执行（不经模型）。
 		// 命令与输出都纳入对话历史（user 消息 + assistant 回显），让模型在后续轮次
 		// 看到这次操作的上下文，可以基于结果继续推理或解释。
 		if strings.HasPrefix(trimmed, "!") {

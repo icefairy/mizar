@@ -35,6 +35,7 @@ import (
 	"mizar/internal/schedule"
 	"mizar/internal/server"
 	"mizar/internal/session"
+	"mizar/internal/shell"
 	"mizar/internal/skills"
 )
 
@@ -227,6 +228,18 @@ func main() {
 		log.Printf("已加载配置 %s: model=%s thinking=%s window=%d", config.DefaultPath(), *model, cfg.ThinkingStr(), *ctxWindow)
 	}
 
+	// 命令执行器（bash 工具 / ! 命令 / 插件 shell_exec 用哪个 shell）：
+	// 优先恢复 /shell 持久化到 config 的选择，否则按平台自动探测
+	// （Windows: pwsh → powershell → cmd；Unix: bash → sh）。
+	if scfg, err := config.Load(config.DefaultPath()); err == nil {
+		if scfg.Shell != "" {
+			shell.Init(scfg.Shell)
+			log.Printf("命令执行器已恢复: %s（%s）", shell.Current().String(), shell.Current().Path)
+		}
+		// 鼠标上报开关（/mouse 写入）：nil 时用平台默认（现各平台默认开启）。
+		SetMouseFromConfig(scfg.Mouse)
+	}
+
 	// 宿主函数集
 	host := &engine.HostFuncs{
 		FSRead: func(p string) (string, error) {
@@ -254,6 +267,12 @@ func main() {
 				out = append(out, x.Name())
 			}
 			return out, nil
+		},
+		// ShellExec：插件 shell_exec(cmd) —— 交给平台默认 shell（Unix=bash/sh，
+		// Windows=PowerShell/cmd），保证插件在 Windows 上也能执行命令。
+		ShellExec: func(cmd string) (string, error) {
+			out, err := shell.Command(cmd).CombinedOutput()
+			return shell.CleanOutput(string(out)), err
 		},
 		Log: func(msg string) { log.Print(msg) },
 		// Env：插件读环境变量（定位 HOME 等），避免硬编码路径
@@ -745,6 +764,11 @@ func main() {
 			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, name), nil
 		},
 	))
+	// 内置 /shell 命令：手动切换命令执行器（详见 shellcmd.go）。
+	// 切换后刷新系统提示（「命令行环境」一节要跟着变），并持久化到 config.json。
+	a.Commands.Register(newShellCommand(persistShell, a.ReloadTools))
+	// 内置 /mouse 命令：运行期开关鼠标上报（详见 mousecmd.go）。
+	a.Commands.Register(newMouseCommand(persistMouse))
 	// 内置 /zig 命令：释放/管理内嵌 Zig 工具链（详见 zigcmd.go）
 	registerZigCommand(a)
 	// 内置 /apikey 命令：查看/设置 API Key（与 /provider 配合使用）

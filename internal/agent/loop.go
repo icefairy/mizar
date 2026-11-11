@@ -21,6 +21,7 @@ import (
 	"mizar/internal/jobs"
 	"mizar/internal/lifecycle"
 	"mizar/internal/plugins"
+	"mizar/internal/shell"
 )
 
 // CacheStats 系统提示词缓存命中率统计。
@@ -334,13 +335,15 @@ const stableBasePrompt = `你是开阳(Mizar) Agent，一个自举的编码智�
 按下面的阶梯逐级降级，直到解决：
 
 1. **先看错误本身**：参数写错 / 路径不对 / 前置条件缺失，先修参数重试一次。
-2. **换系统里已有的语言或工具做**：mizar 跑在真实操作系统上，可以用 bash 直接调
-   python3、node、perl、awk、jq、pdftotext、ffmpeg 等。例如：
-   - PDF / 图片 / Office 解析 → python3 -c "import fitz ..." 或 pdftotext
-   - 复杂文本 / 数据加工 → python3、awk、jq
-   - 系统信息、批量文件操作 → bash + coreutils
-   调用前先用 command -v <tool> 确认是否安装；没装可尝试 pip install --quiet 或
-   apt-get install -y 装一次，装不上就走第 3 步。
+2. **换系统里已有的语言或工具做**：mizar 跑在真实操作系统上，可以用 bash 工具直接调
+   python、node、perl、awk、jq、pdftotext、ffmpeg 等。例如：
+   - PDF / 图片 / Office 解析 → python -c "import fitz ..." 或 pdftotext
+   - 复杂文本 / 数据加工 → python、awk、jq
+   - 系统信息、批量文件操作 → bash 工具一次跑完
+   调用前先确认是否安装（Unix 用 command -v <tool>，Windows PowerShell 用
+   Get-Command <tool>）；没装可尝试 pip install --quiet 或对应包管理器装一次，装不上就走第 3 步。
+   注意：bash 工具的命令字符串交给**平台默认 shell**执行——Unix 是 bash/sh，Windows 是
+   PowerShell 或 cmd（见「命令行环境」一节），Windows 上不要写 bash 专有语法。
 3. **用自带 Zig 工具链自己造工具**：系统内置 Zig（zig version 直接可用，已在 PATH）。
    适合写**无依赖、可交叉编译、体积小**的独立命令行工具。典型场景：现有库都不支持
    某种二进制格式、需要长期复用的解析器、对性能或内存有严格控制的处理。
@@ -451,6 +454,10 @@ func (a *Agent) buildContextSection() string {
 	if a.WorkDir != "" {
 		sb.WriteString(fmt.Sprintf("\n## 当前工作目录\n%s\n", a.WorkDir))
 	}
+	// 命令行环境：bash 工具实际调用的 shell 随平台不同（Windows=PowerShell/cmd，
+	// Unix=bash/sh）。明确告知模型，避免在 Windows 上写 bash 专有语法导致全挂。
+	sb.WriteString(fmt.Sprintf("\n## 命令行环境\n%s；bash 工具的 command 会交给它执行，请按其语法书写命令。"+
+		"（可用环境变量 MIZAR_SHELL 覆盖，例如指定 Git-Bash 路径。）\n", shell.Current().Hint()))
 	// 计划模式 / 拷问模式引导（活跃时注入，退出时为空字符串）
 	// 顺序：拷问在计划之前——需求没问清就不要先出方案。
 	if a.GrillMode != nil {

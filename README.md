@@ -466,7 +466,7 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 !cat config.json | head -20
 ```
 
-- **输入框直接以 `!` 开头**：命令在本地 `bash -c` 下执行，30 秒超时，stderr 合并到 stdout
+- **输入框直接以 `!` 开头**：命令交给平台默认 shell 执行（Unix=`bash -c`，Windows=`PowerShell`/`cmd`，可用 `MIZAR_SHELL` 覆盖），30 秒超时，stderr 合并到 stdout
 - **CLI 模式**：命令与输出直接打印到终端，同时写入会话历史与内存 `Initial`，下一轮模型能看到
 - **TUI 模式**：命令以 `user` 行立即显示，输出以 `cmd` 角色异步显示（保留原始换行，不按 markdown 重排），同步写入会话历史与内存
 - **会话续接**：命令与输出都会落盘，会话重启后仍可续接
@@ -474,6 +474,36 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 - **空命令**：输入单独的 `!` 会提示用法，不执行任何东西
 
 注意：`!` 命令不经模型，也不会触发工具调用；需要模型基于输出推理时，直接在下一条消息里发任务即可。
+
+**鼠标（Windows 同样支持）**：TUI 里鼠标上报默认开启——滚轮滚动、左键拖选即复制（双击选整行、
+Esc 取消选区）、右键粘贴都可用。若碰到旧终端把鼠标事件泄漏成 `[<35;66;61M` 之类的乱码，可随时关掉：
+
+```
+/mouse              # 查看当前状态
+/mouse off          # 关闭（改用终端原生拖选 + Ctrl+Shift+C/V）
+/mouse on           # 重新开启
+/mouse toggle       # 反转
+```
+
+也可用环境变量 `MIZAR_MOUSE=0` 或 `config.json` 的 `"mouse": false` 设默认值；键盘快捷键
+（`PgUp/PgDn`、`Ctrl+U/D`、`Alt+K/J`、`Alt+C` 拷贝模式）始终可用。
+
+**Windows 用户的命令执行器**：`bash` 工具、`!` 命令、目标门禁、插件 `shell_exec` 统一走
+「平台默认 shell」——Unix 是 `bash`/`sh`，Windows 依次尝试 `pwsh`（PowerShell 7）→
+`powershell`（系统自带 5.1）→ `cmd`（PowerShell 优先，因为 cmd 的批处理语法太弱，
+模型写稍复杂的命令几乎必失败）。可随时手动切换：
+
+```
+/shell                                   # 查看当前执行器 + 本机可用清单
+/shell cmd                               # 切到 cmd（老脚本只认批处理语法时）
+/shell pwsh                              # 切到 PowerShell 7
+/shell C:\Program Files\Git\bin\bash.exe   # 装了 Git-Bash 想走 POSIX 语法
+/shell auto                              # 恢复平台自动探测
+```
+
+- 切换会**立即探针验证**（跑一条 `echo`），并把选择写入 `config.json`（重启后仍生效）；
+- 也支持环境变量 `MIZAR_SHELL`（一次性覆盖，优先级低于 `/shell`）；
+- 切换后系统提示的「命令行环境」一节会跟着更新，模型会改用对应语法。
 
 ### 8. LSP 支持
 - **作为客户端**：通过 stdio 启动语言服务器（gopls/tsserver），提供 `lsp_diagnostics` / `lsp_definition` / `lsp_references` / `lsp_completion` 工具
