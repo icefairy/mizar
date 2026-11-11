@@ -57,6 +57,9 @@ func TestReleaseWithoutEmbedded(t *testing.T) {
 	if _, _, ok := embeddedArchive(); ok {
 		t.Skip("此构建内嵌了归档，跳过「无归档」分支")
 	}
+	// 隔离缓存目录：否则本机已存在释放好的 zig 时，Release(false) 幂等短路返回成功，
+	// 掩盖「无归档应报错」的分支。
+	t.Setenv("MIZAR_ZIG_CACHE", t.TempDir())
 	_, err := Release(false)
 	if err == nil {
 		t.Fatal("期望 Release 报错（未内嵌归档）")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mizar/internal/agent"
@@ -27,6 +28,31 @@ type Server struct {
 	// 并发调用会互相覆盖。用 TryLock 而非 Lock——忙时立即返回 409，
 	// 避免请求无限排队；steer/abort 不走此锁，等待期间仍可实时纠正。
 	runMu sync.Mutex
+
+	// runConv 当前正在执行 Agent.Run 的 Web 会话 id（空 = 非 Web 会话发起的运行）。
+	// WS 事件会带上该 id，前端据此把流式增量只渲染到「发起该运行的那个会话窗口」，
+	// 修复多会话切换时事件串台（新会话的消息出现在老会话窗口里）。
+	runConv atomic.Value // string
+
+	// stats Web UI 状态栏用量统计（tokens/缓存/速度），对齐 TUI 状态栏。
+	stats runStats
+	// usageMu 保护 lastUsage/lastModel（去重入账）。
+	usageMu   sync.Mutex
+	lastUsage *agent.Usage
+	lastModel string
+	// runStartAt 最近一次 Run 开始时间（零值=未开始），用于计算本次请求耗时。
+	runStartAt time.Time
+}
+
+// setRunConv 记录/清除当前运行归属的会话 id（空串表示无归属）。
+func (s *Server) setRunConv(id string) { s.runConv.Store(id) }
+
+// RunConv 返回当前运行归属的 Web 会话 id（无归属返回空串）。
+func (s *Server) RunConv() string {
+	if v, ok := s.runConv.Load().(string); ok {
+		return v
+	}
+	return ""
 }
 
 // acquireRun 尝试独占 Agent；失败返回 false（已有 Run 在执行）。
@@ -123,8 +149,114 @@ func (s *Server) EmitToWS(event, dataJSON string) {
 }
 
 // broadcastStream 广播流式增量（step + 可显示文本增量 + 是否思考过程）。
+// 事件携带当前运行的会话 id（conversation_id），前端按当前打开的会话过滤，
+// 避免切换会话期间旧运行的增量被渲染到新/别的会话窗口里。
 func (s *Server) broadcastStream(step int, delta, kind string) {
 	s.hub.broadcast(map[string]any{
 		"type": "event", "event": "stream", "step": step, "delta": delta, "kind": kind,
+		"conversation_id": s.RunConv(),
 	})
+}
+
+// ============================================================================
+// 运行统计（Web UI 状态栏，对齐 TUI 状态栏展示内容）
+// ============================================================================
+
+// runStats 会话级用量统计（进程级累计，模型切换时重置模型维度速度）。
+type runStats struct {
+	mu sync.Mutex
+
+	CumPrompt     int
+	CumCompletion int
+	CumTotal      int
+	CumCached     int
+
+	// 模型维度平滑速度（累计输出 tokens / 累计耗时秒）
+	ModelCumCompletion int
+	ModelCumDuration   float64
+	ModelTokPerSec     float64
+
+	// 最后一次请求耗时
+	LastDurationSec float64
+}
+
+// addUsage 累加一次用量。
+func (r *runStats) addUsage(u *agent.Usage, durSec float64) {
+	if u == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.CumPrompt += u.PromptTokens
+	r.CumCompletion += u.CompletionTokens
+	r.CumTotal += u.TotalTokens
+	r.CumCached += u.CachedTokens
+	r.LastDurationSec = durSec
+	r.ModelCumCompletion += u.CompletionTokens
+	r.ModelCumDuration += durSec
+	if r.ModelCumDuration > 0 {
+		r.ModelTokPerSec = float64(r.ModelCumCompletion) / r.ModelCumDuration
+	}
+}
+
+// resetModel 切换模型时重置模型维度速度统计。
+func (r *runStats) resetModel() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ModelCumCompletion = 0
+	r.ModelCumDuration = 0
+	r.ModelTokPerSec = 0
+}
+
+// snapshot 返回统计快照。
+func (r *runStats) snapshot() runStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return runStats{
+		CumPrompt:       r.CumPrompt,
+		CumCompletion:   r.CumCompletion,
+		CumTotal:        r.CumTotal,
+		CumCached:       r.CumCached,
+		ModelTokPerSec:  r.ModelTokPerSec,
+		LastDurationSec: r.LastDurationSec,
+	}
+}
+
+// recordLLMUsage 从 LLM 客户端读取最后一次用量并入账（若支持 UsageTracker）。
+// afterModelChange 检测模型变化并重置速度统计。
+func (s *Server) recordLLMUsage() {
+	if s.agent == nil || s.agent.LLM == nil {
+		return
+	}
+	ut, ok := s.agent.LLM.(interface{ LastUsage() *agent.Usage })
+	if !ok {
+		return
+	}
+	u := ut.LastUsage()
+	if u == nil {
+		return
+	}
+	// 去重：同一 usage 对象重复读取（多入口调用）不重复入账。
+	s.usageMu.Lock()
+	same := s.lastUsage == u || (s.lastUsage != nil && *s.lastUsage == *u)
+	if same {
+		s.usageMu.Unlock()
+		return
+	}
+	cp := *u
+	s.lastUsage = &cp
+	s.usageMu.Unlock()
+
+	if m := s.agent.Model(); m != s.lastModel {
+		if s.lastModel != "" {
+			s.stats.resetModel()
+		}
+		s.lastModel = m
+	}
+	dur := 0.0
+	if !s.runStartAt.IsZero() {
+		dur = time.Since(s.runStartAt).Seconds()
+		s.runStartAt = time.Time{}
+	}
+	s.stats.addUsage(u, dur)
 }

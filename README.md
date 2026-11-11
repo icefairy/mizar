@@ -42,6 +42,44 @@
 
 ---
 
+## v0.7.6 亮点：多供应商收藏夹 + WebUI 对齐 TUI + 多会话串台修复
+
+### 一、多供应商收藏夹（TUI + WebUI）
+
+家里直连、外面走隧道代理、其它上游渠道，都能记住随时切换，两端共用一份配置：
+
+```
+/provider list                                列出已记住的供应商（* 标记当前）
+/provider add home http://127.0.0.1:3002/v1 sk-xxx deepseek-v4-flash
+/provider add tunnel https://tunnel.example.com/v1 sk-yyy
+/provider use tunnel                          一条命令切过去
+/provider del home
+```
+
+WebUI 设置面板里也有同样的「供应商」下拉 + 收藏表单。旧的 `/provider <url> [key]` 仍可用
+（切换同时自动收藏）。
+
+### 二、配置自动升级（旧版无缝）
+
+首次用新版读取旧配置（只有单个 `base_url`）时，会自动把当前供应商登记为收藏夹第一条并设为
+active，原地写回，且备份原文件为 `config.json.bak`。旧版读取新文件也只是忽略新增字段，
+随时可回退。
+
+### 三、WebUI 对齐 TUI
+
+- **标题显示版本号**，登录页与标题栏一致；
+- **状态栏**：输入框上方一行显示 `tokens(in/out) | 上下文% | 缓存命中% | tok/s | 模型 | 思考`，
+  运行中自动加快刷新；
+- **发送开关**：发送按钮上方新增开关，默认「打断」（等待期间发送=注入当前循环纠偏），
+  取消勾选变「排队」（本轮结束后自动发送）。
+
+### 四、多会话串台修复
+
+流式事件现在带 `conversation_id`，前端只渲染与当前打开会话匹配的事件；
+忙碌状态与排队队列都按会话归属；服务端校验 steer 归属，跨会话的纠正不会串进别人的循环。
+
+---
+
 ## v0.7.5 亮点：动手前先问清楚 + 拖选即复制 + 状态栏自适应
 
 三件事分别对应「怎么想」「怎么用」「怎么看」。
@@ -481,7 +519,11 @@ chmod +x mizar
 
 # 直接启动，进入交互式 TUI 后配置供应商与模型
 ./mizar
-  # /provider <baseURL> <apiKey>   一次设置 base URL 与 API Key（自动保存到 ~/.mizar/config.json）
+  # /provider list                 列出已记住的供应商（家里直连 / 隧道代理 / 其它上游）
+  # /provider add <名> <url> [key] [model]  收藏一个供应商
+  # /provider use <名>             切换供应商（TUI / WebUI 通用）
+  # /provider del <名>             删除收藏
+  # /provider <baseURL> <apiKey>   临时切换（并自动收藏，兼容旧用法）
   # /model <name>                   切换模型（自动列出供应商可用模型）
   # /think <level>                  设置思考等级（auto/off/low/medium/high）
   # /config                        查看当前配置（max_steps / context_window / user_agent）

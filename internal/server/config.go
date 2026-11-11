@@ -19,6 +19,9 @@ type Config struct {
 
 	// Web Web UI：浏览器界面 + 会话登录（与 Bearer Token 独立）。
 	Web WebAuth
+
+	// Version 程序版本号（v0.7.6 之类），Web UI 标题展示用（空=不展示）。
+	Version string
 }
 
 // WebAuth Web UI 登录鉴权配置。

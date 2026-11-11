@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.7.5</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.7.6</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -147,6 +147,13 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.7.6 · 多供应商收藏夹 + WebUI 对齐 TUI + 多会话串台修复</h3>
+          <p><strong>多供应商收藏夹（TUI + WebUI 通用）</strong>：以前只能配一个 provider，家里直连和外面走隧道代理只能反复粘贴 URL/Key。现在配置里记住多个供应商（<code>providers[]</code> + <code>active_provider</code>），TUI 用 <code>/provider list | add &lt;名&gt; &lt;url&gt; [key] [model] | use &lt;名&gt; | del &lt;名&gt;</code>，WebUI 设置面板同样的下拉与表单，两端共用 <code>~/.mizar/config.json</code>。运行时切换通过 <code>llm.OpenAI.SetEndpoint</code> 同时换 baseURL+apiKey，<code>/model</code> 会把模型名同步进当前收藏项。</p>
+          <p><strong>配置自动升级（向后兼容）</strong>：首次用新版读取旧配置（只有单个 <code>base_url</code>）时自动登记为收藏夹第一条并设为 active，原地写回且备份为 <code>config.json.bak</code>；旧版读新文件只是忽略新增字段，随时可回退。</p>
+          <p><strong>WebUI 对齐 TUI</strong>：① 标题栏与登录页显示版本号（新增免鉴权 <code>/web/api/version</code>）；② 输入框上方新增<strong>状态栏</strong>（<code>tokens(in/out) | 上下文% | 缓存命中% | tok/s | 模型 | 思考</code>，来自 <code>/web/api/status</code>，运行中加快刷新）；③ 发送按钮上方新增<strong>打断/排队开关</strong>（默认打断=等待期间发送注入当前循环纠偏，取消=排队到本轮结束）。</p>
+          <p><strong>多会话串台修复</strong>：WS 事件（stream / tool_call / tool_result）现在带 <code>conversation_id</code>，前端只渲染与当前打开会话匹配的事件；忙碌状态与排队队列都按会话归属；服务端 <code>/web/api/steer</code> 校验归属，跨会话纠正返回 <code>running:false</code> 改作新任务，A 会话的纠正不会串进 B 会话的循环。</p>
+        </div>
         <div class="card">
           <h3>v0.7.5 · 动手前先问清楚 + 拖选即复制 + 状态栏自适应</h3>
           <p><strong>拷问模式 <code>/grill</code></strong>：与 <code>/plan</code>（解决「怎么做」）互补、可叠加——先复述理解，再用 <code>ask_user_question</code> 逐层追问（每轮 ≤3 问、每题带编号选项，点编号即答），只问能改变结论的问题（<strong>目标/验收 &gt; 非目标 &gt; 约束 &gt; 失败回滚 &gt; 权限</strong>），措辞命名类禁止问；<strong>拷问期间禁止改代码</strong>；收敛条件是「能写出可验证的完成定义 / 用户说够了 / 3 轮关键提问」，收敛后输出「确认清单 + 风险与默认假设 + 下一步」并停下等指令。模式开关现在会让 system prompt 缓存失效（<code>PlanMode</code>/<code>GrillMode</code> 带版本号），退出后不再按老提示运行；<code>IsModeExitArg</code> 统一收口 <code>exit/off/stop/quit/end/close/退出/关闭/结束/取消</code>，不会「又进入一次」。</p>

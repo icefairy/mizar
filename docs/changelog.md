@@ -1,6 +1,49 @@
-## [Unreleased]
+## [v0.7.6] — 2026-11-11
 
-（暂无）
+> 主题：**多供应商收藏夹 + WebUI 对齐 TUI（版本号/状态栏/发送开关）+ 多会话串台修复**。
+> 家里直连、外面走隧道代理、其它上游渠道都能记住随时切换，两端共用一份配置。
+
+### ✨ 新增
+
+- **多供应商收藏夹（TUI + WebUI 通用）**：以前只能配一个 provider，家里直连和外面走隧道代理
+  只能反复粘贴 URL/Key。现在可以记住多个供应商随时切换：
+  `providers: [{name, base_url, api_key, model, context_window}]` + `active_provider`。
+  - TUI：`/provider list` / `add <名> <url> [key] [model]` / `use <名>` / `del <名>`；
+    旧用法 `/provider <url> [key]` 保留（切换同时自动收藏）。
+  - WebUI：设置面板新增「供应商」下拉（切换/删除）+ 新增表单（收藏），与 TUI 共用同一份配置。
+  - 运行时切换走 `llm.OpenAI.SetEndpoint`（baseURL + apiKey 一起换），`/model` 会把模型名
+    同步进当前收藏项，切换回来时自动恢复。
+- **配置文件自动升级（向后兼容）**：新版首次读取旧配置（只有单 `base_url`）时，自动把当前
+  供应商登记为一条 provider 并设为 active，原地写回；写回前备份为 `config.json.bak`
+  （仅当备份不存在），旧版仍可回退使用。新版读旧文件、旧版读新文件都能正常工作。
+- **WebUI 显示版本号**：标题栏 brand 旁与登录页副标题都显示 `vX.Y.Z`，`document.title`
+  同步；服务端新增 `GET /web/api/version`（无需鉴权，登录页即可取）。
+- **WebUI 状态栏（对齐 TUI）**：输入框上方新增一行状态栏，显示
+  `tokens(in/out) | 上下文% | 缓存命中% | tok/s | 模型 | 思考等级`，
+  数据来自新增的 `GET /web/api/status`（运行中 0.7s、空闲 1.5s 轮询）。
+  上下文百分比按「当前会话消息估算 / (窗口-预留)」计算并三色着色。
+- **WebUI 发送开关（打断 / 排队）**：发送按钮上方新增开关，默认「打断」——
+  等待期间发送的消息注入当前循环做实时纠偏（steer）；取消选择变为「排队」，
+  消息排队到本轮结束后自动发送。状态持久化在 localStorage。
+
+### 🐛 修复
+
+- **WebUI 多会话串台**：原来 WS 事件（stream / tool_call / tool_result）不带会话归属，
+  切到新会话后旧运行的流式内容会画到当前窗口里。现在服务端记录了运行归属的会话 id
+  （`Server.runConv`），所有事件带 `conversation_id`，前端只渲染与当前打开的会话匹配的事件；
+  同时：
+  - `busy` 由全局布尔改为「正在跑的会话 id」，切到别的会话不再假忙碌；
+  - 排队队列按会话 id 归属，只在本会话轮次结束时补发；
+  - 服务端 `/web/api/steer` 校验归属，跨会话的纠正不会注入别人的循环（返回 `running:false`，
+    前端改作新任务补发），避免 A 会话的纠正串进 B 会话。
+
+### 🔧 其他
+
+- **`version` 提升到 v0.7.6**（`cmd/mizar/main.go`），Web UI 通过 `/web/api/version`
+  与 `/web/api/me` 展示同一版本号。
+- 新增单测：`internal/config/provider_test.go`（旧配置自动升级 / 收藏夹 CRUD / 名字推导）、
+  `internal/server/webproviders_test.go`（version/providers/status 接口）、
+  `internal/server/ws_conv_test.go`（跨会话 steer 归属校验）。
 
 ## [v0.7.5] — 2026-11-11
 

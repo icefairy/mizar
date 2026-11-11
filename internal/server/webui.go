@@ -139,6 +139,7 @@ func (s *Server) webRoutes() {
 	// 登录 / 登出 / 当前身份
 	s.mux.HandleFunc("/web/api/login", s.handleWebLogin)
 	s.mux.HandleFunc("/web/api/logout", s.handleWebLogout)
+	s.mux.HandleFunc("/web/api/version", s.handleWebVersion)
 	s.mux.HandleFunc("/web/api/me", s.webAuth(s.handleWebMe))
 	// 会话 CRUD
 	s.mux.HandleFunc("/web/api/conversations", s.webAuth(s.handleConversations))
@@ -151,6 +152,10 @@ func (s *Server) webRoutes() {
 	// 设置（模型 + 对话参数）
 	s.mux.HandleFunc("/web/api/settings", s.webAuth(s.handleSettings))
 	s.mux.HandleFunc("/web/api/models", s.webAuth(s.handleModelsList))
+	// 供应商收藏夹（多 provider 管理）
+	s.mux.HandleFunc("/web/api/providers", s.webAuth(s.handleWebProviders))
+	// 状态栏统计（对齐 TUI 状态栏：tokens/上下文/缓存/速度）
+	s.mux.HandleFunc("/web/api/status", s.webAuth(s.handleWebStatus))
 	// WebSocket（cookie 鉴权，复用广播 hub）
 	s.mux.HandleFunc("/web/ws", s.webAuth(s.handleWS))
 }
@@ -231,6 +236,11 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleWebVersion GET /web/api/version → 版本号（登录页展示用，无需鉴权）。
+func (s *Server) handleWebVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"version": s.cfg.Version})
+}
+
 // handleWebMe GET /web/api/me → 当前登录用户 + 模型 + 设置
 func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 	c, _ := r.Cookie(webCookieName)
@@ -242,6 +252,7 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 		"username": user,
 		"model":    s.agent.Model(),
 		"settings": s.web.store.getSettings(),
+		"version":  s.cfg.Version,
 	})
 }
 
@@ -340,7 +351,12 @@ func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"reply": out, "command": true, "command_display": true})
 		return
 	}
+	// 普通对话也记录归属会话，使流式事件带上 conversation_id（前端按会话过滤）
+	s.setRunConv(body.ConversationID)
+	defer s.setRunConv("")
+	s.runStartAt = time.Now()
 	reply, err := s.chatOnce(body.ConversationID, body.Message)
+	s.recordLLMUsage()
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -564,7 +580,9 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, http.StatusConflict, "agent 正在处理上一条消息，请稍候或发送纠正消息")
 		return
 	}
-	defer s.releaseRun()
+	// 记录本次运行的归属会话：WS 事件带 conversation_id，前端据此过滤避免串台。
+	s.setRunConv(body.ConversationID)
+	defer func() { s.setRunConv(""); s.releaseRun() }()
 
 	// Agent 模式复用会话历史：把该会话的 user/assistant 消息注入 a.Initial，
 	// 使切换模式时上下文连续（修复"切 Agent 模式后列表无变化"的割裂感）。
@@ -600,7 +618,9 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { s.agent.OnLLMStream = nil }()
 
+	s.runStartAt = time.Now()
 	reply, err := s.agent.Run(body.Message)
+	s.recordLLMUsage()
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -619,18 +639,25 @@ func (s *Server) handleWebAbort(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleWebSteer POST /web/api/steer  { "content": "纠正消息" }
-// 响应 { ok, running }：running=false 表示当前没有活跃循环，该消息不会被消费，
-// 前端应改作新任务补发（避免用户刚发的纠正被静默丢弃）。
+// handleWebSteer POST /web/api/steer  { "content": "纠正消息", "conversation_id": "<可选>" }
+// 响应 { ok, running }：running=false 表示当前没有活跃循环（或活跃循环属于别的会话），
+// 该消息不会被消费，前端应改作新任务补发（避免用户刚发的纠正被静默丢弃/串到别的会话）。
 func (s *Server) handleWebSteer(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Content string `json:"content"`
+		Content        string `json:"content"`
+		ConversationID string `json:"conversation_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Content) == "" {
 		errJSON(w, http.StatusBadRequest, "content required")
 		return
 	}
 	running := s.agent.Running()
+	// 归属校验：当前运行属于别的会话时不注入（否则会把 A 会话的纠正串进 B 会话的循环）
+	if running && body.ConversationID != "" {
+		if cur := s.RunConv(); cur != "" && cur != body.ConversationID {
+			running = false
+		}
+	}
 	if running {
 		s.agent.Steer(body.Content)
 		s.logf("web agent.steer: %s", truncateStr(body.Content, 80))

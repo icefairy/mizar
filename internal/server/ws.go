@@ -95,16 +95,17 @@ func (s *Server) attachHooks() {
 		s.agent.Hooks = agent.NewHooks()
 	}
 	h := s.agent.Hooks
+	// 事件携带 conversation_id（当前运行的 Web 会话）：前端据此过滤，避免串台。
 	h.OnLLMResponse(func(ctx *agent.HookContext) error {
-		s.hub.broadcast(map[string]any{"type": "event", "event": "llm_response", "step": ctx.Step, "content": ctx.Reply})
+		s.hub.broadcast(map[string]any{"type": "event", "event": "llm_response", "step": ctx.Step, "content": ctx.Reply, "conversation_id": s.RunConv()})
 		return nil
 	})
 	h.OnToolCall(func(ctx *agent.HookContext) error {
-		s.hub.broadcast(map[string]any{"type": "event", "event": "tool_call", "step": ctx.Step, "tool": ctx.Tool, "args": ctx.Args})
+		s.hub.broadcast(map[string]any{"type": "event", "event": "tool_call", "step": ctx.Step, "tool": ctx.Tool, "args": ctx.Args, "conversation_id": s.RunConv()})
 		return nil
 	})
 	h.OnToolResult(func(ctx *agent.HookContext) error {
-		s.hub.broadcast(map[string]any{"type": "event", "event": "tool_result", "step": ctx.Step, "tool": ctx.Tool, "result": ctx.Result})
+		s.hub.broadcast(map[string]any{"type": "event", "event": "tool_result", "step": ctx.Step, "tool": ctx.Tool, "result": ctx.Result, "conversation_id": s.RunConv()})
 		return nil
 	})
 }

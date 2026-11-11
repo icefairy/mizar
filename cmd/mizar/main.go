@@ -38,7 +38,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.7.5"
+var version = "v0.7.6"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -717,58 +717,8 @@ func main() {
 		OnCompactionAfter(bridgeHook("CompactionAfter")).
 		OnError(bridgeHook("Error"))
 
-	// 内置 /provider 命令：查看/切换/配置 LLM 供应商
-	a.Commands.Register(agent.Command{
-		Name:        "provider",
-		Description: "查看当前 LLM 供应商（/provider）、切换 URL（/provider <baseURL>）或配置完整信息（/provider <baseURL> <apiKey>）",
-		Run: func(args string) (string, error) {
-			args = strings.TrimSpace(args)
-			if args == "" {
-				thinking := client.ThinkingEnabled()
-				keyMask := "<未设置>"
-				if client.APIKey != "" {
-					keyMask = fmt.Sprintf("%s...%s", client.APIKey[:2], client.APIKey[len(client.APIKey)-2:])
-				}
-				return fmt.Sprintf(`当前 LLM 配置:
-  供应商 baseURL: %s
-  模型 model:     %s
-  思考模式 thinking: %s
-  API Key:       %s
-
-设置方法（修改后自动保存到 %s）：
-  /provider <baseURL> <apiKey>   一次设置 base URL 与 API Key
-  /provider <baseURL>            仅切换 base URL
-  /apikey <apiKey>               单独设置 API Key
-  /model <name>                  切换模型
-  示例: /provider https://api.deepseek.com/v1 sk-xxxx 然后 /model deepseek-chat`, client.BaseURL, client.Model, thinking, keyMask, config.DefaultPath()), nil
-			}
-			fields := strings.Fields(args)
-			baseURL := strings.TrimSuffix(fields[0], "/")
-			oldURL := client.BaseURL
-			client.BaseURL = baseURL
-			if len(fields) >= 2 {
-				client.APIKey = fields[1]
-			}
-			// 持久化
-			cfg, _ := config.Load(config.DefaultPath())
-			cfg.BaseURL = client.BaseURL
-			cfg.Model = client.Model
-			cfg.APIKey = client.APIKey
-			cfg.ContextWindow = *ctxWindow
-			cfg.ThinkingLevel = client.ThinkingEnabled()
-			cfg.UserAgent = client.UserAgent()
-			if err := config.Save(config.DefaultPath(), cfg); err != nil {
-				log.Printf("/provider 持久化失败: %v", err)
-			}
-			if len(fields) >= 2 {
-				return fmt.Sprintf("✓ 供应商已切换: %s → %s\n✓ API Key 已更新", oldURL, baseURL), nil
-			}
-			if oldURL == baseURL {
-				return fmt.Sprintf("URL 未变更: %s（设置 API Key: /provider <url> <key> 或 /apikey <key>）", baseURL), nil
-			}
-			return fmt.Sprintf("✓ 供应商已切换: %s → %s", oldURL, baseURL), nil
-		},
-	})
+	// 内置 /provider 命令：多供应商收藏夹（add/del/use/list）与切换（实现见 providercmd.go）
+	a.Commands.Register(newProviderCommand(client, a, ctxWindow))
 	// 内置 /model 命令：查看/切换模型（实现见 modelcmd.go）。
 	// TUI 下输入 /model 会额外弹出 ↑↓ 选择器（见 tui.go 的 modelPickerActive 分支）。
 	a.Commands.Register(newModelCommand(
@@ -790,6 +740,8 @@ func main() {
 				log.Printf("/model 持久化失败: %v", err)
 				return "", fmt.Errorf("模型已切换为 %s 但写入配置失败: %w", name, err)
 			}
+			// 若当前生效的是收藏夹里的 provider，把模型名同步进去（下次 use 时恢复）
+			syncActiveProviderModel(client.Model)
 			return fmt.Sprintf("✓ 模型已切换: %s → %s", old, name), nil
 		},
 	))
@@ -810,7 +762,7 @@ func main() {
 			}
 			old := client.APIKey
 			client.APIKey = args
-			// 持久化
+			// 持久化（并同步当前生效 provider 收藏项）
 			cfg, _ := config.Load(config.DefaultPath())
 			cfg.BaseURL = client.BaseURL
 			cfg.Model = client.Model
@@ -818,6 +770,9 @@ func main() {
 			cfg.ContextWindow = *ctxWindow
 			cfg.ThinkingLevel = client.ThinkingEnabled()
 			cfg.UserAgent = client.UserAgent()
+			if p := cfg.FindProvider(cfg.ActiveProvider); p != nil {
+				p.APIKey = client.APIKey
+			}
 			if err := config.Save(config.DefaultPath(), cfg); err != nil {
 				log.Printf("/apikey 持久化失败: %v", err)
 			}
@@ -1807,6 +1762,7 @@ func main() {
 	if *serve {
 		cfg := server.NewConfig(*addr, *token)
 		cfg.SetAll(*httpOn, *rpcOn, *wsOn)
+		cfg.Version = version
 		// Web UI：启用 + 登录鉴权（密码优先取配置，空则随机生成并写回）
 		webCfg := &config.WebConfig{}
 		diskCfg, _ := config.Load(config.DefaultPath())

@@ -12,9 +12,30 @@
   const settingsBtn = $("settingsBtn"), settingsModal = $("settings"), settingsClose = $("settingsClose");
   const settingsSave = $("settingsSave"), settingsMsg = $("settingsMsg"), refreshModels = $("refreshModels");
   const qkModel = $("qkModel"), qkThinking = $("qkThinking"), quickMsg = $("quickMsg");
+  const brandVer = $("brandVer"), statusbar = $("statusbar"), queueMode = $("queueMode"), queueLabel = $("queueLabel");
+  const providerSelect = $("providerSelect"), providerUse = $("providerUse"), providerDel = $("providerDel");
+  const providerCurrent = $("providerCurrent"), providerHint = $("providerHint"), providerAdd = $("providerAdd");
+  const pvName = $("pvName"), pvURL = $("pvURL"), pvKey = $("pvKey"), pvModel = $("pvModel");
 
   let mode = "chat";   // chat | agent
-  let busy = false;
+  // busyConv：当前正在跑一轮的会话 id（null=空闲）。用它代替全局 busy，
+  // 这样切换到别的会话时不会「假忙碌」，也避免不同会话的流式增量互相串台。
+  let busyConv = null;
+  // 打断/排队模式：true=打断（等待期间发送=注入当前循环），false=排队（本轮结束再发）。
+  // 默认打断，选择持久化到 localStorage。
+  let interruptMode = true;
+  try { interruptMode = localStorage.getItem("mizar-queue-mode") !== "1"; } catch (e) {}
+  function isBusy() { return busyConv !== null && busyConv === curConv; }
+  function applyQueueToggle() {
+    if (!queueMode) return;
+    queueMode.checked = interruptMode;
+    if (queueLabel) queueLabel.textContent = interruptMode ? "打断" : "排队";
+    if (queueMode.parentElement) {
+      queueMode.parentElement.title = interruptMode
+        ? "打断模式（默认）：等待期间发送的消息会注入当前循环纠正它"
+        : "排队模式：消息排队，本轮结束后自动发送";
+    }
+  }
   let ws = null;
   let history = [];      // 输入历史
   let historyIndex = 0;  // 历史指针
@@ -365,8 +386,13 @@
     loginView.classList.add("hidden");
     appView.classList.remove("hidden");
     setModelTag(j.model);
+    if (brandVer && j.version) {
+      brandVer.textContent = j.version;
+      document.title = "开阳 Mizar " + j.version;
+    }
     input.focus();
     connectWS();
+    startStatusPoll();
     loadSettings(j.settings);
     loadConversations(true);
   }
@@ -441,6 +467,8 @@
     collapseOnMobile();
     clearLog();
     resetTurn();
+    // 中止按钮只反映「当前会话是否正在运行」，切到别的会话时隐藏，避免误以为卡住
+    abortBtn.classList.toggle("hidden", busyConv === null);
     try {
       const j = await api("/web/api/conversation?id=" + encodeURIComponent(id));
       const c = j.conversation;
@@ -511,6 +539,51 @@
   });
   newConvBtn.addEventListener("click", createConv);
 
+  // ---------- 状态栏（对齐 TUI 状态栏） ----------
+  // 每 1.5s 拉一次 /web/api/status；运行中加密到 700ms 以内（由服务端 running 决定）。
+  let statusTimer = null;
+  function startStatusPoll() {
+    if (statusTimer) return;
+    const tick = async () => {
+      try {
+        const q = curConv ? ("?id=" + encodeURIComponent(curConv)) : "";
+        const j = await api("/web/api/status" + q);
+        renderStatus(j);
+        // 运行中更快刷新速度/上下文
+        statusTimer = setTimeout(tick, j && j.running ? 700 : 1500);
+      } catch (e) {
+        statusTimer = setTimeout(tick, 3000);
+      }
+    };
+    tick();
+  }
+  function fmtTok(v) {
+    v = v || 0;
+    if (v < 1000) return String(v);
+    if (v < 1e6) return (v / 1000).toFixed(1) + "k";
+    return (v / 1e6).toFixed(1) + "M";
+  }
+  function renderStatus(j) {
+    if (!statusbar) return;
+    const seg = [];
+    const t = j.tokens || {};
+    seg.push('<span class="seg"><span class="k">tokens: </span><span class="v">' + fmtTok(t.total) +
+      '</span><span class="k">(in:' + fmtTok(t.in) + ' out:' + fmtTok(t.out) + ')</span></span>');
+    const ctx = j.context || {};
+    if (ctx.limit > 0) {
+      const pct = ctx.pct || 0;
+      const cls = pct > 80 ? "red" : pct > 60 ? "yellow" : "green";
+      seg.push('<span class="seg"><span class="k">上下文: </span><span class="v ' + cls + '">' + pct.toFixed(0) + '%</span></span>');
+    }
+    const cacheTxt = t.have_cache ? ((t.cache_hit || 0).toFixed(0) + "%") : "-";
+    seg.push('<span class="seg"><span class="k">缓存: </span><span class="v">' + cacheTxt + '</span></span>');
+    const sp = j.speed || 0;
+    seg.push('<span class="seg"><span class="v ' + (sp > 0 ? "yellow" : "") + '">' + (sp > 0 ? sp.toFixed(0) + " tok/s" : ". tok/s") + '</span></span>');
+    seg.push('<span class="seg"><span class="v teal">' + esc(j.model || "") + '</span></span>');
+    seg.push('<span class="seg"><span class="k">思考: </span><span class="v">' + esc(j.thinking || "auto") + '</span></span>');
+    statusbar.innerHTML = seg.join('<span class="sep">|</span>');
+  }
+
   // ---------- WebSocket 事件 ----------
   function connectWS() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -519,6 +592,9 @@
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.type !== "event") return;
+      // 会话过滤：服务端事件携带 conversation_id。当前打开的会话与之不符时丢弃，
+      // 修复「切到新会话后，旧运行（或新会话收到的）流式内容出现在别的会话窗口」的串台。
+      if (m.conversation_id != null && m.conversation_id !== "" && m.conversation_id !== curConv) return;
       if (m.event === "tool_call") {
         onToolCall(m.tool, m.args);
       } else if (m.event === "tool_result") {
@@ -596,8 +672,11 @@
   }
 
   // ---------- 发送 ----------
-  // 忙碌中发送的消息 = 后台纠偏（steer）：注入当前循环，页面不做额外展示。
-  // 若循环已结束（服务端 running=false），暂存到 pendingQueue，待本轮收尾后自动补发为新任务。
+  // 等待期间再发送的处理方式（由发送按钮上方的开关控制）：
+  //   - 打断模式（默认）：Agent 模式 → 注入当前循环做实时纠偏（steer）；
+  //     普通对话模式无循环可注入，自动降级为排队。
+  //   - 排队模式：消息进 pendingQueue，本轮结束后自动补发为新任务。
+  // 服务端若已无活跃循环（running=false）也会自动降级为排队，避免消息被静默丢弃。
   let pendingQueue = [];
   async function send() {
     const text = input.value.trim();
@@ -607,62 +686,73 @@
     historySaved = "";
     input.value = "";
     autoGrow();
-    if (busy) {
-      // Agent 模式：等待期间发送 = 后台纠偏（steer），注入当前循环，页面不做展示。
-      // 普通对话模式无循环可注入，直接排队，本轮结束后自动补发。
-      if (mode !== "agent") { pendingQueue.push(text); flashQuick("已排队，本轮结束后自动发送"); return; }
+    const convId = curConv;
+    if (busyConv !== null) {
+      // 正在跑一轮。若该轮属于别的会话（Agent 单实例），打断会串台 → 一律排队。
+      const runningHere = busyConv === convId;
+      if (!interruptMode || mode !== "agent" || !runningHere) {
+        pendingQueue.push({ text: text, conv: convId });
+        flashQuick("已排队，本轮结束后自动发送");
+        return;
+      }
       try {
         const j = await api("/web/api/steer", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: text }),
+          body: JSON.stringify({ content: text, conversation_id: convId }),
         });
-        if (j && j.running === false) { pendingQueue.push(text); flashQuick("已排队，本轮结束后自动发送"); }
+        if (j && j.running === false) { pendingQueue.push({ text: text, conv: convId }); flashQuick("已排队，本轮结束后自动发送"); }
         else flashQuick("已发送纠正，后台生效");
-      } catch (e) { pendingQueue.push(text); flashQuick("已排队，本轮结束后自动发送"); }
+      } catch (e) { pendingQueue.push({ text: text, conv: convId }); flashQuick("已排队，本轮结束后自动发送"); }
       return;
     }
     await runTurn(text);
   }
   // runTurn 执行一轮完整对话（用户消息 → 最终答复）。
-  async function runTurn(text) {
+  async function runTurn(text, targetConv) {
+    if (targetConv && targetConv !== curConv) curConv = targetConv;
     if (!curConv) await createConv();
+    const myConv = curConv;
     newTurn();
     addUserMsg(text);
-    busy = true;
-    // 注意：不禁用发送按钮——等待期间用户可继续发送消息，作为后台纠偏注入当前循环。
+    busyConv = myConv;
+    // 注意：不禁用发送按钮——等待期间用户可继续发送消息（打断/排队）。
     abortBtn.classList.remove("hidden");
-    const item = convs.find((c) => c.id === curConv);
+    const item = convs.find((c) => c.id === myConv);
     if (item && (item.title === "新会话" || !item.title)) { item.title = text.slice(0, 24); renderConvList(); }
 
     try {
       const j = await api(mode === "chat" ? "/web/api/chat" : "/web/api/run", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: curConv, message: text }),
+        body: JSON.stringify({ conversation_id: myConv, message: text }),
       });
-      // 最终答复覆盖 .text 容器：步骤保持，仅替换正文
-      const textEl = streamBody || ensureReply();
-      const wrap = textEl.parentElement.parentElement;
-      wrap.__raw = j.reply || streamBuf || "";
-      textEl.innerHTML = md(j.reply || streamBuf || "(空)");
+      // 用户可能已切换到别的会话：此时当前 DOM 已不属于本轮，跳过渲染（服务端已落盘）。
+      if (curConv === myConv) {
+        const textEl = streamBody || ensureReply();
+        const wrap = textEl.parentElement.parentElement;
+        wrap.__raw = j.reply || streamBuf || "";
+        textEl.innerHTML = md(j.reply || streamBuf || "(空)");
+      }
     } catch (e) {
-      const body = ensureReply();
-      const wrap = body.parentElement.parentElement;
-      wrap.className = "msg error";
-      wrap.__raw = "⚠ " + e.message;
-      body.innerHTML = md("⚠ " + e.message);
-    } finally { finish(); }
+      if (curConv === myConv) {
+        const body = ensureReply();
+        const wrap = body.parentElement.parentElement;
+        wrap.className = "msg error";
+        wrap.__raw = "⚠ " + e.message;
+        body.innerHTML = md("⚠ " + e.message);
+      }
+    } finally { finish(myConv); }
   }
-  function finish() {
-    finalizeTurn();
-    busy = false;
+  function finish(myConv) {
+    if (curConv === myConv) finalizeTurn();
+    busyConv = null;
     abortBtn.classList.add("hidden");
     input.focus();
     api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
-    // 本轮期间未被循环消费的纠正消息：自动作为新任务补发（页面上就是新一轮对话）。
-    if (pendingQueue.length) {
-      const next = pendingQueue.join("\n");
-      pendingQueue = [];
-      runTurn(next);
+    // 本轮期间未被循环消费/排队的消息：只补发属于本会话的，其余留在队列里等各自会话。
+    const mine = pendingQueue.filter((it) => it.conv === myConv);
+    if (mine.length) {
+      pendingQueue = pendingQueue.filter((it) => it.conv !== myConv);
+      runTurn(mine.map((it) => it.text).join("\n"), myConv);
     }
   }
   // 短暂提示（复用快捷栏的 quickMsg 区域）
@@ -697,6 +787,15 @@
   abortBtn.addEventListener("click", async () => {
     await fetch("/web/api/abort", { method: "POST", credentials: "same-origin" }).catch(() => {});
   });
+  // 打断/排队开关
+  if (queueMode) {
+    applyQueueToggle();
+    queueMode.addEventListener("change", () => {
+      interruptMode = queueMode.checked;
+      try { localStorage.setItem("mizar-queue-mode", interruptMode ? "0" : "1"); } catch (e) {}
+      applyQueueToggle();
+    });
+  }
   function autoGrow() {
     // 固定 5 行高度（由 CSS min-height 控制），超过则纵向滚动
     input.style.height = "";
@@ -729,6 +828,7 @@
   }
   function openSettings() {
     api("/web/api/settings").then((j) => { loadSettings(j.settings); setModelTag(j.model); }).catch(() => {});
+    loadProviders();
     settingsModal.classList.remove("hidden");
   }
   settingsBtn.addEventListener("click", openSettings);
@@ -794,7 +894,94 @@
   qkThinking.addEventListener("change", () => quickSave({ thinking: qkThinking.value }));
   qkModel.addEventListener("change", () => quickSave({ model: qkModel.value.trim() }));
 
+  // ---------- 供应商收藏夹 ----------
+  async function loadProviders() {
+    try {
+      const j = await api("/web/api/providers");
+      renderProviders(j);
+    } catch (e) { if (providerHint) providerHint.textContent = "加载失败：" + e.message; }
+  }
+  function renderProviders(j) {
+    if (!providerSelect) return;
+    const list = j.providers || [];
+    providerSelect.innerHTML = "";
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = list.length ? "— 选择供应商 —" : "（暂无收藏，请在下方添加）";
+    providerSelect.appendChild(opt0);
+    list.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p.name;
+      o.textContent = p.name + "  (" + p.base_url + ")";
+      o.dataset.url = p.base_url;
+      o.dataset.model = p.model || "";
+      providerSelect.appendChild(o);
+    });
+    if (j.active) providerSelect.value = j.active;
+    else if (j.current) {
+      // 未收藏当前供应商时，提示可保存
+    }
+    if (providerCurrent) {
+      const cur = j.current || {};
+      providerCurrent.textContent = "当前生效：" + (cur.base_url || "—") + (cur.model ? "  ·  " + cur.model : "");
+    }
+    if (providerHint) providerHint.textContent = list.length ? ("共 " + list.length + " 个收藏") : "";
+  }
+  async function providerAction(body, okMsg) {
+    if (providerHint) providerHint.textContent = "处理中…";
+    try {
+      const j = await api("/web/api/providers", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      renderProviders(j);
+      if (providerHint) providerHint.textContent = okMsg;
+      // 同步模型显示
+      if (j.current && j.current.model) { setModelTag(j.current.model); qkModel.value = j.current.model; setModel.value = j.current.model; }
+      return j;
+    } catch (e) {
+      if (providerHint) providerHint.textContent = "✗ " + e.message;
+      return null;
+    }
+  }
+  if (providerAdd) providerAdd.addEventListener("click", async () => {
+    const name = pvName.value.trim(), url = pvURL.value.trim();
+    if (!name || !url) { providerHint.textContent = "名称与 baseURL 必填"; return; }
+    const j = await providerAction({ action: "add", name, base_url: url, api_key: pvKey.value.trim(), model: pvModel.value.trim() }, "✓ 已收藏");
+    if (j) { pvKey.value = ""; pvName.value = ""; pvURL.value = ""; pvModel.value = ""; }
+  });
+  if (providerUse) providerUse.addEventListener("click", async () => {
+    const name = providerSelect.value;
+    if (!name) { providerHint.textContent = "请先选择一个供应商"; return; }
+    await providerAction({ action: "use", name }, "✓ 已切换到 " + name);
+  });
+  if (providerDel) providerDel.addEventListener("click", async () => {
+    const name = providerSelect.value;
+    if (!name) { providerHint.textContent = "请先选择一个供应商"; return; }
+    if (!confirm("删除供应商 " + name + "？（不影响当前生效配置）")) return;
+    await providerAction({ action: "del", name }, "✓ 已删除 " + name);
+  });
+  if (providerSelect) providerSelect.addEventListener("change", () => {
+    const o = providerSelect.selectedOptions[0];
+    if (o && o.dataset.url) {
+      pvName.value = o.value;
+      pvURL.value = o.dataset.url;
+      pvModel.value = o.dataset.model || "";
+      pvKey.value = "";
+    }
+  });
+
   // ---------- 启动 ----------
+  // 登录页也显示版本号（无需鉴权）
+  fetch("/web/api/version", { credentials: "same-origin" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      if (!j || !j.version) return;
+      document.title = "开阳 Mizar " + j.version;
+      const sub = document.querySelector(".login-card .sub");
+      if (sub) sub.textContent = "Agent Web UI · " + j.version;
+    })
+    .catch(() => {});
   setMode("chat");
   checkAuth();
 })();

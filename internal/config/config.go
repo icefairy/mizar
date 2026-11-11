@@ -48,6 +48,92 @@ type Config struct {
 	MCPServers []engine.MCPServerConf `json:"mcp_servers,omitempty"`
 	// Web Web UI 配置（-serve 模式下提供网页界面 + 登录鉴权）。
 	Web *WebConfig `json:"web,omitempty"`
+	// Providers 记住过的 LLM 供应商（可多条：家里直连 / 外部隧道代理 / 其它上游）。
+	// BaseURL/APIKey/Model 始终是「当前生效」的值，本列表只是收藏夹 + 便捷切换。
+	Providers []Provider `json:"providers,omitempty"`
+	// ActiveProvider 当前生效的 provider 名字（空=未使用收藏机制）。
+	ActiveProvider string `json:"active_provider,omitempty"`
+}
+
+// Provider 一个已记住的 LLM 供应商配置。
+type Provider struct {
+	Name          string `json:"name"`                     // 引用名（/provider use <name>）
+	BaseURL       string `json:"base_url"`                 // OpenAI 兼容端点
+	APIKey        string `json:"api_key,omitempty"`        // Bearer token
+	Model         string `json:"model,omitempty"`          // 该 provider 偏好模型（空=沿用当前）
+	ContextWindow int    `json:"context_window,omitempty"` // 该 provider 的上下文窗口（0=不改）
+}
+
+// FindProvider 按名字查找 provider（不区分大小写）。
+func (c *Config) FindProvider(name string) *Provider {
+	if c == nil || name == "" {
+		return nil
+	}
+	for i := range c.Providers {
+		if strings.EqualFold(c.Providers[i].Name, name) {
+			return &c.Providers[i]
+		}
+	}
+	return nil
+}
+
+// UpsertProvider 新增或覆盖同名 provider（返回归一化后的名字）。
+func (c *Config) UpsertProvider(p Provider) string {
+	if c == nil {
+		return ""
+	}
+	if p.Name == "" {
+		p.Name = deriveProviderName(p.BaseURL)
+	}
+	for i := range c.Providers {
+		if strings.EqualFold(c.Providers[i].Name, p.Name) {
+			c.Providers[i] = p
+			return c.Providers[i].Name
+		}
+	}
+	c.Providers = append(c.Providers, p)
+	return p.Name
+}
+
+// RemoveProvider 删除 provider，返回是否存在。
+func (c *Config) RemoveProvider(name string) bool {
+	if c == nil {
+		return false
+	}
+	for i := range c.Providers {
+		if strings.EqualFold(c.Providers[i].Name, name) {
+			c.Providers = append(c.Providers[:i], c.Providers[i+1:]...)
+			if strings.EqualFold(c.ActiveProvider, name) {
+				c.ActiveProvider = ""
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// DeriveProviderName 从 baseURL 推导 provider 名（host 去掉常见前缀，失败用 custom）。
+func DeriveProviderName(baseURL string) string { return deriveProviderName(baseURL) }
+
+func deriveProviderName(baseURL string) string {
+	s := strings.TrimSpace(baseURL)
+	if s == "" {
+		return "custom"
+	}
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	// 去掉端口
+	if i := strings.LastIndex(s, ":"); i > 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "custom"
+	}
+	return s
 }
 
 // WebConfig Web UI 配置。
@@ -126,6 +212,12 @@ func Save(path string, c *Config) error {
 }
 
 // Load 读取配置；文件不存在返回空配置（不报错），损坏返回错误。
+//
+// 向后兼容 + 自动升级：旧版配置只有单个 BaseURL/APIKey/Model，新版引入
+// providers 收藏夹。Load 时若发现「有 base_url 但没有 providers」，自动把当前
+// 配置登记为一条 provider（名字由 host 推导）并设为 active，然后原地写回文件；
+// 写回前先把原文件备份为 <path>.bak（仅当备份不存在时），保证旧版仍可回退使用。
+// 新版读取旧文件完全兼容（缺字段按零值处理），旧版读取新版文件也只是忽略新增字段。
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -138,7 +230,60 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("解析配置 %s: %w", path, err)
 	}
+	if c.upgradeLegacy() {
+		// 备份一次原文件（不覆盖已有备份，避免把用户最早的格式丢掉）
+		bak := path + ".bak"
+		if _, err := os.Stat(bak); os.IsNotExist(err) {
+			_ = os.WriteFile(bak, data, 0o600)
+		}
+		if err := Save(path, c); err != nil {
+			// 升级写回失败不阻断使用：内存里的配置已经可用
+			return c, nil
+		}
+	}
 	return c, nil
+}
+
+// upgradeLegacy 把「单供应商」旧配置迁移到 providers 收藏夹。
+// 返回是否发生了迁移（true = 需要写回文件）。
+//
+// 规则：
+//   - 有 providers → 不动（已升级过；active 为空时按 base_url 匹配补上）
+//   - 无 providers 且有 base_url → 用 base_url 推导名字，登记为第一条 provider
+//   - 无 providers 且无 base_url → 不动（尚未配置，等 wizard/用户填）
+func (c *Config) upgradeLegacy() bool {
+	if c == nil {
+		return false
+	}
+	if len(c.Providers) > 0 {
+		// 已有收藏夹：尽量把 active 补齐（老文件可能只有 providers 没有 active）
+		if c.ActiveProvider == "" {
+			for _, p := range c.Providers {
+				if strings.EqualFold(p.BaseURL, c.BaseURL) {
+					c.ActiveProvider = p.Name
+					return true
+				}
+			}
+			if c.BaseURL != "" {
+				c.ActiveProvider = c.Providers[0].Name
+				return true
+			}
+		}
+		return false
+	}
+	if strings.TrimSpace(c.BaseURL) == "" {
+		return false
+	}
+	name := deriveProviderName(c.BaseURL)
+	c.Providers = []Provider{{
+		Name:          name,
+		BaseURL:       c.BaseURL,
+		APIKey:        c.APIKey,
+		Model:         c.Model,
+		ContextWindow: c.ContextWindow,
+	}}
+	c.ActiveProvider = name
+	return true
 }
 
 // ============================================================================

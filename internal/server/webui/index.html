@@ -38,7 +38,7 @@
   <div class="main">
     <header class="topbar">
       <button id="menuBtn" class="ghost only-mobile" type="button">☰</button>
-      <div class="brand">开阳 · Mizar</div>
+      <div class="brand">开阳 · Mizar<span id="brandVer" class="ver"></span></div>
       <div class="modes">
         <button id="modeChat" class="mode active" type="button">普通对话</button>
         <button id="modeAgent" class="mode" type="button">Agent 模式</button>
@@ -53,6 +53,8 @@
     <main id="log" class="log"></main>
 
     <footer class="composer">
+      <!-- 状态栏（对齐 TUI 状态栏：tokens / 上下文 / 缓存 / 速度 / 模型 / 思考） -->
+      <div id="statusbar" class="statusbar"></div>
       <!-- 快捷参数行：模型 + 思考等级 -->
       <div class="quickbar">
         <label class="qk">
@@ -73,7 +75,14 @@
       </div>
       <div class="input-row">
         <textarea id="input" rows="5" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
-        <button id="sendBtn" type="button">发送</button>
+        <div class="send-col">
+          <label id="queueToggle" class="qtoggle" title="默认打断模式：等待期间发送的消息会注入当前循环纠正它。取消勾选→排队模式：消息排队到本轮结束后再发送。">
+            <input id="queueMode" type="checkbox" spellcheck="false">
+            <span class="qtrack"><span class="qknob"></span></span>
+            <span id="queueLabel" class="qlabel">打断</span>
+          </label>
+          <button id="sendBtn" type="button">发送</button>
+        </div>
       </div>
     </footer>
   </div>
@@ -87,6 +96,28 @@
       <button id="settingsClose" class="ghost" type="button">✕</button>
     </div>
     <div class="modal-body">
+      <div class="field">
+        <span>供应商（可收藏多个：家里直连 / 隧道代理 / 其它上游）</span>
+        <div class="row">
+          <select id="providerSelect"></select>
+          <button id="providerUse" class="ghost" type="button">切换</button>
+          <button id="providerDel" class="ghost" type="button">删除</button>
+        </div>
+        <div id="providerCurrent" class="hint"></div>
+      </div>
+
+      <div class="field">
+        <span>新增 / 更新供应商</span>
+        <div class="pform">
+          <input id="pvName" type="text" placeholder="名称（如 home / tunnel）">
+          <input id="pvURL" type="text" placeholder="baseURL（如 https://api.deepseek.com/v1）">
+          <input id="pvKey" type="password" placeholder="apiKey（留空=不改已有）">
+          <input id="pvModel" type="text" placeholder="默认模型（可留空）">
+          <button id="providerAdd" class="ghost" type="button">保存收藏</button>
+        </div>
+        <small id="providerHint" class="hint"></small>
+      </div>
+
       <label class="field">
         <span>模型</span>
         <div class="row">

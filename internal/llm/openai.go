@@ -1383,6 +1383,18 @@ func (o *OpenAI) ModelName() string {
 	return o.Model
 }
 
+// SetEndpoint 运行时切换供应商端点（baseURL + apiKey）。线程安全由调用方保证
+// （进程级设置，低频；通常在空闲时切换）。apiKey 传空表示该供应商无需鉴权。
+func (o *OpenAI) SetEndpoint(baseURL, apiKey string) {
+	if baseURL != "" {
+		o.BaseURL = strings.TrimSuffix(baseURL, "/")
+	}
+	o.APIKey = apiKey
+}
+
+// Endpoint 返回当前 baseURL 与 apiKey（与 Info 等价，语义更明确）。
+func (o *OpenAI) Endpoint() (string, string) { return o.BaseURL, o.APIKey }
+
 // SetModel 运行时切换模型（Web UI 用）。线程安全由调用方保证（进程级设置，低频）。
 func (o *OpenAI) SetModel(m string) {
 	if m != "" {
