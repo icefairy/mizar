@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.7.4</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.7.5</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -147,6 +147,12 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.7.5 · 动手前先问清楚 + 拖选即复制 + 状态栏自适应</h3>
+          <p><strong>拷问模式 <code>/grill</code></strong>：与 <code>/plan</code>（解决「怎么做」）互补、可叠加——先复述理解，再用 <code>ask_user_question</code> 逐层追问（每轮 ≤3 问、每题带编号选项，点编号即答），只问能改变结论的问题（<strong>目标/验收 &gt; 非目标 &gt; 约束 &gt; 失败回滚 &gt; 权限</strong>），措辞命名类禁止问；<strong>拷问期间禁止改代码</strong>；收敛条件是「能写出可验证的完成定义 / 用户说够了 / 3 轮关键提问」，收敛后输出「确认清单 + 风险与默认假设 + 下一步」并停下等指令。模式开关现在会让 system prompt 缓存失效（<code>PlanMode</code>/<code>GrillMode</code> 带版本号），退出后不再按老提示运行；<code>IsModeExitArg</code> 统一收口 <code>exit/off/stop/quit/end/close/退出/关闭/结束/取消</code>，不会「又进入一次」。</p>
+          <p><strong>鼠标拖选即复制</strong>：左键拖动即选中、松开自动进剪贴板，双击选整行、Esc 只清选区、拖出边界自动滚动。<strong>选区按屏幕坐标记录并按屏幕单元格取字</strong>（tview 的 uniseg 折行 + CJK 双宽自己再算必然差一列），高亮用 <code>AfterDrawFunc</code> 反色叠加（流式 60ms 全量重绘冲不掉），滚动时按 <code>GetScrollOffset</code> 差值补偿；<code>Shift+拖拽</code> 一律放行给终端原生选择。修掉两处真实缺陷：<code>MouseCapture</code> 内调 <code>QueueUpdateDraw</code> 会「自己等自己」死锁（改返回 consumed 交给 tview 重画），外部剪贴板工具在无显示服务时可能永久挂住事件循环（<strong>2s 超时 + <code>cmd.WaitDelay</code></strong>，后者是关键——子进程持有 stdin 管道时光 kill 主进程仍会挂）。</p>
+          <p><strong>状态栏自适应</strong>：不再写死两行——<code>measureRows</code> 借 tview 自己的排版结果量行数，<code>syncBarHeight</code> 仅在行数变化时 <code>ResizeItem</code>；终端缩放由 <code>SetBeforeDrawFunc</code> 检测重算，单条上限 3 行且 ≤ 屏高 1/6。第一行新增<strong>常驻模式指示</strong>（正常 green / 计划 aqua / 拷问 yellow / 叠加 fuchsia——模式会让模型行为整体改变，没有常驻指示只能从话术猜）与 <strong>MCP 统计</strong>（<code>MCP 2/3</code>，已连/配置，连接惰性建立）。另有 <code>/mcp list</code>、<code>/templates</code> 占位符清单、<code>/plan status</code>、<code>/grill status</code>。</p>
+        </div>
         <div class="card">
           <h3>v0.7.4 · 工具失败不再拖垮进程 + 读不了就自己造工具</h3>
           <p><strong>起因</strong>：一份 WPS 导出的中文简历 PDF 读不出来，结果<strong>整个 mizar 进程直接退出</strong>。排查发现不是 PDF 一个点，而是整条工具链缺少崩溃隔离——Go 里有两类错误 <code>recover()</code> 根本救不了：<strong>goroutine 内 panic</strong> 与<strong>栈溢出</strong>。本版把六处无兜底的 goroutine（<code>CallCommand</code>、RPC 调用、<code>jobs</code> 后台任务、MCP <code>readLoop</code>、<code>Hooks.fire</code>、<code>Agent.Run</code>）全部补上 <code>recover</code>，并挖出 PDF 解析里 6 个真·杀手：<code>readArray</code> 把 <code>io.EOF</code> 当普通元素导致<strong>死循环 + 内存无限增长</strong>（未闭合数组 <code>[1 2 3</code> 即可触发，实测卡死 8s 以上）、对象递归无深度限制导致<strong>栈溢出</strong>（fatal，recover 无效）、predictor 用 goroutine + <code>io.Pipe</code> 导致生产者 panic 不可捕获、<code>/Kids</code> 自引用无限递归、未知滤镜直接 panic、<code>/W</code>‧<code>/Size</code>‧<code>/Length</code> 可伪造触发巨量分配。DOCX/XLSX 同步补 recover + zip 炸弹 64MB 上限 + 超大表格输出截断。</p>

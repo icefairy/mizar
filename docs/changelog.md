@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+（暂无）
+
+## [v0.7.5] — 2026-11-11
+
+> 主题：**动手前先问清楚（`/grill`）+ 鼠标拖选即复制 + 状态栏跟着终端宽度走**。
+> 三件事分别对应「怎么想」「怎么用」「怎么看」：拷问模式把需求问到没有歧义再动手，
+> 拖选让复制不再依赖 Shift 或终端原生选择，状态栏按宽度自动折行、
+> 并常驻显示当前处在哪个模式（以及 MCP 连接数）。
+
 ### ✨ 新增
 
 - **`/grill` 拷问模式（默认提示词内置）**：动手前先把需求问到没有歧义，与 `/plan`（解决「怎么做」）
@@ -66,6 +75,18 @@
   新增 `Registry.Dirs()` 与 `Template.Placeholders()`。
 - `engine.MCPRegistry` 新增 `Stats()` / `Connected()`（并发安全，供状态栏与 `/mcp list` 查询）。
 - `clipboard` 新增 `peek()`（只读内部缓冲）——测试断言「刚复制的内容」不能被系统剪贴板干扰。
+
+### 🧪 测试
+
+- `internal/agent/grill_test.go`：拷问模式进出、`IsModeExitArg` 的十种退出写法、
+  提示词与计划模式的注入顺序与缓存版本。
+- `cmd/mizar/selection_test.go`（342 行）：屏幕坐标选区、CJK 双宽取字、双击整行、
+  滚动补偿，以及 `TestMouseDragEndToEndNotBlocking`（SimulationScreen 端到端，
+  断言抬起鼠标不阻塞事件循环）。
+- `cmd/mizar/statusbar_wrap_test.go` / `statusbar_screen_test.go`：`measureRows`
+  与 tview 实际排版一致、行数变化才重排、极窄窗口不挤掉聊天区。
+- `cmd/mizar/mcp_list_test.go`：`/mcp list` 无配置 / 有配置 / 未连接三种输出。
+- **`version` 提升到 v0.7.5**（`cmd/mizar/main.go`），`index.html` 版本徽章同步。
 
 ## [v0.7.4] — 2026-11-10
 
