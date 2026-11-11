@@ -13,6 +13,7 @@
   const settingsSave = $("settingsSave"), settingsMsg = $("settingsMsg"), refreshModels = $("refreshModels");
   const qkModel = $("qkModel"), qkThinking = $("qkThinking"), quickMsg = $("quickMsg");
   const brandVer = $("brandVer"), statusbar = $("statusbar"), queueMode = $("queueMode"), queueLabel = $("queueLabel");
+  const queueBar = $("queueBar");
   const providerSelect = $("providerSelect"), providerUse = $("providerUse"), providerDel = $("providerDel");
   const providerCurrent = $("providerCurrent"), providerHint = $("providerHint"), providerAdd = $("providerAdd");
   const pvName = $("pvName"), pvURL = $("pvURL"), pvKey = $("pvKey"), pvModel = $("pvModel");
@@ -489,6 +490,9 @@
     collapseOnMobile();
     clearLog();
     resetTurn();
+    renderQueueBar();
+    if (askState) closeAsk();
+    restorePendingAsks();
     // 中止按钮只反映「当前会话是否正在运行」，切到别的会话时隐藏，避免误以为卡住
     abortBtn.classList.toggle("hidden", busyConv === null);
     try {
@@ -535,6 +539,7 @@
       renderConvList();
       clearLog();
       resetTurn();
+      renderQueueBar();
       collapseOnMobile();
       input.focus();
     } catch (e) { addMsg("error", "错误", e.message); }
@@ -637,9 +642,14 @@
         onToolResult(m.tool, m.result);
       } else if (m.event === "stream") {
         handleStream(m.step, m.delta, m.kind);
+      } else if (m.event === "ask_user") {
+        showAsk(m.id, m.questions, m.conversation_id);
+      } else if (m.event === "ask_close") {
+        closeAsk(m.id);
       }
     };
     ws.onclose = () => { ws = null; };
+    ws.onopen = () => { restorePendingAsks(); };
   }
 
   // 工具调用：追加到答复框的步骤容器（累加可见）
@@ -707,16 +717,206 @@
     streamBody = null; streamBuf = ""; thinkStepEl = null; thinkStepBuf = ""; streamStep = -1; stepsBody = null;
   }
 
+  // ---------- ask_user_question 弹窗 ----------
+  // 模型调用 ask_user_question / exit_plan_mode 时，服务端广播 ask_user 事件并
+  // 阻塞等待；这里弹窗让用户选，选完 POST /web/api/answer 回填。
+  // ⚠ 不设超时：用户可能很久才回来看，题目过期比多等更糟。
+  const askModal = $("askModal"), askBody = $("askBody"), askSubmit = $("askSubmit"),
+    askMsg = $("askMsg"), askTitle = $("askTitle");
+  let askState = null;   // { id, questions, picked: {qid: [labels]}, free: {qid: text} }
+
+  function showAsk(id, questions, convId) {
+    // 只处理当前会话的问题（切到别的会话时不该弹别人的问题）
+    if (convId != null && convId !== "" && convId !== curConv) return;
+    // 已有同 id 的弹窗：不重复渲染
+    if (askState && askState.id === id) return;
+    const qs = Array.isArray(questions) ? questions : [];
+    if (!qs.length) return;
+    askState = { id: id, questions: qs, picked: {}, free: {} };
+    renderAsk();
+    askTitle.textContent = qs.length > 1 ? ("需要你的选择（" + qs.length + " 个问题）") : "需要你的选择";
+    askMsg.textContent = "";
+    askModal.classList.remove("hidden");
+  }
+  function closeAsk(id) {
+    if (!askState) return;
+    if (id && askState.id !== id) return;
+    askState = null;
+    askModal.classList.add("hidden");
+  }
+  function renderAsk() {
+    if (!askState) return;
+    const qs = askState.questions;
+    let html = "";
+    qs.forEach((q, qi) => {
+      const qid = q.id || ("q" + (qi + 1));
+      const opts = Array.isArray(q.options) ? q.options : [];
+      html += '<div class="ask-q" data-qid="' + esc(qid) + '" data-multi="' + (q.multi_select ? "1" : "0") + '">';
+      html += '<div class="qhead">' +
+        (qs.length > 1 ? '<span class="qidx">' + (qi + 1) + '/' + qs.length + '</span>' : '') +
+        esc(q.question || q.header || ("问题 " + (qi + 1))) + '</div>';
+      if (q.header && q.question) html += '<div class="qdesc">' + esc(q.header) + '</div>';
+      if (opts.length) {
+        opts.forEach((o, oi) => {
+          const label = o.label || String(oi + 1);
+          html += '<label class="ask-opt"><input type="' + (q.multi_select ? "checkbox" : "radio") +
+            '" name="ask-' + esc(qid) + '" value="' + esc(label) + '">' +
+            '<span class="olabel">' + esc(label) +
+            (o.description ? '<div class="odesc">' + esc(o.description) + '</div>' : '') +
+            '</span></label>';
+        });
+      } else {
+        // 无预设选项：自由输入
+        html += '<input class="ask-free" type="text" placeholder="输入你的回答">';
+      }
+      html += '</div>';
+    });
+    askBody.innerHTML = html;
+    // 绑定选择事件（不用内联 onclick，避免 CSP/转义问题）
+    askBody.querySelectorAll('.ask-q').forEach((qEl) => {
+      qEl.querySelectorAll('input[type=radio]').forEach((el) => {
+        el.addEventListener('change', () => {
+          const qid = qEl.dataset.qid;
+          askState.picked[qid] = [el.value];
+        });
+      });
+      qEl.querySelectorAll('input[type=checkbox]').forEach((el) => {
+        el.addEventListener('change', () => {
+          const qid = qEl.dataset.qid;
+          const cur = askState.picked[qid] || [];
+          const idx = cur.indexOf(el.value);
+          if (el.checked && idx < 0) cur.push(el.value);
+          if (!el.checked && idx >= 0) cur.splice(idx, 1);
+          askState.picked[qid] = cur;
+        });
+      });
+      const free = qEl.querySelector('.ask-free');
+      if (free) {
+        free.addEventListener('input', () => { askState.free[qEl.dataset.qid] = free.value; });
+      }
+    });
+  }
+  async function submitAsk() {
+    if (!askState) return;
+    const qs = askState.questions;
+    const answers = [];
+    for (let qi = 0; qi < qs.length; qi++) {
+      const q = qs[qi];
+      const qid = q.id || ("q" + (qi + 1));
+      const opts = Array.isArray(q.options) ? q.options : [];
+      if (opts.length === 0) {
+        const txt = (askState.free[qid] || "").trim();
+        if (!txt) { askMsg.textContent = "请填写第 " + (qi + 1) + " 个问题的回答"; return; }
+        answers.push({ id: qid, value: txt });
+        continue;
+      }
+      const picked = askState.picked[qid] || [];
+      if (!picked.length) { askMsg.textContent = "请选择第 " + (qi + 1) + " 个问题的选项"; return; }
+      if (q.multi_select) answers.push({ id: qid, value: picked[0], values: picked });
+      else answers.push({ id: qid, value: picked[0] });
+    }
+    askSubmit.disabled = true;
+    askMsg.textContent = "提交中…";
+    try {
+      const j = await api("/web/api/answer", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: askState.id, answers: answers }),
+      });
+      if (j && j.ok === false) {
+        // 已被其他地方作答/或任务已取消：静默关闭，避免卡住界面
+        closeAsk();
+        flashQuick(j.reason === "already_answered" ? "该问题已被作答" : "问题已失效");
+        return;
+      }
+      closeAsk();
+      flashQuick("已提交选择");
+    } catch (e) {
+      askMsg.textContent = "提交失败: " + e.message;
+    } finally {
+      askSubmit.disabled = false;
+    }
+  }
+  if (askSubmit) askSubmit.addEventListener("click", submitAsk);
+  // Enter 提交（在自由输入框里也允许；Shift+Enter 换行不适用单行输入）
+  if (askModal) {
+    askModal.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitAsk(); }
+    });
+  }
+  // 刷新/重连后恢复未作答的问题（服务端保留 pending）
+  async function restorePendingAsks() {
+    try {
+      const j = await api("/web/api/ask");
+      const list = (j && j.pending) || [];
+      for (const p of list) showAsk(p.id, p.questions, p.conversation_id);
+    } catch (e) {}
+  }
+
   // ---------- 发送 ----------
   // 等待期间再发送的处理方式（由发送按钮上方的开关控制）：
   //   - 打断模式（默认）：Agent 模式 → 注入当前循环做实时纠偏（steer）；
   //     普通对话模式无循环可注入，自动降级为排队。
   //   - 排队模式：消息进 pendingQueue，本轮结束后自动补发为新任务。
   // 服务端若已无活跃循环（running=false）也会自动降级为排队，避免消息被静默丢弃。
-  let pendingQueue = [];
+  //
+  // 可见性：无论注入还是排队，都立刻在「排队队列」条里显示一条（含状态徽标），
+  // 直到本轮结束。此前这些消息在 WebUI 里完全不可见，用户以为丢了。
+  let pendingQueue = [];   // { id, text, conv, kind: "queue"|"steer" }
+  let queueSeq = 0;
+  function pushQueue(text, conv, kind) {
+    const id = ++queueSeq;
+    pendingQueue.push({ id: id, text: text, conv: conv, kind: kind || "queue" });
+    renderQueueBar();
+    return id;
+  }
+  function setQueueKind(id, kind) {
+    const it = pendingQueue.find((x) => x.id === id);
+    if (it) { it.kind = kind; renderQueueBar(); }
+  }
+  function dropQueue(id) {
+    pendingQueue = pendingQueue.filter((x) => x.id !== id);
+    renderQueueBar();
+  }
+  function renderQueueBar() {
+    if (!queueBar) return;
+    const mine = pendingQueue.filter((x) => x.conv === curConv);
+    if (!mine.length) { queueBar.classList.add("hidden"); queueBar.innerHTML = ""; return; }
+    const nSteer = mine.filter((x) => x.kind === "steer").length;
+    const nQueue = mine.length - nSteer;
+    let head = [];
+    if (nSteer) head.push(nSteer + " 条已注入当前任务");
+    if (nQueue) head.push(nQueue + " 条等待本轮结束后发送");
+    let html = '<div class="qhead">待处理消息 · ' + esc(head.join(" · ")) + '</div>';
+    mine.forEach((it) => {
+      html += '<div class="qitem" data-qid="' + it.id + '">' +
+        '<span class="qbadge ' + (it.kind === "steer" ? "steer" : "") + '">' +
+        (it.kind === "steer" ? "已注入" : "排队") + '</span>' +
+        '<span class="qtext" title="' + esc(it.text) + '">' + esc(it.text) + '</span>' +
+        '<button class="qdel" type="button" title="取消这条">✕</button>' +
+        '</div>';
+    });
+    queueBar.innerHTML = html;
+    queueBar.classList.remove("hidden");
+    queueBar.scrollTop = queueBar.scrollHeight;
+  }
+  if (queueBar) {
+    queueBar.addEventListener("click", (e) => {
+      const btn = e.target.closest(".qdel");
+      if (!btn) return;
+      const item = btn.closest(".qitem");
+      if (item) dropQueue(Number(item.dataset.qid));
+    });
+  }
   async function send() {
     const text = input.value.trim();
     if (!text) return;
+    // /stop：立即停止当前任务（TUI 与 WebUI 通用命令，这里直接打 abort 接口）
+    if (/^\/(stop|abort|停止|取消)$/i.test(text)) {
+      input.value = "";
+      autoGrow();
+      await requestStop();
+      return;
+    }
     history.push(text);
     historyIndex = history.length;
     historySaved = "";
@@ -727,21 +927,38 @@
       // 正在跑一轮。若该轮属于别的会话（Agent 单实例），打断会串台 → 一律排队。
       const runningHere = busyConv === convId;
       if (!interruptMode || mode !== "agent" || !runningHere) {
-        pendingQueue.push({ text: text, conv: convId });
+        pushQueue(text, convId, "queue");
         flashQuick("已排队，本轮结束后自动发送");
         return;
       }
+      const qid = pushQueue(text, convId, "queue");
       try {
         const j = await api("/web/api/steer", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: text, conversation_id: convId }),
         });
-        if (j && j.running === false) { pendingQueue.push({ text: text, conv: convId }); flashQuick("已排队，本轮结束后自动发送"); }
-        else flashQuick("已发送纠正，后台生效");
-      } catch (e) { pendingQueue.push({ text: text, conv: convId }); flashQuick("已排队，本轮结束后自动发送"); }
+        if (j && j.running === false) { flashQuick("已排队，本轮结束后自动发送"); }
+        else { setQueueKind(qid, "steer"); flashQuick("已发送纠正，后台生效"); }
+      } catch (e) { flashQuick("已排队，本轮结束后自动发送"); }
       return;
     }
     await runTurn(text);
+  }
+  // requestStop 停止当前任务：中止后台循环 + 清空本会话的待处理消息。
+  async function requestStop() {
+    const convId = curConv;
+    // 若正弹着问答框，一并关掉（服务端会返回 "[]" 让模型知道用户未作答）
+    if (askState) closeAsk();
+    // 先把本会话的排队消息清掉（停止后不应再自动补发）
+    pendingQueue = pendingQueue.filter((x) => x.conv !== convId);
+    renderQueueBar();
+    let stopped = false;
+    try {
+      const j = await api("/web/api/abort", { method: "POST" });
+      stopped = !!(j && j.ok);
+    } catch (e) {}
+    if (stopped && busyConv === convId) flashQuick("已停止当前任务");
+    else flashQuick(stopped ? "已发送停止请求（当前无运行任务）" : "停止失败");
   }
   // runTurn 执行一轮完整对话（用户消息 → 最终答复）。
   async function runTurn(text, targetConv) {
@@ -763,10 +980,24 @@
       });
       // 用户可能已切换到别的会话：此时当前 DOM 已不属于本轮，跳过渲染（服务端已落盘）。
       if (curConv === myConv) {
-        const textEl = streamBody || ensureReply();
-        const wrap = textEl.parentElement.parentElement;
-        wrap.__raw = j.reply || streamBuf || "";
-        textEl.innerHTML = md(j.reply || streamBuf || "(空)");
+        if (j && j.aborted) {
+          // 主动停止：不当作错误。保留已流式输出的部分内容，末尾补一条「已停止」提示。
+          if (streamBuf) {
+            const textEl = streamBody || ensureReply();
+            textEl.innerHTML = md(streamBuf) + "\n\n<span class=\"stopped\">⏹ 任务已停止</span>";
+          } else {
+            const body = ensureReply();
+            const wrap = body.parentElement.parentElement;
+            wrap.className = "msg sys";
+            wrap.__raw = "⏹ 任务已停止";
+            body.innerHTML = "⏹ 任务已停止";
+          }
+        } else {
+          const textEl = streamBody || ensureReply();
+          const wrap = textEl.parentElement.parentElement;
+          wrap.__raw = j.reply || streamBuf || "";
+          textEl.innerHTML = md(j.reply || streamBuf || "(空)");
+        }
       }
     } catch (e) {
       if (curConv === myConv) {
@@ -782,13 +1013,17 @@
     if (curConv === myConv) finalizeTurn();
     busyConv = null;
     abortBtn.classList.add("hidden");
+    // 本轮结束后清理属于本会话的待处理项：
+    //   - "steer"（已注入当前循环）：已被消费或已由服务端落盘，不能再补发（否则重复）；
+    //   - "queue"（排队）：本轮结束后补发为新任务。
+    const mine = pendingQueue.filter((it) => it.conv === myConv);
+    pendingQueue = pendingQueue.filter((it) => it.conv !== myConv);
+    renderQueueBar();
     input.focus();
     api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
-    // 本轮期间未被循环消费/排队的消息：只补发属于本会话的，其余留在队列里等各自会话。
-    const mine = pendingQueue.filter((it) => it.conv === myConv);
-    if (mine.length) {
-      pendingQueue = pendingQueue.filter((it) => it.conv !== myConv);
-      runTurn(mine.map((it) => it.text).join("\n"), myConv);
+    const resend = mine.filter((it) => it.kind === "queue");
+    if (resend.length) {
+      runTurn(resend.map((it) => it.text).join("\n"), myConv);
     }
   }
   // 短暂提示（复用快捷栏的 quickMsg 区域）
@@ -820,9 +1055,7 @@
       }
     }
   });
-  abortBtn.addEventListener("click", async () => {
-    await fetch("/web/api/abort", { method: "POST", credentials: "same-origin" }).catch(() => {});
-  });
+  abortBtn.addEventListener("click", requestStop);
   // 打断/排队开关
   if (queueMode) {
     applyQueueToggle();

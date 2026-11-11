@@ -981,6 +981,36 @@ func (m *tuiModel) cancelCurrentTask() {
 	m.addChatLine(chatLine{role: "err", content: "任务已取消（当前步骤结束后停止）", ts: time.Now()})
 }
 
+// stopCurrentTask 处理 /stop（/abort）命令：停止当前任务，语义与 ESC 相同，
+// 但不需要两段式确认，且在没有任务运行时给出明确提示（而非静默）。
+// 与 ESC 的区别：额外清空「待注入的纠正消息」和「排队消息」——用户既然要求停止，
+// 这些消息不应在本轮结束后又被自动补发（否则「停止」之后任务自己又跑起来）。
+func (m *tuiModel) stopCurrentTask() {
+	if !m.loading && !m.canceling.Load() {
+		m.addChatLine(chatLine{role: "err", content: "当前没有正在运行的任务", ts: time.Now()})
+		m.renderAllDirect()
+		return
+	}
+	diag.Logf("tui", "/stop → 取消任务")
+	m.agent.Abort()
+	m.agent.ClearSteer()
+	dropped := 0
+	if len(m.queue) > 0 {
+		dropped = len(m.queue)
+		m.queue = nil
+		m.renderQueue()
+	}
+	if m.loading {
+		m.canceling.Store(true) // 阻止新任务启动，直到旧任务 goroutine 真正退出
+		m.setLoading(false)
+	}
+	msg := "⏹ 任务已停止（当前步骤结束后退出）"
+	if dropped > 0 {
+		msg += fmt.Sprintf("，已丢弃 %d 条排队消息", dropped)
+	}
+	m.addChatLine(chatLine{role: "err", content: msg, ts: time.Now()})
+}
+
 // setLoading 设置加载状态（仅从事件循环调用）。loading 变化联动 spinner 启停。
 func (m *tuiModel) setLoading(loading bool) {
 	m.loading = loading
@@ -2286,6 +2316,12 @@ func (m *tuiModel) submitInput(s string) {
 			m.addChatLine(chatLine{role: "err", content: "✓ 已强制重绘整屏（Ctrl+L 同效）", ts: time.Now()})
 			return
 		}
+		// /stop（/abort）：立即停止当前任务。在事件循环内直接处理（与 ESC 同路径），
+		// 不绕 DispatchAsync——它 5s 超时且要再投递回事件循环，容易在忙时超时。
+		if s == "/stop" || s == "/abort" {
+			m.stopCurrentTask()
+			return
+		}
 		// /model（无参数）：TUI 下不打印清单，而是直接弹 ↑↓ 选择器，
 		// 省掉「看到清单后还要再手打一遍模型名」的一步。
 		// 带参数的 /model <name> 仍走命令（保留直接指定任意模型名的能力）。
@@ -2390,6 +2426,11 @@ func (m *tuiModel) deliverReminderHook() {
 		// Ctrl+L（InputCapture）与 /redraw（submitInput）都已运行在事件循环线程，
 		// 必须直接重绘；若在此处再 m.app.QueueUpdate 会与事件循环互等而死锁。
 		m.resyncRequest()
+	}
+	// /stop 由命令注册表在 goroutine 里调用（DispatchAsync），必须投递回事件循环，
+	// 因为 stopCurrentTask 会操作 m.queue / m.loading / 重绘（非线程安全）。
+	tuiStopTask = func() {
+		m.app.QueueUpdateDraw(func() { m.stopCurrentTask() })
 	}
 }
 

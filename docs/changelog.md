@@ -1,3 +1,118 @@
+## [v0.7.7] — 2026-11-11
+
+> 主题：**跨平台环境自适应 + 任务可控可感知（停止/排队/提问）**。
+> 一方面不再假设「有 bash、有 coreutils」（Android/Termux/root、精简容器、
+> PATH 被重置的 su 环境）；另一方面补齐 WebUI 的交互闭环——等待期间发的消息看得见、
+> `/stop` 一键停止任务（TUI + WebUI）、`ask_user_question` 弹窗选择（无超时）。
+> 另修复 WebUI Markdown 内容区横向滚动条（改为只纵向滚动、超宽折行）。
+
+### ✨ 新增
+
+- **`internal/caps` 能力探测包**：进程内只探测一次，输出只读快照 `caps.Env`——
+  - `Android` / `Termux` / `Root` 身份识别（`$PREFIX` 含 com.termux、`$ANDROID_ROOT`、`/system/bin/sh` 存在）；
+  - 常用用户态工具探测（awk/sed/grep/find/xargs/tar/curl/wget/git/python3/node…）；
+  - **真实可写的临时目录**（`$TMPDIR` → `os.TempDir()` → `~/.cache/mizar/tmp` → `/data/local/tmp`，
+    每级做一次写入自检——Android 上 `/tmp` 常常"存在但只读"，只看存在性会误判）；
+  - `ExtraBins`：存在但可能不在 PATH 的 bin 目录（`/system/bin`、`/system/xbin`、`/vendor/bin`、
+    Magisk `/data/adb/magisk`、KernelSU `/data/adb/ksu/bin`、APatch、Termux `$PREFIX/bin`、`/data/local/tmp`）；
+  - `Notes()`：给模型看的环境限制（Android=mksh+toybox、缺 awk、无 /tmp…）。
+- **shell 候选补 PATH 外兜底（修 Android/su 场景「命令全挂」）**：此前 `candidates()` 只做
+  `exec.LookPath("bash"/"sh")`，而 `su -c`、Magisk、受限容器常把 PATH 重置成极简集甚至空——
+  `/system/bin/sh` 明明存在却探测不到，`bash` 工具直接 `executable file not found`。
+  现在按其 `caps.ExtraBins` 追加绝对路径候选（含 `ash`/`mksh`/`bash`/`busybox`）；
+  `fallback()` 也优先返回 `/system/bin/sh`。`/shell mksh` 这类短名在 PATH 外同样能找到。
+- **`busybox` 作为 shell 的特殊参数形态**：多合一二进制必须 `busybox sh -c '<cmd>'`，
+  直接 `busybox -c` 会报 applet 不存在（`withArgs`/`String()` 同步支持）。
+- **Hint 动态注入环境限制**：`Shell.Hint()` 除「当前 shell 的语法」外，追加
+  - 非 bash 的 POSIX shell（sh/ash/mksh/dash/busybox）明确警告「不要用 `[[ ]]`、数组、`<<<`、`set -o pipefail`」；
+  - `caps.Notes()` 的实测结论（缺 awk、无临时目录、Android 非 Termux 的私有目录限制、root 提醒）。
+- **`/shell` 展示能力矩阵**：环境身份（Android/Termux/root）、可用/缺失工具、临时目录，
+  一眼看出「模型为什么在这台机器上跑不动某种命令」。
+- **临时文件落盘兜底**：`dumpToTemp` 改用 `caps.TempDir`（真实可写），
+  Android/Termux 上大输出截断不再因为 `/tmp` 不存在而落盘失败。
+- **`bash` 工具描述明确「优先内置工具」**：read/write/edit/grep/find/ls 是跨平台原生实现，
+  在 Windows/Linux/Android 行为一致、不依赖本机用户态；shell 只用于必须跑外部程序的场合。
+  系统提示「命令行环境」一节同步加入这一引导。
+
+### 🧪 测试
+
+- `internal/caps`：快照基线、缺 awk 的告警、Android 的 mksh/toybox 告警、临时目录可写性与
+  TMPDIR 无效时的兜底。
+- `internal/shell`：busybox 参数形态、非 bash shell 的 bashism 警告、`/system/bin/sh` 必须
+  出现在候选（Android 环境下）、`fallback()` 完整性。
+
+### 🐛 修复
+
+- **WebUI：等待期间发送的消息完全不可见**：后台其实能收到能处理（steer 注入 / 排队补发），
+  但界面上看不出任何痕迹，用户以为消息丢了。现在：
+  - 新增**待处理消息条**（`.queue-bar`，位于对话区与输入框之间），实时列出本会话的
+    待处理消息，并标注状态徽标——「已注入」= 已作为纠正注入当前循环，「排队」= 本轮结束后发送；
+  - 每条可点 ✕ 单独取消；切换会话/新建会话时按会话过滤显示；
+  - 本轮结束时区分处理：`steer` 项已被循环消费（且已落盘），不再补发（避免重复）；
+    仅 `queue` 项补发为新任务——修复「停止后不该重发的又发了」「已注入的又发一遍」。
+- **WebUI：steer 消息不落盘**：`/web/api/steer` 注入成功后同步写入会话历史，
+  刷新页面后纠正消息不再消失。
+- **WebUI：停止显示为报错**：`/web/api/run` 遇到 `ErrAborted` 现在返回
+  `200 {aborted:true}`，前端保留已流式输出的内容并在末尾追加「⏹ 任务已停止」，
+  不再显示刺眼的红色错误。
+
+### ✨ 新增（`/stop` 命令：立即停止当前任务）
+
+- **`/stop`（别名 `/abort`、`/停止`、`/取消`）**，TUI 与 WebUI 均支持：
+  - TUI：在事件循环内直接走 `stopCurrentTask()`（与 ESC 同路径，但**无需两段式确认**），
+    同时清空待注入的 steer 与排队消息——用户要求停止后，这些消息不应在本轮结束后
+    又被自动补发（否则「停止」之后任务自己又跑起来）；
+  - WebUI：输入框输入 `/stop` 即调 `/web/api/abort`，并清空本会话排队项；
+  - 无任务运行时给出「当前没有正在运行的任务」明确提示，而非静默。
+- **`Agent.ClearSteer()`**：丢弃未消费的纠正消息。`/web/api/abort`、`agent.abort` RPC
+  同步调用它——修复「停止后残留纠正被下一次 Run 消费，新任务偷偷换了方向」。
+- **WebUI Agent 模式消息落盘顺序修正**：用户消息在 `Run` 之前落盘（原先是运行结束后
+  一起写 user+assistant），使本轮期间追加的 steer/排队消息顺序正确，不再排到原始提问之前。
+- **`/stop` 按钮与命令统一**：WebUI「中止」按钮改用 `requestStop()`（同时清队列 + 提示）。
+
+### 🧪 测试
+
+- `TestClearSteer`（agent）：清空后 `PendingSteer` 为 false，且之后仍能再次注入。
+- `TestWebAbortClearsPendingSteer`（server）：活跃运行中先 steer 再 abort，
+  `PendingSteer` 必须为 false。
+- `TestStopDropsQueue` / `TestStopClearsSteerAndQueue`（TUI）：无任务时不清队列只提示；
+  运行中清 steer + 清 queue + 置 canceling。
+
+### ✨ 新增（WebUI 支持 ask_user_question 弹窗选择）
+
+此前 Server/WebUI 模式下 `builtins.SetAskUser` 为 nil，`ask_user_question` 只能降级成
+「无交互界面，请自行决策」，WebUI 用户完全无法表达选择。现在补齐整条通道：
+
+- **服务端 `internal/server/ask.go`**：`Server.AskUser(questionsJSON)` 创建 pending
+  （id + 缓冲 channel），通过 WS 广播 `ask_user` 事件（带 `id` / `questions` / `conversation_id`），
+  然后**阻塞等待**；作答后广播 `ask_close` 关闭弹窗。
+  - **不设超时**：用户可能几分钟/几小时后才回来选，题目过期比多等更糟。唯一退出路径是
+    「用户作答」与「任务被 /stop 或中止」——后者返回 `"[]"`（用户未作答，模型据此自行决策）。
+  - `GET /web/api/ask` 返回未答问题（**刷新页面/断线重连后弹窗自动恢复**）。
+  - `POST /web/api/answer {id, answers}` 回填答案；重复提交返回 `already_answered` 而非报错。
+- **前端**：新增问答弹窗（`#askModal`）——单选 radio / 多选 checkbox / 无选项时自由输入，
+  题号与选项描述完整渲染；Enter 提交；未选必填项时提示而**不提交**（不会静默卡住）。
+- **接入**：`cmd/mizar/main.go` 的 Server 模式启动时把
+  `builtins.SetAskUser(srv.AskUser)` 与 `agent.SetPlanAskUser(srv.AskUser)` 接上，
+  `exit_plan_mode` 的计划审批也一并走 WebUI 弹窗。
+- **修复 `agent.plan.go` 的 `jsonUnmarshal` 占位实现**：此前它永远返回错误，
+  导致「用户批准计划后仍报『解析审批答案失败』」；现在委托 `encoding/json`。
+
+### 🧪 测试（Web 问答通道）
+
+- `TestAskUserRoundTrip`：AskUser 广播 → HTTP 作答 → 返回 answers JSON。
+- `TestAskPendingEndpoint`：`/web/api/ask` 列出未答问题。
+- `TestAskUserAbortReturnsEmpty`：任务取消时 AskUser 返回 `"[]"`，不阻塞。
+- `TestAskPlanReviewWithCallback`（agent）：批准/继续规划两种答案都能正确解析。
+
+### 备注
+
+- 二进制体积增量 ≈ 0（纯探测与提示，无新增依赖）；`CGO_ENABLED=0` 纯静态单文件模型不变。
+- 未内嵌 busybox/gobusybox：Android 侧 `/system/bin/sh` 恒存在，真正缺口是「找不到」而非「没有」；
+  如需兜底 distroless，建议照 `internal/zigboot` 的范式做 **可选** 内嵌（toybox/0BSD 优先）。
+
+---
+
 ## [v0.7.6] — 2026-11-11
 
 > 主题：**多供应商收藏夹 + WebUI 对齐 TUI（版本号/状态栏/发送开关）+ 多会话串台修复**。

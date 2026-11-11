@@ -39,7 +39,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.7.6"
+var version = "v0.7.7"
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -1168,6 +1168,43 @@ func main() {
 			return builtins.RenderPiTodos(), nil
 		},
 	})
+	// 内置 /stop 命令：立即停止当前任务（TUI 与 WebUI 通用；WebUI 在前端拦截，不进入这里）
+	a.Commands.Register(agent.Command{
+		Name:        "stop",
+		Description: "立即停止当前任务（等同 ESC 取消，但无需确认；同时丢弃排队消息）。别名 /abort",
+		Run: func(args string) (string, error) {
+			// TUI 下由 tuiStopTask 在事件循环里打印提示（含丢弃排队条数），
+			// 这里返回空串避免重复打印。
+			if tuiStopTask != nil {
+				tuiStopTask()
+				return "", nil
+			}
+			// 非 TUI（经典交互 / server）：直接中止循环
+			if !a.Running() {
+				return "当前没有正在运行的任务", nil
+			}
+			a.Abort()
+			a.ClearSteer()
+			return "⏹ 已请求停止当前任务（当前步骤结束后退出）", nil
+		},
+	})
+	// /abort 别名
+	a.Commands.Register(agent.Command{
+		Name:        "abort",
+		Description: "同 /stop：立即停止当前任务",
+		Run: func(args string) (string, error) {
+			if tuiStopTask != nil {
+				tuiStopTask()
+				return "", nil
+			}
+			if !a.Running() {
+				return "当前没有正在运行的任务", nil
+			}
+			a.Abort()
+			a.ClearSteer()
+			return "⏹ 已请求停止当前任务（当前步骤结束后退出）", nil
+		},
+	})
 	// 内置 /quit 命令：退出交互模式
 	// 注意：真正退出由 TUI/interactive 的拦截器负责（先打印续接提示再退出），
 	// 此命令只作为文档/帮助入口与兜底返回值，不再 os.Exit（否则续接提示永不显示）。
@@ -1821,6 +1858,11 @@ func main() {
 		}
 		cfg.Web = server.WebAuth{Enabled: true, Username: webCfg.Username, Password: webCfg.Password}
 		srv := server.New(cfg, a, st)
+		// Web 问答通道：把 ask_user_question / exit_plan_mode 的阻塞回调
+		// 接到 WebUI 弹窗（之前 Server 模式这两个工具只能降级为「请自行决策」）。
+		// 不设超时——用户可能很久才回来选，题目过期比多等更糟。
+		builtins.SetAskUser(srv.AskUser)
+		agent.SetPlanAskUser(srv.AskUser)
 		// 应用持久化的 Web UI 设置（模型/参数/思考等级）
 		srv.ApplyStoredSettings()
 		// 插件 ws_emit 能力：注入 Server 广播

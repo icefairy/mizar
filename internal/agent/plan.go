@@ -10,6 +10,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -191,9 +192,13 @@ func SetPlanAskUser(fn func(string) (string, error)) {
 	agentAskPlanUser = fn
 }
 
+// jsonUnmarshal 解析用户审批答案。早前这里是个永远返回错误的占位实现，
+// 导致「用户选了 Approve 却总被当成解析失败」——改动只需委托标准库。
 func jsonUnmarshal(s string, v any) error {
-	// 占位：实际由 builtins 包统一使用 encoding/json
-	return fmt.Errorf("stub: use json.Unmarshal directly")
+	if err := json.Unmarshal([]byte(s), v); err != nil {
+		return fmt.Errorf("解析审批答案失败: %w (原始内容: %.120s)", err, s)
+	}
+	return nil
 }
 
 func truncateString(s string, n int) string {

@@ -42,6 +42,64 @@
 
 ---
 
+## v0.7.7 亮点：任务可控可感知 + 跨平台环境自适应
+
+### 一、`/stop` 一键停止任务（TUI + WebUI）
+
+`/stop`（别名 `/abort`、`/停止`、`/取消`）立即停止当前运行：
+
+- **TUI**：与 ESC 取消同一条路径，但**无需两段式确认**；同时清空「待注入的纠正」与
+  「排队消息」——既然要停，这些不该在本轮结束后又被自动补发；未运行时明确提示。
+- **WebUI**：输入框直接输 `/stop`，或点右上角「中止」按钮。停止后保留已输出的部分内容，
+  末尾标注「⏹ 任务已停止」，不再显示为红色错误（`/web/api/run` 返回 `200 {aborted:true}`）。
+- 新增 `Agent.ClearSteer()`：`/web/api/abort`、JSON-RPC `agent.abort` 都会调用，修复
+  「停止后残留纠正被下一次 Run 消费，新任务偷偷换了方向」。
+
+### 二、WebUI 等待期间发的消息看得见
+
+后台其实一直在处理（打断模式=注入当前循环，排队模式=本轮结束发送），但界面上毫无痕迹。
+现在对话区下方出现**待处理消息栏**：
+
+```
+待处理消息 · 1 条已注入当前任务 · 2 条等待本轮结束后发送
+  已注入  换个方向，用 grep 工具    ✕
+  排队    再看看那个配置文件        ✕
+```
+
+- 「已注入」= 已作为纠正注入当前循环（本轮结束后不再补发，避免重复）；
+  「排队」= 本轮结束后自动发送为新任务。每条可点 ✕ 单独取消。
+- steer 消息也**同步落盘**到会话历史，刷新页面不会丢。
+
+### 三、`ask_user_question` 在 WebUI 里弹窗选（无超时）
+
+以前 Server/WebUI 模式这两个工具只能降级成「无交互界面，请自行决策」。现在：
+
+- 模型提问 → WebUI **弹窗**：单选圆点 / 多选复选框 / 无选项时自由输入；
+- **不设超时**：你可以离开很久再回来选，题目不会过期（唯一退出是作答或停止任务）；
+- 刷新页面 / WebSocket 断线重连后，未答弹窗**自动恢复**（`GET /web/api/ask`）；
+- `exit_plan_mode` 的计划审批同样走弹窗；
+- 顺带修掉 `agent/plan.go` 里 `jsonUnmarshal` 的占位实现（此前永远报「解析审批答案失败」，
+  用户批了也走不下去）。
+
+### 四、跨平台环境自适应（Android / Termux / root / 精简容器）
+
+`su -c`、Magisk、受限容器常把 `PATH` 重置成极简集甚至空，`/system/bin/sh` 明明存在却探测不到
+（表现为「命令全挂」）。新增 `internal/caps` 能力探测：
+
+- shell 候选按**绝对路径兜底**（`/system/bin/sh`、`/system/xbin`、`/vendor/bin`、Magisk、
+  KernelSU、APatch、Termux），有 busybox 时按 `busybox sh -c` 调用；
+- 探测实际可用的用户态工具（awk/sed/grep/tar…）与**真实可写**的临时目录；
+- 结论写进系统提示的「命令行环境」：Android 上是 mksh+toybox、禁 bash 专有语法、缺 awk 等；
+- `/shell` 显示能力矩阵；大输出截断落盘改用可写目录，不再死磕 `/tmp`。
+
+### 五、WebUI 内容区不再有横向滚动条
+
+Markdown 渲染（长代码行 / 宽表格 / 超长单词）以前会撑出横向滚动条。现在内容区
+`overflow-x: hidden` + 表格 `table-layout: fixed` + 代码块 `white-space: pre-wrap`，
+超宽一律折行，**只保留纵向滚动**。
+
+---
+
 ## v0.7.6 亮点：多供应商收藏夹 + WebUI 对齐 TUI + 多会话串台修复
 
 ### 一、多供应商收藏夹（TUI + WebUI）
@@ -475,6 +533,47 @@ curl -X POST localhost:3003/admin/switch -d '{"service":"ws","enabled":false}' \
 
 注意：`!` 命令不经模型，也不会触发工具调用；需要模型基于输出推理时，直接在下一条消息里发任务即可。
 
+#### 7.8 模型提问（`ask_user_question`）在 WebUI 里弹窗选
+
+模型需要确认/选择时（如「用哪个方案」、计划审批），TUI 是在聊天区列出编号选项让你回数字；
+**WebUI 现在是直接弹窗**：
+
+- 单选 = 圆点选项，多选 = 复选框，模型没给选项时是自由输入框；
+- 每题显示题干 + 选项描述，未选必填项会提示而**不会静默卡住**；
+- **没有超时**：你可以离开很久再回来选，题目不会过期；
+- 刷新页面 / WebSocket 断线重连后，未答的弹窗会**自动恢复**；
+- 点「中止」或输入 `/stop` 会关闭弹窗（服务端返回「用户未作答」，模型自行决策）。
+
+实现：`Server.AskUser` 阻塞等待 + WS `ask_user`/`ask_close` 事件 +
+`POST /web/api/answer` 回填；`GET /web/api/ask` 供刷新后恢复。
+
+#### 7.7 停止任务（`/stop`）与等待期间的消息
+
+**停止任务**：`/stop`（别名 `/abort`、`/停止`、`/取消`）立即停止当前运行的任务：
+
+- **TUI**：与 ESC 取消同一条路径，但**无需两段式确认**；同时清空「待注入的纠正」和
+  「排队消息」——用户既然要求停止，这些消息不应在本轮结束后又被自动补发。
+  未在运行时提示「当前没有正在运行的任务」。
+- **WebUI**：输入框直接输入 `/stop`，或点右上角「中止」按钮。停止后保留已输出的部分内容，
+  末尾标注「⏹ 任务已停止」，不再显示为红色错误。
+- **其它入口**：`POST /web/api/abort`、JSON-RPC `agent.abort` 都会同时清空残留 steer。
+
+**等待期间发的消息在 WebUI 里可见**：任务运行中继续发消息（打断模式=注入当前循环纠正，
+排队模式=本轮结束后发送），现在会在对话区下方出现一条**待处理消息栏**：
+
+```
+待处理消息 · 1 条已注入当前任务 · 2 条等待本轮结束后发送
+  已注入  换个方向，用 grep 工具    ✕
+  排队    再看看那个配置文件        ✕
+  排队    顺便把注释补上            ✕
+```
+
+- 徽标「已注入」= 已作为纠正注入当前循环（本轮结束后不再补发，避免重复）；
+  「排队」= 本轮结束后自动发送为新任务。
+- 每条可点 ✕ 单独取消；切/建会话时按会话过滤。
+- steer 消息也会**同步落盘**到会话历史，刷新页面不会丢。
+
+
 **鼠标（Windows 同样支持）**：TUI 里鼠标上报默认开启——滚轮滚动、左键拖选即复制（双击选整行、
 Esc 取消选区）、右键粘贴都可用。若碰到旧终端把鼠标事件泄漏成 `[<35;66;61M` 之类的乱码，可随时关掉：
 
@@ -489,21 +588,34 @@ Esc 取消选区）、右键粘贴都可用。若碰到旧终端把鼠标事件�
 （`PgUp/PgDn`、`Ctrl+U/D`、`Alt+K/J`、`Alt+C` 拷贝模式）始终可用。
 
 **Windows 用户的命令执行器**：`bash` 工具、`!` 命令、目标门禁、插件 `shell_exec` 统一走
-「平台默认 shell」——Unix 是 `bash`/`sh`，Windows 依次尝试 `pwsh`（PowerShell 7）→
+「平台默认 shell」——Unix 是 `bash`/`sh`（PATH 里找不到时按绝对路径兜底
+`/system/bin/sh`、Termux、Magisk/KernelSU 的 busybox），Windows 依次尝试 `pwsh`（PowerShell 7）→
 `powershell`（系统自带 5.1）→ `cmd`（PowerShell 优先，因为 cmd 的批处理语法太弱，
 模型写稍复杂的命令几乎必失败）。可随时手动切换：
 
 ```
-/shell                                   # 查看当前执行器 + 本机可用清单
+/shell                                   # 查看当前执行器 + 本机可用清单 + 能力矩阵
 /shell cmd                               # 切到 cmd（老脚本只认批处理语法时）
 /shell pwsh                              # 切到 PowerShell 7
 /shell C:\Program Files\Git\bin\bash.exe   # 装了 Git-Bash 想走 POSIX 语法
+/shell mksh                              # Android/su 环境切到系统 mksh
 /shell auto                              # 恢复平台自动探测
 ```
 
 - 切换会**立即探针验证**（跑一条 `echo`），并把选择写入 `config.json`（重启后仍生效）；
 - 也支持环境变量 `MIZAR_SHELL`（一次性覆盖，优先级低于 `/shell`）；
 - 切换后系统提示的「命令行环境」一节会跟着更新，模型会改用对应语法。
+
+**Android / Termux / root 与精简容器**：`su -c`、Magisk、受限容器常把 `PATH` 重置成极简集
+甚至空，导致 `/system/bin/sh` 明明存在却探测不到（表现为「命令全挂」）。Mizar 现在：
+
+- 候选 shell 按**绝对路径兜底**（`/system/bin/sh`、`/system/xbin`、`/vendor/bin`、Magisk
+  `/data/adb/magisk`、KernelSU `/data/adb/ksu/bin`、APatch、Termux `$PREFIX/bin`），
+  有 `busybox` 时按 `busybox sh -c` 调用；
+- `internal/caps` 实测环境能力（缺失 awk、是否可写临时目录等）并把结论写进系统提示的
+  「命令行环境」，避免模型写 `awk` / `sed -i` / bash 专有语法而后失败；
+- 大输出截断落盘自动改到**真实可写**的临时目录（不再死磕 `/tmp`）；
+- `/shell` 会显示能力矩阵，一眼看清本机到底有什么工具。
 
 ### 8. LSP 支持
 - **作为客户端**：通过 stdio 启动语言服务器（gopls/tsserver），提供 `lsp_diagnostics` / `lsp_definition` / `lsp_references` / `lsp_completion` 工具

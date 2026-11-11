@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -149,6 +150,9 @@ func (s *Server) webRoutes() {
 	s.mux.HandleFunc("/web/api/run", s.webAuth(s.handleWebRun))
 	s.mux.HandleFunc("/web/api/abort", s.webAuth(s.handleWebAbort))
 	s.mux.HandleFunc("/web/api/steer", s.webAuth(s.handleWebSteer))
+	// ask_user_question 问答通道：作答 + 恢复未答问题（刷新页面后重弹）
+	s.mux.HandleFunc("/web/api/answer", s.webAuth(s.handleWebAnswer))
+	s.mux.HandleFunc("/web/api/ask", s.webAuth(s.handleWebAskPending))
 	// 设置（模型 + 对话参数）
 	s.mux.HandleFunc("/web/api/settings", s.webAuth(s.handleSettings))
 	s.mux.HandleFunc("/web/api/models", s.webAuth(s.handleModelsList))
@@ -619,23 +623,37 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	defer func() { s.agent.OnLLMStream = nil }()
 
 	s.runStartAt = time.Now()
+	// 用户消息先落盘：这样本轮运行期间新增的 steer/排队消息能按正确顺序
+	// 追加在它之后（此前是 Run 结束后才写 user+assistant，导致 steer 消息
+	// 排在用户原始提问之前，历史顺序错乱）。
+	if body.ConversationID != "" {
+		s.web.store.appendMsg(body.ConversationID, convMessage{Role: "user", Content: body.Message})
+		s.web.store.setMode(body.ConversationID, "agent")
+	}
 	reply, err := s.agent.Run(body.Message)
 	s.recordLLMUsage()
 	if err != nil {
+		// 用户主动停止（/stop、中止按钮）不是错误：返回 200 + aborted 标记，
+		// 前端据此显示「已停止」而不是一条刺眼的报错。
+		if errors.Is(err, agent.ErrAborted) {
+			writeJSON(w, http.StatusOK, map[string]any{"reply": "", "aborted": true})
+			return
+		}
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if body.ConversationID != "" {
-		s.web.store.appendMsg(body.ConversationID, convMessage{Role: "user", Content: body.Message})
 		s.web.store.appendMsg(body.ConversationID, convMessage{Role: "assistant", Content: reply})
-		s.web.store.setMode(body.ConversationID, "agent")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
 // handleWebAbort POST /web/api/abort
+// 中止当前运行，并丢弃尚未被消费的 steer——否则停止后残留的纠正消息会被
+// 下一次 Run 当作待注入消息消费（表现为「停止后新任务莫名其妙换了方向」）。
 func (s *Server) handleWebAbort(w http.ResponseWriter, r *http.Request) {
 	s.agent.Abort()
+	s.agent.ClearSteer()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -660,6 +678,10 @@ func (s *Server) handleWebSteer(w http.ResponseWriter, r *http.Request) {
 	}
 	if running {
 		s.agent.Steer(body.Content)
+		// 落盘到会话历史：否则刷新页面后这条纠正消息就不见了（只有内存里被循环消费）。
+		if body.ConversationID != "" {
+			s.web.store.appendMsg(body.ConversationID, convMessage{Role: "user", Content: body.Content})
+		}
 		s.logf("web agent.steer: %s", truncateStr(body.Content, 80))
 	} else {
 		s.logf("web agent.steer (no active run, deferred): %s", truncateStr(body.Content, 80))

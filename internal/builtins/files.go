@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"mizar/internal/caps"
 	"mizar/internal/plugins"
 	"mizar/internal/utils"
 )
@@ -141,12 +142,29 @@ func detectLineEndings(content string) string {
 	return "\n"
 }
 
-// dumpToTemp 将超限输出落盘到临时文件，返回路径
+// dumpToTemp 将超限输出落盘到临时文件，返回路径。
+//
+// Android / 精简容器里 /tmp 常常不存在或只读，os.CreateTemp("") 会直接失败。
+// 这里优先用 caps 探测到的可写目录（$TMPDIR → os.TempDir() → ~/.cache/mizar/tmp），
+// 全都不行时再退回 os.CreateTemp("") 让错误照常暴露。
 func dumpToTemp(content string) (string, error) {
-	f, err := os.CreateTemp("", "mizar-bash-*.log")
+	dir := caps.Get().TempDir
+	if dir == "" {
+		f, err := os.CreateTemp("", "mizar-bash-*.log")
+		if err != nil {
+			return "", err
+		}
+		return writeTemp(f, content)
+	}
+	f, err := os.CreateTemp(dir, "mizar-bash-*.log")
 	if err != nil {
 		return "", err
 	}
+	return writeTemp(f, content)
+}
+
+// writeTemp 写入内容并关闭，失败时清理半成品。
+func writeTemp(f *os.File, content string) (string, error) {
 	defer f.Close()
 	if _, err := f.WriteString(content); err != nil {
 		os.Remove(f.Name())

@@ -52,6 +52,10 @@
 
     <main id="log" class="log"></main>
 
+    <!-- 排队/已发送纠正的可见队列：等待期间用户发的消息不再「消失」。
+         打断模式显示「已注入当前任务」，排队模式显示「等待本轮结束后发送」。 -->
+    <div id="queueBar" class="queue-bar hidden"></div>
+
     <footer class="composer">
       <!-- 状态栏（对齐 TUI 状态栏：tokens / 上下文 / 缓存 / 速度 / 模型 / 思考） -->
       <div id="statusbar" class="statusbar"></div>
@@ -170,6 +174,20 @@
     <div class="modal-foot">
       <span id="settingsMsg" class="hint"></span>
       <button id="settingsSave" class="primary" type="button">保存并应用</button>
+    </div>
+  </div>
+</div>
+
+<!-- ask_user_question 问答弹窗（模型需要用户选择时弹出；无超时，一直等用户作答） -->
+<div id="askModal" class="modal hidden">
+  <div class="modal-card ask-card">
+    <div class="modal-head">
+      <h2 id="askTitle">需要你的选择</h2>
+    </div>
+    <div id="askBody" class="modal-body ask-body"></div>
+    <div class="modal-foot">
+      <span id="askMsg" class="hint"></span>
+      <button id="askSubmit" class="primary" type="button">确定</button>
     </div>
   </div>
 </div>

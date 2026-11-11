@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"mizar/internal/agent"
+	"mizar/internal/caps"
 	"mizar/internal/config"
 	"mizar/internal/shell"
 )
@@ -52,6 +53,52 @@ func probeShell(s shell.Shell) (string, error) {
 	return strings.TrimSpace(shell.CleanOutput(string(out))), err
 }
 
+// renderCaps 渲染能力矩阵（用户态工具是否存在、临时目录、平台身份）。
+// 目的是让用户一眼看出「模型为什么在某台机器上跑不动某种命令」。
+func renderCaps() string {
+	e := caps.Get()
+	var sb strings.Builder
+
+	var tags []string
+	if e.Android {
+		tags = append(tags, "Android")
+	}
+	if e.Termux {
+		tags = append(tags, "Termux")
+	}
+	if e.Root {
+		tags = append(tags, "root")
+	}
+	head := "环境: " + e.GOOS
+	if len(tags) > 0 {
+		head += "（" + strings.Join(tags, " / ") + "）"
+	}
+	sb.WriteString(head + "\n")
+
+	// 关键用户态工具：有则打 ✓，无则打 ✗。
+	keyTools := []string{"awk", "sed", "grep", "find", "xargs", "tar", "curl", "wget", "git", "python3", "node"}
+	var present, missing []string
+	for _, t := range keyTools {
+		if e.Has(t) {
+			present = append(present, t)
+		} else {
+			missing = append(missing, t)
+		}
+	}
+	if len(present) > 0 {
+		sb.WriteString("可用工具: " + strings.Join(present, " ") + "\n")
+	}
+	if len(missing) > 0 {
+		sb.WriteString("缺失工具: " + strings.Join(missing, " ") + " ⚠\n")
+	}
+	if e.TempDir != "" {
+		sb.WriteString("临时目录: " + e.TempDir + "\n")
+	} else {
+		sb.WriteString("临时目录: 无（大输出无法落盘）⚠\n")
+	}
+	return sb.String()
+}
+
 // renderShellList 渲染当前 shell + 可选清单。
 func renderShellList(cur shell.Shell, override string, candidates []shell.Shell, envOverride string) string {
 	var sb strings.Builder
@@ -65,6 +112,12 @@ func renderShellList(cur shell.Shell, override string, candidates []shell.Shell,
 		sb.WriteString("选择来源: 平台自动探测\n")
 	}
 	sb.WriteString("提示: " + cur.Hint() + "\n")
+
+	// 能力矩阵：告诉用户本机到底有哪些用户态工具、临时目录在哪。
+	// 这些正是模型写命令时最容易踩空的地方（Android 无 awk、容器无 /tmp）。
+	if matrix := renderCaps(); matrix != "" {
+		sb.WriteString("\n" + matrix)
+	}
 
 	if len(candidates) == 0 {
 		sb.WriteString("\n未探测到其它可用 shell。可直接指定路径: /shell C:\\路径\\bash.exe\n")

@@ -138,6 +138,8 @@ func (s *Server) rpcSteer(req *rpcRequest) rpcResponse {
 
 func (s *Server) rpcAbort(req *rpcRequest) rpcResponse {
 	s.agent.Abort()
+	// 同步清空待消费的 steer：否则停止后残留纠正会被下一次 Run 消费。
+	s.agent.ClearSteer()
 	return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"ok": true}}
 }
 

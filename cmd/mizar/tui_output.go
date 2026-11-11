@@ -75,3 +75,7 @@ var tuiDeliverReminder func(prompt string)
 // tuiRequestResync 由 TUI 注册：请求一次「全屏强制重画」（清掉任何残留文字）。
 // 命令 /redraw 与 Ctrl+L 都走它；非 TUI 模式为 nil。
 var tuiRequestResync func()
+
+// tuiStopTask 由 TUI 注册：/stop 命令立即停止当前任务（停止循环 + 清空排队）。
+// 非 TUI 模式为 nil，此时 /stop 退化为仅调用 Agent.Abort。
+var tuiStopTask func()

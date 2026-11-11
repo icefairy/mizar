@@ -34,6 +34,9 @@ type Server struct {
 	// 修复多会话切换时事件串台（新会话的消息出现在老会话窗口里）。
 	runConv atomic.Value // string
 
+	// ask 待回答的 ask_user_question 问题（Web 问答通道，见 ask.go）。
+	ask *askBroker
+
 	// stats Web UI 状态栏用量统计（tokens/缓存/速度），对齐 TUI 状态栏。
 	stats runStats
 	// usageMu 保护 lastUsage/lastModel（去重入账）。
@@ -70,6 +73,7 @@ func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {
 		mux:     http.NewServeMux(),
 		hub:     newHub(),
 		web:     newWebUI(webStorePath()),
+		ask:     newAskBroker(),
 	}
 	s.wsUp = newWSUpgrader(cfg.Token)
 	s.routes()

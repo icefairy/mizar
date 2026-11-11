@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.7.6</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.7.7</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -147,6 +147,14 @@
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.7.7 · 停止/排队/提问全闭环 + 跨平台环境自适应</h3>
+          <p><strong><code>/stop</code> 一键停止</strong>（TUI + WebUI，别名 <code>/abort</code>/<code>/停止</code>/<code>/取消</code>）：TUI 与 ESC 同路径但无需两段式确认，同时清空待注入的纠正和排队消息（停止后不再被自动补发）；WebUI 停止后保留已输出内容并标注「⏹ 任务已停止」，不再显示红色错误。新增 <code>Agent.ClearSteer()</code>，修复「停止后残留纠正被下一个任务消费、偷偷换方向」。</p>
+          <p><strong>WebUI 等待期间发的消息看得见</strong>：对话区下方新增待处理消息栏，标注「已注入」（已作为纠正进入当前循环）或「排队」（本轮结束后发送），每条可单独取消；steer 消息同步落盘，刷新不丢。</p>
+          <p><strong>ask_user_question 在 WebUI 弹窗选（无超时）</strong>：单选/多选/自由输入，刷新或断线重连后未答弹窗自动恢复，<code>exit_plan_mode</code> 计划审批同样走弹窗；离开多久再回来选都不会过期（唯一退出是作答或停止任务）。</p>
+          <p><strong>跨平台环境自适应</strong>：Android / Termux / root / 精简容器下 <code>su -c</code> 常重置 PATH，导致 <code>/system/bin/sh</code> 探测不到「命令全挂」。新增 <code>internal/caps</code>：shell 按绝对路径兜底（含 Magisk/KernelSU/Termux，有 busybox 则 <code>busybox sh -c</code>）、探测实际可用的用户态工具与可写临时目录，并把限制写进系统提示。</p>
+          <p><strong>WebUI 内容区去掉横向滚动条</strong>：Markdown 长代码行/宽表格/超长单词不再撑出横向条，一律折行，只保留纵向滚动。</p>
+        </div>
         <div class="card">
           <h3>v0.7.6 · 多供应商收藏夹 + WebUI 对齐 TUI + 多会话串台修复</h3>
           <p><strong>多供应商收藏夹（TUI + WebUI 通用）</strong>：以前只能配一个 provider，家里直连和外面走隧道代理只能反复粘贴 URL/Key。现在配置里记住多个供应商（<code>providers[]</code> + <code>active_provider</code>），TUI 用 <code>/provider list | add &lt;名&gt; &lt;url&gt; [key] [model] | use &lt;名&gt; | del &lt;名&gt;</code>，WebUI 设置面板同样的下拉与表单，两端共用 <code>~/.mizar/config.json</code>。运行时切换通过 <code>llm.OpenAI.SetEndpoint</code> 同时换 baseURL+apiKey，<code>/model</code> 会把模型名同步进当前收藏项。</p>

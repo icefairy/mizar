@@ -194,3 +194,20 @@ func TestSteer_InterruptsMidToolChain(t *testing.T) {
 		t.Error("第二轮 LLM 输入未见用户 steer 纠正内容，介入未生效")
 	}
 }
+
+// TestClearSteer 清空后 PendingSteer 为 false，且后续 Steer 仍能生效。
+func TestClearSteer(t *testing.T) {
+	a := &Agent{}
+	a.Steer("残留纠正")
+	if !a.PendingSteer() {
+		t.Fatal("Steer 后 PendingSteer 应为 true")
+	}
+	a.ClearSteer()
+	if a.PendingSteer() {
+		t.Fatal("ClearSteer 后 PendingSteer 应为 false")
+	}
+	a.Steer("新的纠正")
+	if !a.PendingSteer() {
+		t.Fatal("ClearSteer 后仍应能再次 Steer")
+	}
+}

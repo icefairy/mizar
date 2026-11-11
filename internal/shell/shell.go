@@ -6,7 +6,11 @@
 //
 // 本包按平台选择 shell：
 //   - Windows：pwsh.exe（PowerShell 7）→ powershell.exe（Windows PowerShell 5.1）→ cmd.exe
-//   - 其它：bash → sh
+//   - 其它：bash → sh → PATH 外的固定目录兜底（/system/bin/sh、Termux、Magisk、KernelSU）
+//
+// 为什么需要 PATH 外兜底：su -c / Magisk / 受限容器常把 PATH 重置成极简集甚至空，
+// 此时 /system/bin/sh 明明存在却 LookPath 不到，bash 工具会报 executable file not found。
+// 详见 internal/caps。
 //
 // 选择优先级（从高到低）：
 //  1. 运行期手动切换（/shell 命令，或启动时从 config 的 shell 字段恢复）
@@ -17,19 +21,23 @@
 //
 //	powershell/pwsh → -NoProfile -NonInteractive -EncodedCommand
 //	cmd             → /D /C
-//	其它(bash/sh/zsh/…) → -c
+//	busybox         → sh -c（多合一二进制，必须先给 applet 名）
+//	其它(bash/sh/ash/mksh/zsh/…) → -c
 package shell
 
 import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"unicode/utf16"
+
+	"mizar/internal/caps"
 )
 
 // Shell 描述一个用于执行命令字符串的 shell。
@@ -57,6 +65,8 @@ func (s Shell) String() string {
 		flag = "-Command"
 	case "cmd":
 		flag = "/C"
+	case "busybox":
+		flag = "sh -c"
 	}
 	return s.Name + " " + flag
 }
@@ -67,16 +77,31 @@ func (s Shell) IsPowerShell() bool {
 }
 
 // Hint 返回给模型看的命令行环境说明（写系统提示用）。
+//
+// 除了当前 shell 的语法提示，还会追加 internal/caps 探测到的环境限制
+// （Android=mksh+toybox、缺 awk、无 /tmp 等）——只写「当前 shell」不够，
+// 模型不知道用户态缺什么，照样会写 awk / sed -i / ls --color 而失败。
 func (s Shell) Hint() string {
+	var base string
 	switch s.Name {
 	case "pwsh", "PowerShell":
-		return "当前命令执行器是 " + s.String() + "（PowerShell 语法：用 ; 分隔语句、$env:VAR 读环境变量、" +
+		base = "当前命令执行器是 " + s.String() + "（PowerShell 语法：用 ; 分隔语句、$env:VAR 读环境变量、" +
 			"管道传对象、无 `ls -la` 这类 POSIX 参数；不要用 bash 专有语法）"
 	case "cmd":
-		return "当前命令执行器是 cmd.exe（批处理语法：用 & 或 && 串联、%VAR% 读环境变量、dir 列目录；" +
+		base = "当前命令执行器是 cmd.exe（批处理语法：用 & 或 && 串联、%VAR% 读环境变量、dir 列目录；" +
 			"不支持 PowerShell 的 cmdlet 与 bash 语法）"
+	default:
+		base = "当前命令执行器是 " + s.String() + "（可用 POSIX 语法）"
+		// 非 bash 的 POSIX shell（mksh/ash/busybox）不支持 bash 专有语法。
+		switch strings.ToLower(s.Name) {
+		case "sh", "ash", "mksh", "dash", "busybox":
+			base += "；该 shell 不是 bash，不要用 [[ ]]、数组、<<<、set -o pipefail 等 bash 专有语法"
+		}
 	}
-	return "当前命令执行器是 " + s.String() + "（可用 POSIX 语法）"
+	if notes := caps.Get().Notes(); len(notes) > 0 {
+		return base + "\n" + strings.Join(notes, "\n")
+	}
+	return base
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +364,16 @@ func lookupSpec(spec string) (Shell, bool) {
 			return postProcess(withArgs(p, nameOf(p))), true
 		}
 	}
+	// PATH 外兜底：/shell mksh 在 su 环境里 PATH 被重置时也应能找到
+	// /system/bin/mksh、Termux 的 bash 等（详见 internal/caps）。
+	for _, dir := range caps.Get().ExtraBins {
+		for _, c := range cands {
+			p := filepath.Join(dir, c)
+			if st, err := os.Stat(p); err == nil && !st.IsDir() {
+				return postProcess(withArgs(p, nameOf(p))), true
+			}
+		}
+	}
 	return Shell{}, false
 }
 
@@ -369,7 +404,10 @@ func withArgs(path, name string) Shell {
 		return Shell{Path: path, Args: []string{"-NoProfile", "-NonInteractive", "-EncodedCommand"}, Name: name, Encoded: true}
 	case "cmd":
 		return Shell{Path: path, Args: []string{"/D", "/C"}, Name: name}
-	default: // bash / sh / zsh / dash ...
+	case "busybox":
+		// busybox 是多合一二进制，必须显式 `busybox sh -c '<cmd>'`；直接 `busybox -c` 会报 applet 不存在。
+		return Shell{Path: path, Args: []string{"sh", "-c"}, Name: "busybox"}
+	default: // bash / sh / ash / mksh / dash / zsh ...
 		return Shell{Path: path, Args: []string{"-c"}, Name: name}
 	}
 }

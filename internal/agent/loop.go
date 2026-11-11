@@ -455,8 +455,10 @@ func (a *Agent) buildContextSection() string {
 		sb.WriteString(fmt.Sprintf("\n## 当前工作目录\n%s\n", a.WorkDir))
 	}
 	// 命令行环境：bash 工具实际调用的 shell 随平台不同（Windows=PowerShell/cmd，
-	// Unix=bash/sh）。明确告知模型，避免在 Windows 上写 bash 专有语法导致全挂。
+	// Unix=bash/sh/ash/mksh）。明确告知模型，避免在 Android 上写 bash 专有语法、
+	// 或依赖本机缺失的用户态工具（awk 等）导致全挂。
 	sb.WriteString(fmt.Sprintf("\n## 命令行环境\n%s；bash 工具的 command 会交给它执行，请按其语法书写命令。"+
+		"文件读写/搜索优先用内置工具（read/write/edit/grep/find/ls），它们在任何平台行为一致，不依赖本机用户态。\n"+
 		"（可用环境变量 MIZAR_SHELL 覆盖，例如指定 Git-Bash 路径。）\n", shell.Current().Hint()))
 	// 计划模式 / 拷问模式引导（活跃时注入，退出时为空字符串）
 	// 顺序：拷问在计划之前——需求没问清就不要先出方案。

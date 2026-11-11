@@ -2,6 +2,7 @@ package shell
 
 import (
 	"encoding/base64"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -252,5 +253,59 @@ func TestCommandArgsMatchesCommand(t *testing.T) {
 	got := cmd.Args[1:]
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("参数不一致: %v vs %v", got, want)
+	}
+}
+
+// TestWithArgsBusybox busybox 是多合一二进制，必须 `busybox sh -c`。
+func TestWithArgsBusybox(t *testing.T) {
+	s := withArgs("/data/adb/magisk/busybox", "busybox")
+	if len(s.Args) != 2 || s.Args[0] != "sh" || s.Args[1] != "-c" {
+		t.Fatalf("busybox 参数应为 [sh -c]，实际 %v", s.Args)
+	}
+	if s.Name != "busybox" {
+		t.Fatalf("Name=%q", s.Name)
+	}
+	if s.String() != "busybox sh -c" {
+		t.Fatalf("String=%q", s.String())
+	}
+}
+
+// TestHintPOSIXShellWarnsBashism ash/mksh/sh 等非 bash shell 的提示要警告 bash 专有语法。
+func TestHintPOSIXShellWarnsBashism(t *testing.T) {
+	for _, name := range []string{"sh", "ash", "mksh", "dash"} {
+		s := Shell{Path: "/system/bin/" + name, Args: []string{"-c"}, Name: name}
+		h := s.Hint()
+		if !strings.Contains(h, "不是 bash") {
+			t.Fatalf("%s 的 Hint 未警告 bash 专有语法: %q", name, h)
+		}
+	}
+	// bash 本身不该有这个警告
+	b := Shell{Path: "/bin/bash", Args: []string{"-c"}, Name: "bash"}
+	if strings.Contains(b.Hint(), "不是 bash") {
+		t.Fatalf("bash 不应警告 bash 专有语法: %q", b.Hint())
+	}
+}
+
+// TestCandidatesIncludeSystemSh /system/bin/sh 存在时必须出现在候选里（Android/su 场景）。
+func TestCandidatesIncludeSystemSh(t *testing.T) {
+	if _, err := os.Stat("/system/bin/sh"); err != nil {
+		t.Skip("/system/bin/sh 不存在（非 Android）")
+	}
+	var found bool
+	for _, c := range Candidates() {
+		if c.Path == "/system/bin/sh" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("候选未包含 /system/bin/sh: %+v", Candidates())
+	}
+}
+
+// TestFallbackStable fallback 必须给出可执行路径（Android 优先 /system/bin/sh）。
+func TestFallbackStable(t *testing.T) {
+	f := fallback()
+	if f.Path == "" || len(f.Args) == 0 {
+		t.Fatalf("fallback 不完整: %+v", f)
 	}
 }

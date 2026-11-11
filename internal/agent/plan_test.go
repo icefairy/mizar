@@ -104,3 +104,32 @@ func TestPlanSystemSectionMentionsExitCommand(t *testing.T) {
 		t.Fatalf("计划模式提示应说明 /plan off 退出: %q", p.SystemSection())
 	}
 }
+
+// TestAskPlanReviewWithCallback 有回调时应能解析答案（回归：jsonUnmarshal 曾是
+// 永远返回错误的占位实现，导致用户批准后仍报「解析审批答案失败」）。
+func TestAskPlanReviewWithCallback(t *testing.T) {
+	old := agentAskPlanUser
+	defer func() { agentAskPlanUser = old }()
+
+	agentAskPlanUser = func(questions string) (string, error) {
+		return `[{"id":"review","value":"Approve（批准并开始执行）"}]`, nil
+	}
+	rv, err := AskPlanReview("# 计划\n1. 做 A\n2. 做 B")
+	if err != nil {
+		t.Fatalf("AskPlanReview: %v", err)
+	}
+	if rv.Action != "approve" {
+		t.Fatalf("Action=%q want approve", rv.Action)
+	}
+	// 选 Keep planning → 应带反馈继续规划
+	agentAskPlanUser = func(questions string) (string, error) {
+		return `[{"id":"review","value":"Keep planning（继续规划）"}]`, nil
+	}
+	rv2, err := AskPlanReview("计划")
+	if err != nil {
+		t.Fatalf("AskPlanReview2: %v", err)
+	}
+	if rv2.Action != "keep_planning" {
+		t.Fatalf("Action=%q want keep_planning", rv2.Action)
+	}
+}

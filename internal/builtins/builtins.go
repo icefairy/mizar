@@ -132,10 +132,13 @@ func toolBash() plugins.Tool {
 // SystemPrompt 重建都会按 shell.Current() 重新生成，切换后调用 ReloadTools
 // 即刷新）。不要在这里硬编码 PowerShell/bash 语法——切换后会变成错误提示。
 func bashToolDescription() string {
-	return "Execute a shell command. Args: {command: string, timeout?: number(seconds)}. " +
+	return "Execute a shell command on the host. Args: {command: string, timeout?: number(seconds)}. " +
 		"Returns combined stdout+stderr. Default 60s timeout; pass timeout to override if the command may run longer. " +
-		"Syntax depends on the current shell (bash/sh on Unix; PowerShell or cmd on Windows) — " +
-		"see the 命令行环境 section of the system prompt for the active one; the user can change it with /shell."
+		"Use it only when an external program must be run — file read/write/edit/grep/find/ls have built-in cross-platform tools " +
+		"that behave identically on Windows/Linux/Android and should be preferred. " +
+		"Syntax depends on the current shell (bash/sh/ash/mksh on Unix; PowerShell or cmd on Windows) — " +
+		"see the 命令行环境 section of the system prompt for the active one and for known environment limits (missing awk, no /tmp, etc); " +
+		"the user can change it with /shell."
 }
 
 // truncateOutput 截断 bash 输出，保留头部（对齐 pi truncateHead）。

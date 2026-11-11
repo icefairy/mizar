@@ -60,6 +60,16 @@ func (a *Agent) PendingSteer() bool {
 	return a.steer != nil
 }
 
+// ClearSteer 丢弃尚未被循环消费的纠正消息（线程安全）。
+// 用途：用户执行 /stop 主动停止任务时，残留的 steer 不应在本轮结束后
+// 被自动当作新任务补发（否则「停止」之后又自己跑起来，与用户意图相反）。
+func (a *Agent) ClearSteer() {
+	a.steerMu.Lock()
+	a.steer = nil
+	a.steerSeq++
+	a.steerMu.Unlock()
+}
+
 // drainSteer 取出待插入的纠正消息（循环内部调用，LLM 调用前）。
 // 返回 nil 表示无待插入消息。一次取出一条（最新的）。
 func (a *Agent) drainSteer() *steerMsg {

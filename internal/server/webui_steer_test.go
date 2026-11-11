@@ -135,3 +135,55 @@ func TestWebSteerInjectsWhileRunning(t *testing.T) {
 	close(release)
 	<-done
 }
+
+// TestWebAbortClearsPendingSteer 中止后必须清空待消费的 steer，
+// 否则停止后残留纠正会被后续 Run 消费（表现为新任务偷偷换了方向）。
+func TestWebAbortClearsPendingSteer(t *testing.T) {
+	release := make(chan struct{})
+	llm := &mockLLM{Fn: func(msgs []agent.Message) (string, error) {
+		<-release
+		return `{"action":"reply","text":"回答完毕"}`, nil
+	}}
+	pm := testPluginManager(t)
+	a := agent.New(llm, pm)
+	cfg := NewConfig("127.0.0.1:0", "test-token")
+	cfg.SetAll(true, true, true)
+	cfg.Web = WebAuth{Enabled: true, Username: "admin", Password: "pw123"}
+	srv := New(cfg, a, session.New(t.TempDir()))
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+
+	login := postJSON(t, ts.URL+"/web/api/login", map[string]any{"username": "admin", "password": "pw123"}, nil)
+	if login.code != http.StatusOK {
+		t.Fatalf("login code=%d body=%s", login.code, login.body)
+	}
+
+	// 起一个活跃 Run，并注入一条待消费 steer
+	done := make(chan struct{})
+	go func() { _, _ = a.Run("长任务"); close(done) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for !a.Running() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !a.Running() {
+		close(release)
+		t.Fatal("Run 未进入活跃状态")
+	}
+	postJSON(t, ts.URL+"/web/api/steer", map[string]any{"content": "换个方向"}, login.cookies)
+	if !a.PendingSteer() {
+		close(release)
+		<-done
+		t.Fatal("steer 未被注入，测试前提不成立")
+	}
+
+	// abort 后 steer 槽位必须被清空
+	jw := postJSON(t, ts.URL+"/web/api/abort", map[string]any{}, login.cookies)
+	if jw.code != http.StatusOK {
+		t.Fatalf("abort code=%d body=%s", jw.code, jw.body)
+	}
+	if a.PendingSteer() {
+		t.Fatal("abort 后仍有待消费 steer（会导致停止后新任务被悄悄改方向）")
+	}
+	close(release)
+	<-done
+}
