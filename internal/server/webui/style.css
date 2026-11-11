@@ -69,11 +69,16 @@ button { font-family: inherit; cursor: pointer; }
 .login-card h1 { margin: 0; font-size: 20px; }
 .login-card .sub { margin: -8px 0 6px; color: var(--text-dim); font-size: 12px; }
 .login-card label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); }
+.login-card label .hint { font-size: 11px; opacity: .75; font-weight: normal; }
 .login-card input {
   padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg-input); color: var(--text); font-size: 14px;
 }
 .login-card input:focus { outline: none; border-color: var(--accent); }
+/* 登录框 placeholder 刻意做得很浅：以前颜色接近正常文字，用户误以为
+   "admin" 已经填好，直接输密码导致登录失败。这里降到几乎只是提示的灰度。 */
+.login-card input::placeholder { color: var(--text-dim); opacity: .45; }
+.login-card input:focus::placeholder { opacity: .3; }
 .login-card button {
   padding: 10px; border: none; border-radius: 8px; background: var(--accent);
   color: #fff; font-size: 14px; font-weight: 600;

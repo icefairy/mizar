@@ -416,9 +416,13 @@
     loginErr.textContent = "";
     loginBtn.disabled = true;
     try {
+      // 用户名留空时用服务端默认值 admin：以前占位符写着 "admin" 而实际为空，
+      // 用户以为已填好直接输密码 → 必然登录失败。现在留空才走默认，且输入框不再有
+      // 易误解的占位符。
+      const uname = $("username").value.trim() || "admin";
       await api("/web/api/login", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: $("username").value, password: $("password").value }),
+        body: JSON.stringify({ username: uname, password: $("password").value }),
       });
       $("password").value = "";
       enterApp(await api("/web/api/me"));
