@@ -30,7 +30,8 @@ var spinnerLines = []string{
 	// 近期新增（v0.7.x）
 	"mizar -c · 一条命令续接全局最后一次退出的会话",
 	"交互提问 · ask_user_question 编号作答，TUI 内直接选",
-	"计划模式 · /plan 先出方案再动手，exit_plan_mode 审批",
+	"计划模式 · /plan 先出方案再动手，/plan off 随时退出",
+	"拷问模式 · /grill 动手前先追问需求，问到没有歧义",
 	"会话目标 · /goal + 自动 judge 续跑，长任务不半途而废",
 	"定时提醒 · schedule 到点自动叫醒，不必守着终端",
 	"子代理委派 · delegate_task 并行拆活，上下文互不污染",

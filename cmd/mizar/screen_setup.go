@@ -38,6 +38,17 @@ func (m *tuiModel) initScreen() error {
 	// 重新排版全部可见行，粘贴几百字就是几百次重排。跳过绘制后每键只剩一次
 	// 空 Clear（内存层面，微秒级），配合 Show 抑制，攒批几乎零成本。
 	m.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		// 终端缩放（含首帧）：状态栏行数要按新宽度重算，否则窗口变窄后
+		// 第二行仍按旧宽度只占 1 行，内容被截断。tview 在 EventResize 后会重画，
+		// 这里借重画时机做一次便宜的比较（宽度没变则立即返回）。
+		if w, _ := screen.Size(); w > 0 {
+			if w != m.statusWidth && m.statusRaw != "" {
+				m.syncStatusBarHeight(m.statusRaw)
+			}
+			if w != m.projWidth && m.projRaw != "" {
+				m.syncBarHeight(m.projBar, m.projRaw, &m.projRows, &m.projWidth, &m.projRaw)
+			}
+		}
 		return m.pasteBurstActive()
 	})
 	return nil

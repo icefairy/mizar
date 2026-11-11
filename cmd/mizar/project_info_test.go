@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rivo/tview"
+
+	"mizar/internal/agent"
 )
 
 // 状态栏第一行的渲染规则：git 仓库带分支与改动数，非仓库只显示目录。
@@ -165,5 +169,142 @@ func TestWindowPathEllipsis(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("中段滚动应带 … 前缀")
+	}
+}
+
+// 状态栏第一行要展示 MCP 已连/配置数；无配置时整段省略（不占宽度）。
+func TestProjectLineMCPSegment(t *testing.T) {
+	withMCP := projectLine(projectInfo{Dir: "codes/mizar", MCPConf: 3, MCPConn: 2}, "", time.Time{}, time.Time{})
+	if !strings.Contains(withMCP, "MCP 2/3") {
+		t.Fatalf("应显示 MCP 已连/配置: %s", withMCP)
+	}
+	// MCP 段在项目段之后、会话段之前
+	if i, j := strings.Index(withMCP, "📁"), strings.Index(withMCP, "MCP"); i >= j {
+		t.Fatalf("MCP 段应位于项目段之后: %s", withMCP)
+	}
+	none := projectLine(projectInfo{Dir: "codes/mizar"}, "", time.Time{}, time.Time{})
+	if strings.Contains(none, "MCP") {
+		t.Fatalf("未配置 MCP 时不应出现该段: %s", none)
+	}
+}
+
+// 状态栏 MCP 统计应实时反映连接建立（惰性连接：连上后从 0/1 变 1/1）。
+func TestProjBarMCPSegmentLive(t *testing.T) {
+	m := newTUIForQueueTest()
+	connected := false
+	m.mcpStats = func() (int, int) {
+		if connected {
+			return 1, 1
+		}
+		return 1, 0
+	}
+	m.project = projectInfo{Dir: "codes/mizar"}
+	m.projBar = tview.NewTextView().SetDynamicColors(true)
+	m.projBarDirect()
+	if got := m.projBar.GetText(true); !strings.Contains(got, "MCP 0/1") {
+		t.Fatalf("初始应为 MCP 0/1: %q", got)
+	}
+	connected = true
+	m.projBarDirect()
+	if got := m.projBar.GetText(true); !strings.Contains(got, "MCP 1/1") {
+		t.Fatalf("连接后应为 MCP 1/1: %q", got)
+	}
+}
+
+// 活跃的拷问/计划模式要在状态栏第一行可见，否则用户会困惑模型为何一直提问。
+func TestProjectLineModeBadge(t *testing.T) {
+	got := projectLine(projectInfo{Dir: "codes/mizar", Mode: "拷问模式（/grill off · /plan off 退出）"}, "", time.Time{}, time.Time{})
+	if !strings.Contains(got, "拷问模式") {
+		t.Fatalf("应显示模式标记: %s", got)
+	}
+	none := projectLine(projectInfo{Dir: "codes/mizar"}, "", time.Time{}, time.Time{})
+	if strings.Contains(none, "模式") {
+		t.Fatalf("无模式时不应出现该段: %s", none)
+	}
+}
+
+// modeStatus 反映实际模式状态：三种状态（正常编码 / 计划 / 拷问）都必须有提示，
+// 叠加时两个都显示，退出后回到「正常编码模式」。
+func TestModeStatus(t *testing.T) {
+	m := newTUIForQueueTest()
+	// newTUIForQueueTest 直接构造 &agent.Agent{}（无模式控制器），补上
+	m.agent.GrillMode = agent.NewGrillMode()
+	m.agent.PlanMode = agent.NewPlanMode()
+
+	txt, color := m.modeStatus()
+	if !strings.Contains(txt, "正常编码模式") || color == "" {
+		t.Fatalf("默认应显示正常编码模式: %q color=%q", txt, color)
+	}
+	normal := color
+
+	m.agent.GrillMode.Enter("")
+	txt, color = m.modeStatus()
+	if !strings.Contains(txt, "拷问模式") || !strings.Contains(txt, "/grill off") {
+		t.Fatalf("进入拷问模式后应显示且给出退出指令: %q", txt)
+	}
+	if color == normal {
+		t.Fatal("拷问模式应有独立配色")
+	}
+
+	m.agent.PlanMode.Enter("")
+	txt, color = m.modeStatus()
+	if !strings.Contains(txt, "拷问") || !strings.Contains(txt, "计划模式") {
+		t.Fatalf("两种模式叠加应都显示: %q", txt)
+	}
+	if color == normal {
+		t.Fatal("叠加状态应有独立配色")
+	}
+
+	m.agent.GrillMode.Exit()
+	txt, _ = m.modeStatus()
+	if !strings.Contains(txt, "计划模式") || strings.Contains(txt, "拷问") {
+		t.Fatalf("退出拷问后应只剩计划模式: %q", txt)
+	}
+
+	m.agent.PlanMode.Exit()
+	txt, color = m.modeStatus()
+	if txt != "正常编码模式" || color != normal {
+		t.Fatalf("全部退出后应回到正常编码模式: %q", txt)
+	}
+}
+
+// 模式段在状态栏第一行始终可见（含正常编码模式），且各自配色不同。
+func TestProjBarAlwaysShowsMode(t *testing.T) {
+	m := newTUIForQueueTest()
+	m.agent.GrillMode = agent.NewGrillMode()
+	m.agent.PlanMode = agent.NewPlanMode()
+	m.project = projectInfo{Dir: "codes/mizar"}
+	m.projBar = tview.NewTextView().SetDynamicColors(true)
+
+	m.projBarDirect()
+	if got := m.projBar.GetText(true); !strings.Contains(got, "正常编码模式") {
+		t.Fatalf("正常模式也应有状态提示: %q", got)
+	}
+	m.agent.PlanMode.Enter("")
+	m.projBarDirect()
+	if got := m.projBar.GetText(true); !strings.Contains(got, "计划模式") {
+		t.Fatalf("计划模式应显示: %q", got)
+	}
+	m.agent.PlanMode.Exit()
+	m.agent.GrillMode.Enter("")
+	m.projBarDirect()
+	if got := m.projBar.GetText(true); !strings.Contains(got, "拷问模式") {
+		t.Fatalf("拷问模式应显示: %q", got)
+	}
+}
+
+// colorizeSegment 只给目标段上色，其余保持基础色；seg 不在行内时整行基础色。
+func TestColorizeSegment(t *testing.T) {
+	out := colorizeSegment("a 计划模式 b", "计划模式", "aqua", "grey")
+	for _, want := range []string{"[grey]a ", "[aqua]计划模式", "[grey] b"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("缺少 %q: %q", want, out)
+		}
+	}
+	if got := colorizeSegment("abc", "", "aqua", "grey"); got != "[grey]abc[::-]" {
+		t.Fatalf("空 seg 应整行基础色: %q", got)
+	}
+	if got := colorizeSegment("abc", "zzz", "aqua", "grey"); got != "[grey]abc[::-]" {
+		t.Fatalf("seg 不存在应整行基础色: %q", got)
 	}
 }

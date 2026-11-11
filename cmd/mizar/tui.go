@@ -175,9 +175,14 @@ type tuiModel struct {
 	projScrollOn     atomic.Bool     // 路径超宽时的滞动循环是否运行中
 	projScrollTick   atomic.Int64    // 滞动帧序号（由滞动循环推进）
 	project          projectInfo     // 项目信息快照（启动与任务结束时采集，渲染只读）
-	startedAt        time.Time       // 进程启动时刻（项目行「已运行」用）
-	flex             *tview.Flex
-	userScrolledUp   bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
+	// mcpStats 返回（已配置数, 已连接数）的 MCP server 统计（可为 nil）。
+	// 由 main 注入 mcpReg.Stats：状态栏第一行要显示「MCP 已连/配置」，
+	// 但不该让 tui 包直接依赖 MCPRegistry；连接是惰性的（首次 mcp_call 才握手），
+	// 所以不能把统计固化进 projectInfo 快照——那样连上一个也不会更新。
+	mcpStats       func() (configured, connected int)
+	startedAt      time.Time // 进程启动时刻（项目行「已运行」用）
+	flex           *tview.Flex
+	userScrolledUp bool // 用户是否手动向上滚动过（用于防止新消息强制拉回底部）
 
 	// 钩子通信：每次任务用新 channel
 	liveMu  sync.Mutex
@@ -297,6 +302,25 @@ type tuiModel struct {
 	// 上下文占用估算缓存（见 statusBarDirect）：lines 长度不变则估算值不变
 	ctxEst      int
 	ctxEstLines int
+
+	// 状态栏行数缓存（见 syncStatusBarHeight）：按宽度算出的显示行数，
+	// 只有变化时才 ResizeItem——每次重绘都调会触发整屏重排。
+	// statusRaw 保存未剥色的原始文本：终端缩放时用它重算行数
+	//（不用 GetText，那会把 [tag] 剥掉且 [[ 转义也一并还原，二次处理会错）。
+	statusRows  int
+	statusWidth int
+	statusRaw   string
+	// 项目行同样按宽度自适应（窄终端下 📁/分支/模式/会话/时长 一行放不下）
+	projRows  int
+	projWidth int
+	projRaw   string
+	// 鼠标拖选复制（见 selection.go）：按屏幕坐标记录选区，松开即复制。
+	sel      chatSelection
+	selMoved bool
+
+	// widthOverride / heightOverride 仅供测试强制指定终端尺寸（0 = 走真实取值）。
+	widthOverride  int
+	heightOverride int
 
 	// renderPending：已有一个全量重绘排在事件队列里（合并高频重绘请求，
 	// 避免任务运行期间重绘堆积把按键挤到队尾 —— 各平台共性，见 queueRenderAsync）
@@ -431,8 +455,10 @@ func (m *tuiModel) renderAllDirect() {
 	}
 
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
-	// 仅在首次渲染或新 bot 回复时自动滚动到底部
-	if !m.userScrolledUp {
+	// 仅在首次渲染或新 bot 回复时自动滚动到底部。
+	// 拖选中不滚：否则流式输出会把刚选中的那段文字顶走（选区按屏幕坐标记录，
+	// 内容一移动就选错东西）。
+	if !m.userScrolledUp && !m.hasSelection() {
 		m.textView.ScrollToEnd()
 	}
 
@@ -466,6 +492,15 @@ func renderAskPrompt(p *askPending) string {
 // statusBarDirect 直接渲染状态栏（事件循环内用）
 func (m *tuiModel) statusBarDirect() {
 	m.projBarDirect()
+	text := m.statusBarText()
+	m.statusBar.SetText(text).SetDynamicColors(true)
+	m.syncStatusBarHeight(text)
+}
+
+// statusBarText 构建状态栏第二行起的全部内容（纯动态颜色标记文本）。
+// 单独抽出来是为了「先算文本、再按宽度决定占几行渲染」——
+// 窄终端下内容本来就放不下，写死 1 行会被截断成一堆省略号。
+func (m *tuiModel) statusBarText() string {
 	s := &m.stats
 	var sb strings.Builder
 
@@ -572,7 +607,155 @@ func (m *tuiModel) statusBarDirect() {
 		sb.WriteString(sgrColor("fuchsia", level))
 	}
 
-	m.statusBar.SetText(sb.String()).SetDynamicColors(true)
+	return sb.String()
+}
+
+// syncStatusBarHeight 按当前终端宽度计算状态栏需要几行，必要时调整 flex 高度。
+//
+// 为什么不能写死 1 行：状态栏内容（tokens/上下文/缓存/tok-s/模型/思考等级）在
+// 80 列终端里本来就超过一行，硬截断后用户只能看到半截。这里用与 tview 相同的
+// 排版规则（宽字符占 2 列）实测总宽度，超过就多占一行，并把内容整体交给
+// TextView 自动折行（SetWordWrap 默认开）。
+//
+// 必须先算「未折行时的总宽度」：一旦控件宽度小于内容宽度，GetInnerRect 的
+// 宽度就是控件自身的宽度、拿不到内容真实宽度，所以测量用屏幕宽度而不是控件宽度。
+func (m *tuiModel) syncStatusBarHeight(text string) {
+	m.syncBarHeight(m.statusBar, text, &m.statusRows, &m.statusWidth, &m.statusRaw)
+}
+
+// syncBarHeight 通用的「按宽度决定底部条行数」：算出 text 在当前终端宽度下折行
+// 需要几行，与缓存不同时才 ResizeItem（每次重绘都调会触发整屏重排）。
+func (m *tuiModel) syncBarHeight(view *tview.TextView, text string, rowsCache, widthCache *int, rawCache *string) {
+	if view == nil || m.flex == nil {
+		return
+	}
+	w := m.terminalWidth()
+	if w <= 0 {
+		w = 80
+	}
+	*rawCache = text
+	rows := measureRows(stripDynamicColors(text), w)
+	if rows < 1 {
+		rows = 1
+	}
+	// 上限：极端窄的终端里这两行能被折成十几行，把聊天区挤没。
+	// 最多给 3 行（再多用户该调宽窗口了），超出的部分由 TextView 自身裁掉。
+	if maxRows := m.maxBarRows(); rows > maxRows {
+		rows = maxRows
+	}
+	if rows == *rowsCache && w == *widthCache {
+		return
+	}
+	*rowsCache, *widthCache = rows, w
+	m.flex.ResizeItem(view, rows, 0)
+}
+
+// maxBarRows 单条底部栏最多占几行（窄终端下防止把聊天区挤没）。
+func (m *tuiModel) maxBarRows() int {
+	const hardCap = 3
+	h := m.terminalHeight()
+	if h <= 0 {
+		return hardCap
+	}
+	if h/6 < hardCap {
+		return h / 6
+	}
+	return hardCap
+}
+
+// terminalHeight 取当前终端可见高度（拿不到时返回 0）。
+// 只看真实屏幕尺寸：textView 的矩形要等 flex 布局后才有效，早期/测试里可能是
+// 一个无关的小值，用它算「最多几行」会把状态栏无谓压在 1 行。
+func (m *tuiModel) terminalHeight() int {
+	if m.heightOverride > 0 {
+		return m.heightOverride
+	}
+	if m.scr != nil {
+		if _, h := m.scr.Size(); h > 0 {
+			return h
+		}
+	}
+	return 0
+}
+
+// terminalWidth 取当前终端可见宽度（拿不到时回退 80）。
+func (m *tuiModel) terminalWidth() int {
+	if m.widthOverride > 0 {
+		return m.widthOverride
+	}
+	if m.scr != nil {
+		if w, _ := m.scr.Size(); w > 0 {
+			return w
+		}
+	}
+	if m.textView != nil {
+		if _, _, w, _ := m.textView.GetInnerRect(); w > 0 {
+			return w
+		}
+	}
+	if _, _, w, _ := m.statusBar.GetInnerRect(); w > 0 {
+		return w
+	}
+	return 0
+}
+
+// stripDynamicColors 去掉 sgrColor 产生的 [tag] / [::b] 标记，得到用于测宽的纯文本。
+// 用 tview 的转义约定处理 [[ 这类转义形式，避免把用户内容误当标签剥掉。
+func stripDynamicColors(s string) string {
+	var sb strings.Builder
+	inTag := false
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+		switch {
+		case inTag:
+			if c == ']' {
+				inTag = false
+			}
+		case c == '[':
+			if i+1 < len(runes) && runes[i+1] == '[' { // [[ 是转义方括号（tview 约定）
+				sb.WriteRune('[')
+				i++
+				continue
+			}
+			inTag = true
+		default:
+			sb.WriteRune(c)
+		}
+	}
+	return sb.String()
+}
+
+// measureView 专门用来测行数的临时 TextView（复用，避免每次分配）。
+// 为什么不用自己算宽度：折行规则（uniseg 单词边界、CJK 双宽、样式标签不计宽）
+// 与 tview 内部实现强绑定，自己抄一份必然逐字符对不上，而这里差一行就是
+// 「状态栏底部多出空白」或「最后半行被切掉」。直接借 tview 自己的排版代码最准。
+var (
+	measureView   *tview.TextView
+	measureViewMu sync.Mutex
+)
+
+// measureRows 返回 text 在 width 列下折行后的行数（与真实渲染一致）。
+func measureRows(text string, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	measureViewMu.Lock()
+	defer measureViewMu.Unlock()
+	if measureView == nil {
+		// 动态颜色关闭：传进来的是已剥掉标签的纯文本，再开动态颜色会把
+		// 内容里的 [ 当成标签解析，量出来的宽度就不对了。
+		measureView = tview.NewTextView().SetDynamicColors(false).SetRegions(false)
+	}
+	// 注意必须用 SetSize（它设置 field width/height，GetWrappedLineCount 读的是这个），
+	// SetRect 只改布局矩形，不影响折行计算。
+	measureView.SetSize(10000, width)
+	measureView.SetText(text)
+	rows := measureView.GetWrappedLineCount()
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
 }
 
 // projBarDirect 渲染状态栏第一行（项目行）。
@@ -585,7 +768,14 @@ func (m *tuiModel) projBarDirect() {
 		return // 单测中手工构造的 tuiModel 可能没建组件
 	}
 	dir := redactHome(m.project.Dir)
-	line := projectLine(m.project, m.sessionID, m.startedAt, time.Now())
+	info := m.project
+	// MCP 统计实时取（连接是惰性的，快照会过期）；未注入时保持 0
+	if m.mcpStats != nil {
+		info.MCPConf, info.MCPConn = m.mcpStats()
+	}
+	modeText, modeColor := m.modeStatus()
+	info.Mode = modeText
+	line := projectLine(info, m.sessionID, m.startedAt, time.Now())
 	if _, _, w, _ := m.projBar.GetInnerRect(); w > 0 {
 		// 固定段宽度 = 完整行 + 目录段 + 「📁 」前缀 → 用空白目录算出的固定部分
 		// （不用空串避免 fallback "?" 干扰宽度）
@@ -603,7 +793,56 @@ func (m *tuiModel) projBarDirect() {
 			}
 		}
 	}
-	m.projBar.SetText(sgrColor("grey", line)).SetDynamicColors(true)
+	// 模式段单独上色：正常/计划/拷问三种状态必须一眼可辨，
+	// 其余部分保持 grey（项目行是次要信息，不该抢聊天区的注意力）。
+	text := colorizeSegment(line, modeText, modeColor, "grey")
+	m.projBar.SetText(text).SetDynamicColors(true)
+	// 项目行也要按宽度自适应：窄终端下 📁/分支/模式/会话/时长 一行放不下，
+	// 只做路径滞动解决不了（滞动只管目录段，其余段的宽度是固定的）。
+	m.syncBarHeight(m.projBar, text, &m.projRows, &m.projWidth, &m.projRaw)
+}
+
+// colorizeSegment 把 line 中的 seg 用 segColor 上色、其余部分用 baseColor。
+// seg 为空或不在 line 中时整行按 baseColor 输出。
+func colorizeSegment(line, seg, segColor, baseColor string) string {
+	if seg == "" {
+		return sgrColor(baseColor, line)
+	}
+	idx := strings.Index(line, seg)
+	if idx < 0 {
+		return sgrColor(baseColor, line)
+	}
+	var sb strings.Builder
+	if pre := line[:idx]; pre != "" {
+		sb.WriteString(sgrColor(baseColor, pre))
+	}
+	sb.WriteString(sgrColor(segColor, seg))
+	if post := line[idx+len(seg):]; post != "" {
+		sb.WriteString(sgrColor(baseColor, post))
+	}
+	return sb.String()
+}
+
+// modeStatus 返回状态栏第一行要显示的模式段文本与颜色。
+//
+// 三种状态必须始终可见（含「正常编码模式」）：模式会让模型行为整体改变——
+// 拷问模式一直提问、计划模式迟迟不动手。没有常驻指示时，用户只能从模型话术
+// 猜自己是不是还卡在某个模式里。
+func (m *tuiModel) modeStatus() (text, color string) {
+	if m.agent == nil {
+		return "", ""
+	}
+	grill := m.agent.GrillMode != nil && m.agent.GrillMode.IsActive()
+	plan := m.agent.PlanMode != nil && m.agent.PlanMode.IsActive()
+	switch {
+	case grill && plan:
+		return "拷问+计划模式（/grill off · /plan off 退出）", "fuchsia"
+	case grill:
+		return "拷问模式（/grill off 退出）", "yellow"
+	case plan:
+		return "计划模式（/plan off 退出）", "aqua"
+	}
+	return "正常编码模式", "green"
 }
 
 // startProjScroll 启动项目行滞动循环（仅路径超宽时需要）。
@@ -1374,37 +1613,15 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 	m.app.EnableMouse(shouldEnableMouse())
 	m.app.EnablePaste(true) // 启用 bracketed paste：粘贴多行文本时作为整体处理（Unix 生效；Windows 由 pasteGuard 兜底）
 
-	// 鼠标事件捕获：消耗点击事件（不让 textView 窃取焦点），滚轮自己处理
-	m.app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
-		// 左键点击/拖拽：消耗掉，焦点保持在输入框
-		// 文本选择：按住 Shift 拖动，由终端模拟器处理（tcell 鼠标跟踪模式下不拦截 Shift+拖拽）
-		switch action {
-		case tview.MouseScrollUp, tview.MouseScrollDown:
-			// 滚轮**必须自己处理**，不能交给 TextView 的 MouseHandler：
-			// 它只改自己的 lineOffset，我们完全不知情 → userScrolledUp 仍是 false，
-			// 而流式/看门狗每次 renderAllDirect 都会「不在底部就 ScrollToEnd」，
-			// 于是滚轮刚滚上去就被拽回底部，观感就是「滚轮没反应 / 用不了」。
-			if m.wheelScroll(action, event) {
-				return nil, tview.MouseConsumed
-			}
-			return event, action
-		case tview.MouseLeftDown, tview.MouseLeftUp, tview.MouseLeftClick, tview.MouseLeftDoubleClick:
-			return nil, tview.MouseConsumed
-		case tview.MouseRightDown, tview.MouseRightUp, tview.MouseRightClick:
-			// 右键粘贴：鼠标跟踪模式下终端自带的右键粘贴菜单不会弹出，
-			// 这里在鼠标按下的瞬间把剪贴板内容插入输入框，恢复用户"右键粘贴"习惯。
-			if action == tview.MouseRightDown {
-				text := m.clip.get()
-				if text != "" && m.inputField.HasFocus() {
-					cur := m.inputField.GetText()
-					m.inputField.SetText(cur+text, true)
-				} else if text != "" {
-					m.inputField.SetText(text, true)
-				}
-			}
-			return nil, tview.MouseConsumed
-		}
-		return event, action
+	// 鼠标事件捕获：滚轮自己处理、左键自己拖选（见 selection.go）、右键粘贴。
+	// 具体逻辑抽到 mouseCapture 里，便于单测（Shift 放行这条不变式必须锁住）。
+	m.app.SetMouseCapture(m.mouseCapture)
+
+	// 选区反色：画完再叠一层。不塞进 renderAllDirect 的文本里，是因为流式输出
+	// 每 60ms 全量重建一次文本，塞进去会被反复冲掉；画后叠加最省事，
+	// 也不干扰滚动/换行计算。
+	m.app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		m.drawSelectionHighlight(screen)
 	})
 
 	// 全局按键捕获：Enter 发送、Alt+Enter 换行
@@ -1414,6 +1631,11 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		// 注意：本函数返回 nil 表示事件被吞掉（InputCapture 语义），与 MouseCapture 相反。
 		now := time.Now()
 		defer func() { m.lastKeyAt = now }()
+		// 有拖选选区时，Esc 只清选区（不取消任务、不退出其它界面）：
+		// 与常见 GUI「按 Esc 取消选择」一致，也避免误按 Esc 就把正在跑的任务停掉。
+		if event.Key() == tcell.KeyEsc && m.escClearsSelection() {
+			return nil
+		}
 		// 原始 VT 序列解码（见 esc_seq.go）：把 ESC[D 这类逐字符到达的序列拼回
 		// 真正的按键（方向键、Home/End、F 键、Alt+字符），并吞掉泄漏的鼠标序列。
 		// 必须在所有按键逻辑之前——否则序列字符会被当成普通文本塞进输入框。
@@ -2522,8 +2744,10 @@ func (m *tuiModel) renderCopyMode() {
 	m.textView.SetText(sb.String()).SetDynamicColors(true)
 	// 滚动到光标所在行，保证可见
 	m.textView.ScrollTo(m.copyCursor, 0)
-	// 状态栏提示
-	m.statusBar.SetText(sgrColor("yellow", "〔拷贝模式〕↑↓ 移动 · v 标记行 · r 范围选区 · y 复制 · q/Esc 退出"))
+	// 状态栏提示（同样按宽度自适应行数，避免短提示占着多行空白）
+	note := sgrColor("yellow", "〔拷贝模式〕↑↓ 移动 · v 标记行 · r 范围选区 · y 复制 · q/Esc 退出")
+	m.statusBar.SetText(note)
+	m.syncStatusBarHeight(note)
 }
 
 // =============================================================================
@@ -2687,7 +2911,9 @@ func (m *tuiModel) renderModelPicker() {
 	} else {
 		m.textView.ScrollTo(0, 0)
 	}
-	m.statusBar.SetText(sgrColor("yellow", "〔模型选择〕↑↓ 移动 · Enter 确认 · Esc 取消"))
+	note := sgrColor("yellow", "〔模型选择〕↑↓ 移动 · Enter 确认 · Esc 取消")
+	m.statusBar.SetText(note)
+	m.syncStatusBarHeight(note)
 }
 
 func truncateArgs(s string) string {
@@ -2820,8 +3046,9 @@ func toolCallReason(content string) string {
 	return ""
 }
 
-func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *session.TitleCache) {
+func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *session.TitleCache, mcpStats func() (int, int)) {
 	m := newTuiModel(a, st, sessionID, titleCache)
+	m.mcpStats = mcpStats
 	if err := m.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI 退出: %v，回退经典模式\n", err)
 		fmt.Println(banner())
@@ -2878,4 +3105,62 @@ func classicFallback(a *agent.Agent, st *session.Store, sessionID string) {
 			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 	}
+}
+
+// mouseCapture 全局鼠标捕获（tview Application.SetMouseCapture 的实现）。
+//
+// 不变式：
+//   - 滚轮自己处理（交给 TextView 会绕过 userScrolledUp，导致被自动拉回底部）；
+//   - 左键自己拖选复制（selection.go）；Shift+左键一律放行给终端原生选择；
+//   - 右键按下即粘贴（鼠标上报模式下终端自带的右键菜单不弹）。
+func (m *tuiModel) mouseCapture(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
+
+	// 左键点击/拖拽：消耗掉，焦点保持在输入框
+	// 文本选择：按住 Shift 拖动，由终端模拟器处理（tcell 鼠标跟踪模式下不拦截 Shift+拖拽）
+	switch action {
+	case tview.MouseScrollUp, tview.MouseScrollDown:
+		// 滚轮**必须自己处理**，不能交给 TextView 的 MouseHandler：
+		// 它只改自己的 lineOffset，我们完全不知情 → userScrolledUp 仍是 false，
+		// 而流式/看门狗每次 renderAllDirect 都会「不在底部就 ScrollToEnd」，
+		// 于是滚轮刚滚上去就被拽回底部，观感就是「滚轮没反应 / 用不了」。
+		if m.wheelScroll(action, event) {
+			return nil, tview.MouseConsumed
+		}
+		return event, action
+	case tview.MouseLeftDown, tview.MouseLeftUp, tview.MouseLeftClick, tview.MouseLeftDoubleClick:
+		// 左键：自己实现拖选复制（见 selection.go），不再单纯丢弃。
+		// Shift+拖拽故意不接管：鼠标上报模式下 Shift 是终端原生选择的逃生通道，
+		// 即使事件传到这里也放行（返回 event 让它继续走），保证那条退路永远可用。
+		if event != nil && event.Modifiers()&tcell.ModShift != 0 {
+			return event, action
+		}
+		m.handleLeftMouse(action, event)
+		return nil, tview.MouseConsumed
+	case tview.MouseMove:
+		// 拖动中的移动：只有在已按下左键时才是拖选（否则是悬停，不必处理）
+		if m.sel.active && event != nil && event.Buttons()&tcell.ButtonPrimary != 0 {
+			x, y := event.Position()
+			m.updateSelection(x, y)
+			// 拖到聊天区边界外自动滚动：一次选长段落不用松手再滚。
+			// 选区变化的重画由 tview 负责（consumed=true 会触发 draw），
+			// 反色由 AfterDrawFunc 叠加（见 drawSelectionHighlight）。
+			m.autoScrollWhileDragging(y)
+			return nil, tview.MouseConsumed
+		}
+		return event, action
+	case tview.MouseRightDown, tview.MouseRightUp, tview.MouseRightClick:
+		// 右键粘贴：鼠标跟踪模式下终端自带的右键粘贴菜单不会弹出，
+		// 这里在鼠标按下的瞬间把剪贴板内容插入输入框，恢复用户"右键粘贴"习惯。
+		if action == tview.MouseRightDown {
+			text := m.clip.get()
+			if text != "" && m.inputField.HasFocus() {
+				cur := m.inputField.GetText()
+				m.inputField.SetText(cur+text, true)
+			} else if text != "" {
+				m.inputField.SetText(text, true)
+			}
+		}
+		return nil, tview.MouseConsumed
+	}
+	return event, action
 }

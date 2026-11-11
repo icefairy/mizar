@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rivo/tview"
 )
@@ -57,6 +59,18 @@ func (c *clipboard) set(text string) {
 	setGlobalClipboard(text)
 }
 
+// peek 只返回内部缓冲（不读系统剪贴板）。
+// get 会优先读 X11/系统剪贴板，测试里那是有状态的共享资源，
+// 断言「刚复制的内容」必须看内部缓冲才可靠。
+func (c *clipboard) peek() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf
+}
+
 // get 返回剪贴板内容：优先本地 X11/WSLg，其次内部缓冲（SSH 下外部读不到时用内部）。
 func (c *clipboard) get() string {
 	if local := readLocalClipboard(); local != "" {
@@ -75,44 +89,70 @@ func osc52Set(text string) {
 	fmt.Fprintf(os.Stderr, "\x1b]52;c;%s\x07", encoded)
 }
 
+// clipboardExecTimeout 外部剪贴板工具的超时。
+//
+// 为什么要超时：xsel/xclip/powershell 在没有可用显示服务（SSH、headless、WSL 未配
+// X 转发）时可能既不报错也不返回——而复制是在事件循环里同步调用的，
+// 卡住就等于整个界面卡死（实测 xsel 在无 X 环境会挂住不退出）。
+// 宁可这次不写系统剪贴板（内部缓冲 + OSC52 仍可用），也绝不能冻结界面。
+const clipboardExecTimeout = 2 * time.Second
+
+// runWithTimeout 跑一个外部命令（stdin 为 input），超时即杀。返回是否成功。
+func runWithTimeout(name string, args []string, input string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), clipboardExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = strings.NewReader(input)
+	// WaitDelay 是必须的：xsel/xclip 这类工具在无 X 环境会 fork 出子进程并持有
+	// stdin 管道，即使主进程被 kill，cmd.Wait 仍会等那条管道的拷贝 goroutine，
+	// 结果就是「超时也返回不了」→ 事件循环照旧卡死。WaitDelay 到点强制关管道。
+	cmd.WaitDelay = clipboardExecTimeout
+	// 不接 stdout/stderr：部分工具会把内容吐回来，接住只占内存
+	return cmd.Run() == nil
+}
+
+// outputWithTimeout 跑外部命令并取 stdout，超时/失败返回空串。
+func outputWithTimeout(name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), clipboardExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = clipboardExecTimeout
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
 // setGlobalClipboard 把文本写入全局（X11/WinClip）剪贴板。仅本地直连或 WSLg 时生效。
 func setGlobalClipboard(text string) {
 	// 用 stdin 管道传给 xclip/xsel，避免大文本进 shell 命令行
 	if clip, err := exec.LookPath("xclip"); err == nil {
-		cmd := exec.Command(clip, "-selection", "clipboard")
-		cmd.Stdin = strings.NewReader(text)
-		if cmd.Run() == nil {
+		if runWithTimeout(clip, []string{"-selection", "clipboard"}, text) {
 			return
 		}
 	}
 	if sel, err := exec.LookPath("xsel"); err == nil {
-		cmd := exec.Command(sel, "--clipboard", "--input")
-		cmd.Stdin = strings.NewReader(text)
-		if cmd.Run() == nil {
+		if runWithTimeout(sel, []string{"--clipboard", "--input"}, text) {
 			return
 		}
 	}
 	// WSLg / 原生 Windows 终端：尝试 powershell.exe 的剪贴板 Set-Clipboard
 	if ps, err := exec.LookPath("powershell.exe"); err == nil {
-		cmd := exec.Command(ps, "-NoProfile", "-Command",
-			"$Input | Set-Clipboard -Raw", "-")
-		cmd.Stdin = strings.NewReader(text)
-		_ = cmd.Run()
+		runWithTimeout(ps, []string{"-NoProfile", "-Command", "$Input | Set-Clipboard -Raw", "-"}, text)
 	}
 }
 
 // readLocalClipboard 读取本地（X11 / WSLg）剪贴板内容。读取失败返回空串。
 func readLocalClipboard() string {
 	if clip, err := exec.LookPath("xclip"); err == nil {
-		out, perr := exec.Command(clip, "-selection", "clipboard", "-o").Output()
-		if perr == nil && len(out) > 0 {
-			return strings.TrimRight(string(out), "\x00")
+		if out := outputWithTimeout(clip, "-selection", "clipboard", "-o"); out != "" {
+			return strings.TrimRight(out, "\x00")
 		}
 	}
 	if sel, err := exec.LookPath("xsel"); err == nil {
-		out, perr := exec.Command(sel, "--clipboard", "--output").Output()
-		if perr == nil && len(out) > 0 {
-			return string(out)
+		if out := outputWithTimeout(sel, "--clipboard", "--output"); out != "" {
+			return out
 		}
 	}
 	return ""

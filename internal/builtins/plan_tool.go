@@ -19,7 +19,7 @@ func toolExitPlanMode() plugins.Tool {
 	return plugins.Tool{
 		Name:        "exit_plan_mode",
 		NoTimeout:   true, // 等待用户审批计划，不设超时（同 ask_user_question）
-		Description: "Submit your completed plan for user review. Call this when you have a finished plan ready. The user will approve it (start executing) or ask you to keep planning with feedback.",
+		Description: "Submit your completed plan for user review. Call this when you have a finished plan ready. The user will approve it (start executing) or ask you to keep planning with feedback. (Users can also leave plan mode themselves with the /plan off slash command.)",
 		Run: func(args string) (string, error) {
 			if agent.CurrentPlanMode == nil || !agent.CurrentPlanMode.IsActive() {
 				return "计划模式未激活。请先使用 /plan 命令进入计划模式。", nil
@@ -35,7 +35,7 @@ func toolExitPlanMode() plugins.Tool {
 			switch review.Action {
 			case "approve":
 				agent.CurrentPlanMode.Exit()
-				return "✅ 计划已批准。退出计划模式，开始执行。", nil
+				return "✅ 计划已批准。已退出计划模式，开始执行。", nil
 			case "keep_planning":
 				feedback := strings.TrimSpace(review.Feedback)
 				if feedback == "" {

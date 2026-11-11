@@ -64,6 +64,66 @@ func randPassword(n int) string {
 // startupHint 首次运行未配置供应商时，banner 末尾追加的引导提示。
 var startupHint string
 
+// mcpListText 生成「/mcp list」输出：已配置的 server 清单 + 各 server 当前是否已连接。
+// 连接是惰性的（首次 mcp_call 才握手），故同时展示「配置」与「已连」两项状态。
+func mcpListText(cfg *config.Config) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("MCP servers：配置 %d 个（来源 %s）\n", len(cfg.MCPServers), config.DefaultPath()))
+	if len(cfg.MCPServers) == 0 {
+		sb.WriteString("  （未配置，使用 /mcp add <name> <url|command> 添加）\n")
+		sb.WriteString("\n用法:\n")
+		sb.WriteString("  /mcp list                       列出已配置的 server\n")
+		sb.WriteString("  /mcp add <name> <url>           添加 HTTP server\n")
+		sb.WriteString("  /mcp add <name> <command> [args] 添加 stdio server\n")
+		sb.WriteString("  /mcp remove <name>              删除 server\n")
+		sb.WriteString("  /mcp test <name>                测试连接并列出工具\n")
+		sb.WriteString("  /mcp reload                     重新加载配置\n")
+		return sb.String()
+	}
+	for _, s := range cfg.MCPServers {
+		transport := "stdio"
+		addr := s.Command
+		if s.URL != "" {
+			transport = "http"
+			addr = s.URL
+		}
+		state := "未连接"
+		if runtimeMCPConnected(s.Name) {
+			state = "已连接"
+		}
+		if s.Timeout > 0 {
+			sb.WriteString(fmt.Sprintf("  %-15s [%s] %s  timeout=%ds  状态: %s\n", s.Name, transport, addr, s.Timeout, state))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %-15s [%s] %s  状态: %s\n", s.Name, transport, addr, state))
+		}
+		if len(s.Args) > 0 {
+			sb.WriteString(fmt.Sprintf("    args: %s\n", strings.Join(s.Args, " ")))
+		}
+	}
+	sb.WriteString("\n提示：连接为惰性建立（首次 mcp_call 时握手），未连接 ≠ 不可用。\n")
+	sb.WriteString("\n用法:\n")
+	sb.WriteString("  /mcp list                       列出已配置的 server\n")
+	sb.WriteString("  /mcp add <name> <url>           添加 HTTP server\n")
+	sb.WriteString("  /mcp add <name> <command> [args] 添加 stdio server\n")
+	sb.WriteString("  /mcp remove <name>              删除 server\n")
+	sb.WriteString("  /mcp test <name>                测试连接并列出工具\n")
+	sb.WriteString("  /mcp reload                     重新加载配置\n")
+	return sb.String()
+}
+
+// runtimeMCPRegistry 当前进程生效的 MCP 注册表（供 /mcp 命令与状态栏查询连接状态）。
+var runtimeMCPRegistry *engine.MCPRegistry
+
+// runtimeMCPConnected 判断某 server 是否已建立连接。
+func runtimeMCPConnected(name string) bool {
+	return runtimeMCPRegistry != nil && runtimeMCPRegistry.Connected(name)
+}
+
+// runtimeMCPStats 返回（配置数, 已连接数），供状态栏第一行展示。
+func runtimeMCPStats() (int, int) {
+	return runtimeMCPRegistry.Stats()
+}
+
 func main() {
 	var (
 		baseURL   = flag.String("base-url", "http://127.0.0.1:3002/v1", "OpenAI 兼容端点 (默认指向璇玑网关)")
@@ -221,6 +281,7 @@ func main() {
 	}
 	defer mcpReg.Close()
 	host.MCPCall = mcpReg.CallFn()
+	runtimeMCPRegistry = mcpReg
 	// NetBridge：插件 TCP 网络能力（listen/dial/send/recv/close/stop），实现分布式通信/自定义协议
 	host.NetBridge = engine.NewNetBridge()
 	// FTPBridge：插件 FTP 客户端（connect/list/upload/download/mkdir/rmdir/delete/rename/close）
@@ -908,18 +969,58 @@ func main() {
 	// 内置 /plan 命令：进入/退出计划模式（复刻 dsh plan-mode）
 	a.Commands.Register(agent.Command{
 		Name:        "plan",
-		Description: "进入/退出计划模式（/plan 进入 ｜ /plan <指令> 进入并附带规划指引 ｜ /plan off 直接退出）",
+		Description: "计划模式（/plan 进入 ｜ /plan status 查看 ｜ /plan off 或 /plan exit 退出 ｜ /plan <指令> 附带规划指引）",
 		Run: func(args string) (string, error) {
 			arg := strings.TrimSpace(args)
-			if arg == "off" || arg == "关闭" || arg == "退出" {
+			switch {
+			case agent.IsModeExitArg(arg):
 				a.PlanMode.Exit()
-				return "✓ 已退出计划模式。模型可直接执行任务。", nil
+				return "✓ 已退出计划模式。模型可直接执行任务（之后仍可 /plan 重新进入）。", nil
+			case strings.EqualFold(arg, "status") || arg == "状态" || arg == "查看":
+				if !a.PlanMode.IsActive() {
+					return "当前未处于计划模式。输入 /plan 进入。", nil
+				}
+				return "当前处于计划模式。\n  · 正常流程：模型调用 exit_plan_mode 工具提交计划，你在弹窗里选 Approve / Keep planning\n  · 想强行退出（不审批）：输入 /plan off（或 /plan exit）\n  · 当前规划指引：" + a.PlanMode.Guidance(), nil
 			}
-			a.PlanMode.Enter(arg)
-			msg := "✓ 已进入计划模式。模型将先探索设计方案并通过 exit_plan_mode 提交计划供审批。"
-			if arg != "" && arg != "进入" && arg != "on" {
-				msg += fmt.Sprintf("\n规划指引：%s", arg)
+			guidance := ""
+			if !agent.IsModeEnterArg(arg) {
+				guidance = arg
 			}
+			a.PlanMode.Enter(guidance)
+			msg := "✓ 已进入计划模式。模型将先探索设计方案，再调用 exit_plan_mode 工具提交计划供你审批。"
+			if guidance != "" {
+				msg += fmt.Sprintf("\n规划指引：%s", guidance)
+			}
+			msg += "\n\n退出方式：\n  · 审批时选 Approve（自动退出并开始执行）\n  · 随时输入 /plan off（或 /plan exit）强制退出"
+			return msg, nil
+		},
+	})
+	// 内置 /grill 命令：拷问模式（动手前把需求问到没有歧义）
+	a.Commands.Register(agent.Command{
+		Name:        "grill",
+		Description: "拷问模式（/grill 进入 ｜ /grill status 查看 ｜ /grill off 或 /grill exit 退出 ｜ /grill <指令> 自定义拷问重点）",
+		Run: func(args string) (string, error) {
+			arg := strings.TrimSpace(args)
+			switch {
+			case agent.IsModeExitArg(arg):
+				a.GrillMode.Exit()
+				return "✓ 已退出拷问模式。模型可直接按现有理解动手（之后仍可 /grill 重新进入）。", nil
+			case strings.EqualFold(arg, "status") || arg == "状态" || arg == "查看":
+				if !a.GrillMode.IsActive() {
+					return "当前未处于拷问模式。输入 /grill 进入。", nil
+				}
+				return "当前处于拷问模式：模型会先用 ask_user_question 追问需求（每轮最多 3 问，每题带编号选项），\n需求收敛后输出「确认清单 + 风险与默认假设」并停下等指令。\n  · 退出：/grill off（或 /grill exit）\n  · 想直接看方案：先 /grill off 再 /plan", nil
+			}
+			guidance := ""
+			if !agent.IsModeEnterArg(arg) {
+				guidance = arg
+			}
+			a.GrillMode.Enter(guidance)
+			msg := "✓ 已进入拷问模式。模型会先复述理解，再用 ask_user_question 逐层追问（每轮最多 3 问，每题给编号选项，直接回数字即可）。"
+			if guidance != "" {
+				msg += fmt.Sprintf("\n拷问重点：%s", guidance)
+			}
+			msg += "\n\n退出方式：\n  · 需求问完会自动停（输出确认清单，不会自己开工）\n  · 随时输入 /grill off（或 /grill exit）强制退出"
 			return msg, nil
 		},
 	})
@@ -1431,7 +1532,7 @@ func main() {
 	// 内置 /mcp 命令：查看/管理 MCP server
 	a.Commands.Register(agent.Command{
 		Name:        "mcp",
-		Description: "MCP server 管理（/mcp 列表 ｜ /mcp add <name> <url|command> [args...] ｜ /mcp remove <name> ｜ /mcp test <name> ｜ /mcp reload）",
+		Description: "MCP server 管理（/mcp list 列出现状 ｜ /mcp add <name> <url|command> [args...] ｜ /mcp remove <name> ｜ /mcp test <name> ｜ /mcp reload）",
 		Run: func(args string) (string, error) {
 			cfg, err := config.Load(config.DefaultPath())
 			if err != nil {
@@ -1439,40 +1540,13 @@ func main() {
 			}
 			args = strings.TrimSpace(args)
 			if args == "" {
-				// 列表模式
-				var sb strings.Builder
-				sb.WriteString("MCP servers（配置来源: ~/.mizar/config.json）:\n")
-				if len(cfg.MCPServers) == 0 {
-					sb.WriteString("  （未配置，使用 /mcp add 添加）\n")
-				} else {
-					for _, s := range cfg.MCPServers {
-						transport := "stdio"
-						addr := s.Command
-						if s.URL != "" {
-							transport = "http"
-							addr = s.URL
-						}
-						if s.Timeout > 0 {
-							sb.WriteString(fmt.Sprintf("  %-15s [%s] %s  timeout=%ds\n", s.Name, transport, addr, s.Timeout))
-						} else {
-							sb.WriteString(fmt.Sprintf("  %-15s [%s] %s\n", s.Name, transport, addr))
-						}
-						if len(s.Args) > 0 {
-							sb.WriteString(fmt.Sprintf("    args: %s\n", strings.Join(s.Args, " ")))
-						}
-					}
-				}
-				sb.WriteString("\n用法:\n")
-				sb.WriteString("  /mcp add <name> <url>           添加 HTTP server\n")
-				sb.WriteString("  /mcp add <name> <command> [args] 添加 stdio server\n")
-				sb.WriteString("  /mcp remove <name>              删除 server\n")
-				sb.WriteString("  /mcp test <name>                测试连接并列出工具\n")
-				sb.WriteString("  /mcp reload                     重新加载配置\n")
-				return sb.String(), nil
+				return mcpListText(cfg), nil
 			}
 			fields := strings.Fields(args)
 			cmd := fields[0]
 			switch cmd {
+			case "list", "ls", "status":
+				return mcpListText(cfg), nil
 			case "add":
 				if len(fields) < 3 {
 					return "", fmt.Errorf("用法: /mcp add <name> <url|command> [args...]\n示例:\n  /mcp add myserver http://127.0.0.1:3001/mcp\n  /mcp add sqlite npx -y @modelcontextprotocol/server-sqlite")
@@ -1578,7 +1652,7 @@ func main() {
 				return fmt.Sprintf("✓ MCP 配置已重新加载并重建连接（%d 个 server: %s）", len(cfg.MCPServers), mcpNames(cfg.MCPServers)), nil
 
 			default:
-				return "", fmt.Errorf("未知子命令 %q，支持: add/remove/test/reload（输入 /mcp 查看帮助）", cmd)
+				return "", fmt.Errorf("未知子命令 %q，支持: list/add/remove/test/reload（输入 /mcp 查看帮助）", cmd)
 			}
 		},
 	})
@@ -1905,7 +1979,7 @@ func main() {
 	}
 	if *tui {
 		diag.Logf("tui", "runTUI 会话=%s logs=%s", *sessionID, diag.Path())
-		runTUI(a, st, *sessionID, titleCache)
+		runTUI(a, st, *sessionID, titleCache, mcpReg.Stats)
 		diag.Logf("tui", "runTUI 返回，进程结束")
 	} else {
 		interactive(a, st, *sessionID)

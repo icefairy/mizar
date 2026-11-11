@@ -123,6 +123,7 @@ type Agent struct {
 	Guard        *RepeatGuard      // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
 	Jobs         *jobs.Registry    // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
 	PlanMode     *PlanMode         // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
+	GrillMode    *GrillMode        // 拷问模式控制器（nil = 不启用；动手前先追问需求）
 	GoalService  *GoalService      // 会话目标服务（nil = 不启用；复刻 dsh goal）
 	GoalLoop     *GoalLoop         // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
 	SubAgents    *SubagentManager  // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
@@ -166,6 +167,10 @@ type Agent struct {
 
 	// 工具调用解析策略
 	callParser func(text string) (*callRequest, error)
+
+	// promptModeVer 记录构建缓存时的模式版本（计划/拷问模式 Enter/Exit 会变）。
+	// 模式开关必须让 system prompt 缓存失效，否则退出模式后模型仍按老提示跑。
+	promptModeVer uint64
 
 	// systemPromptCache 缓存 SystemPrompt() 结果。
 	// 缓存友好关键：system + 工具列表必须是字节级稳定前缀，
@@ -277,6 +282,7 @@ func New(llm LLM, pm *plugins.Manager) *Agent {
 		cacheStats: &CacheStats{},
 		Guard:      NewRepeatGuard(nil),
 		PlanMode:   NewPlanMode(),
+		GrillMode:  NewGrillMode(),
 	}
 	// 插件导出的 command_* 函数注册为斜杠命令
 	for _, c := range pm.Commands() {
@@ -387,7 +393,8 @@ const replyFormatSection = `
 // SystemPrompt 构建三层系统提示：stable（identity+基础指令）→ context（SOUL+AGENTS+工作目录）→ volatile（工具+插件）。
 // 结果被缓存——只有 volatile 部分在插件热加载后失效，stable+context 前缀保持字节级稳定。
 func (a *Agent) SystemPrompt() string {
-	if a.systemPromptCache != "" {
+	ver := a.modeVersion()
+	if a.systemPromptCache != "" && a.promptModeVer == ver {
 		a.cacheStats.RecordHit()
 		return a.systemPromptCache
 	}
@@ -405,7 +412,20 @@ func (a *Agent) SystemPrompt() string {
 	sb.WriteString(a.buildVolatileSection())
 
 	a.systemPromptCache = sb.String()
+	a.promptModeVer = ver
 	return a.systemPromptCache
+}
+
+// modeVersion 汇总影响 system prompt 的模式版本号（计划模式 + 拷问模式）。
+func (a *Agent) modeVersion() uint64 {
+	var v uint64
+	if a.PlanMode != nil {
+		v = v*31 + a.PlanMode.Version()
+	}
+	if a.GrillMode != nil {
+		v = v*31 + a.GrillMode.Version()
+	}
+	return v
 }
 
 // buildContextSection 构建 context 层：SOUL.md → 用户自定义指令 → AGENTS.md → 工作目录 → 计划模式。
@@ -431,9 +451,17 @@ func (a *Agent) buildContextSection() string {
 	if a.WorkDir != "" {
 		sb.WriteString(fmt.Sprintf("\n## 当前工作目录\n%s\n", a.WorkDir))
 	}
-	// 计划模式引导（活跃时注入，退出时为空字符串）
-	if section := a.PlanMode.SystemSection(); section != "" {
-		sb.WriteString(section)
+	// 计划模式 / 拷问模式引导（活跃时注入，退出时为空字符串）
+	// 顺序：拷问在计划之前——需求没问清就不要先出方案。
+	if a.GrillMode != nil {
+		if section := a.GrillMode.SystemSection(); section != "" {
+			sb.WriteString(section)
+		}
+	}
+	if a.PlanMode != nil {
+		if section := a.PlanMode.SystemSection(); section != "" {
+			sb.WriteString(section)
+		}
 	}
 	return sb.String()
 }

@@ -34,6 +34,7 @@ func TestSpinnerLinesCoverRecentFeatures(t *testing.T) {
 		"mizar -c",          // 续接全局最后一次退出的会话
 		"ask_user_question", // 交互提问
 		"plan",              // 计划模式
+		"grill",             // 拷问模式
 		"goal",              // 会话目标
 		"delegate_task",     // 子代理委派
 		"记忆",                // 长期记忆

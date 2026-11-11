@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -14,10 +15,13 @@ import (
 // 若每次都跑 git 命令会把事件循环拖住（用户体感就是输入框发涩）。
 // 采集只在启动时与任务结束时各做一次，其余时刻读缓存。
 type projectInfo struct {
-	Dir    string // 工作目录（只保留末两级，避免挤爆一行）
-	Branch string // git 分支名；detached 时是短 SHA；非 git 仓库为空
-	Dirty  int    // 未提交改动条数（git status --porcelain 行数），非仓库为 0
-	IsGit  bool   // 是否在 git 仓库内
+	Dir     string // 工作目录（只保留末两级，避免挤爆一行）
+	Branch  string // git 分支名；detached 时是短 SHA；非 git 仓库为空
+	Dirty   int    // 未提交改动条数（git status --porcelain 行数），非仓库为 0
+	IsGit   bool   // 是否在 git 仓库内
+	MCPConf int    // 已配置的 MCP server 数
+	MCPConn int    // 已建立连接（已握手）的 MCP server 数
+	Mode    string // 活跃的交互模式提示（如「拷问模式」），空=无
 }
 
 // shortDir 只保留路径末两级，过长路径不占满整行。
@@ -110,6 +114,12 @@ func projectLineTitled(shown, fallbackDir string, info projectInfo, sessionID st
 		}
 	}
 	parts = append(parts, head)
+	if seg := mcpSegment(info.MCPConf, info.MCPConn); seg != "" {
+		parts = append(parts, seg)
+	}
+	if info.Mode != "" {
+		parts = append(parts, info.Mode)
+	}
 	if sessionID != "" {
 		short := sessionID
 		if len(short) > 8 {
@@ -121,6 +131,18 @@ func projectLineTitled(shown, fallbackDir string, info projectInfo, sessionID st
 		parts = append(parts, "已运行 "+humanDuration(now.Sub(started)))
 	}
 	return strings.Join(parts, "  │ ")
+}
+
+// mcpSegment 生成状态栏第一行的 MCP 段（无配置时返回空串）。
+//
+//	│ MCP 2/3（已连/配置）
+//
+// 连接是惰性的，所以分开显示「已连」与「配置」，避免误以为配置即已连。
+func mcpSegment(configured, connected int) string {
+	if configured <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("MCP %d/%d", connected, configured)
 }
 
 // windowPath 取滞动窗口片：给出完整路径、可用宽度与已滞动步数，

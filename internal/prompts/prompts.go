@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -135,11 +136,37 @@ func (r *Registry) Get(name string) (*Template, bool) {
 	return nil, false
 }
 
-// List 列出所有模板名。
+// List 列出所有模板名（按字母序，输出稳定）。
 func (r *Registry) List() []string {
 	out := make([]string, 0, len(r.tpls))
 	for n := range r.tpls {
 		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Dirs 返回已注册的模板扫描目录（/templates 用于提示模板来源）。
+func (r *Registry) Dirs() []string {
+	return append([]string{}, r.dirs...)
+}
+
+// 占位符匹配：$1 ${1} ${1:-def} $@ ${@} ${@:-def} ${@:N} ${@:N:L}
+var placeholderRe = regexp.MustCompile(`\$\{[^}]*\}|\$@|\$[0-9]+`)
+
+// Placeholders 返回模板正文里用到的占位符（去重、保持出现顺序）。
+func (t *Template) Placeholders() []string {
+	if t == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, m := range placeholderRe.FindAllString(t.Content, -1) {
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
 	}
 	return out
 }
@@ -282,16 +309,65 @@ func expandVars(body string, parts []string) string {
 }
 
 // Help 生成可用模板列表（/templates 命令输出）。
+//
+// 输出三部分：每个模板用到的占位符、模板来源目录、占位符语法说明。
+// 早期版本只列名字 + description，用户不知道模板里到底能填哪些参数。
 func (r *Registry) Help() string {
 	if len(r.tpls) == 0 {
-		return "暂无模板（在 ~/.mizar/prompts/ 放置 .md 文件即可）"
+		dirs := r.Dirs()
+		if len(dirs) == 0 {
+			dirs = []string{"~/.mizar/prompts"}
+		}
+		return "暂无模板（在 " + strings.Join(dirs, " 或 ") + " 放置 .md 文件即可）\n" +
+			"\n占位符语法（写在 .md 正文里）：\n" +
+			"  $1 $2 …           第 N 个参数\n" +
+			"  ${1:-默认}        第 N 个参数，缺省时用默认值\n" +
+			"  ${@}              全部参数（空格连接）\n" +
+			"  ${@:-默认}        全部参数，缺省时用默认值\n" +
+			"  ${@:2}            从第 2 个参数起的所有参数\n" +
+			"  ${@:2:3}          从第 2 个参数起取 3 个\n" +
+			"\nfrontmatter 可写 description / argument-hint：\n" +
+			"  ---\n  description: 一句话说明\n  argument-hint: <PR-URL>\n  ---\n"
 	}
 	var sb strings.Builder
 	sb.WriteString("可用模板（输入 /name [args] 展开）：\n")
+	width := 0
+	for _, n := range r.List() {
+		if len(n) > width {
+			width = len(n)
+		}
+	}
+	if width < 10 {
+		width = 10
+	}
 	for _, n := range r.List() {
 		t := r.tpls[n]
-		hint := t.ArgHint
-		fmt.Fprintf(&sb, "  /%-15s %s%s\n", n, t.Description, hint)
+		desc := t.Description
+		if desc == "" {
+			desc = "（无描述）"
+		}
+		fmt.Fprintf(&sb, "  /%-*s %s\n", width, n, desc)
+		if t.ArgHint != "" {
+			fmt.Fprintf(&sb, "  %-*s   参数: %s\n", width+1, "", t.ArgHint)
+		}
+		if ph := t.Placeholders(); len(ph) > 0 {
+			fmt.Fprintf(&sb, "  %-*s   占位: %s\n", width+1, "", strings.Join(ph, " "))
+		} else {
+			fmt.Fprintf(&sb, "  %-*s   占位: （无，纯文本片段）\n", width+1, "")
+		}
+	}
+	sb.WriteString("\n占位符语法（模板正文中可用，展开时按 /name 后的参数顺序填充）：\n")
+	sb.WriteString("  $1 $2 …           第 N 个参数（无值保留原样）\n")
+	sb.WriteString("  ${1:-默认}        第 N 个参数，缺省/空时用默认值\n")
+	sb.WriteString("  ${@}              全部参数（空格连接）\n")
+	sb.WriteString("  ${@:-默认}        全部参数，缺省时用默认值\n")
+	sb.WriteString("  ${@:2}            从第 2 个参数起的所有参数\n")
+	sb.WriteString("  ${@:2:3}          从第 2 个参数起取 3 个\n")
+	if dirs := r.Dirs(); len(dirs) > 0 {
+		sb.WriteString("\n模板目录（先命中者优先）：\n")
+		for _, d := range dirs {
+			fmt.Fprintf(&sb, "  %s\n", d)
+		}
 	}
 	return sb.String()
 }

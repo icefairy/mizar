@@ -428,6 +428,14 @@ chmod +x mizar
   # /think <level>                  设置思考等级（auto/off/low/medium/high）
   # /config                        查看当前配置（max_steps / context_window / user_agent）
   # /config user_agent MyApp/1.0   自定义 User-Agent，立即生效并持久化到配置
+  # /mcp list                      列出已配置的 MCP server 及其连接状态（别名 /mcp ls）
+  # /mcp add <name> <url|command>  添加 MCP server（http 或 stdio）
+  # /mcp test <name>               测试连接并列出工具
+  # /templates                     列出可用 prompt 模板及其可填占位符（$1 / ${1:-默认} / ${@} …）
+  # /template <name> [args]        展开模板（直接在对话里输入 /<name> [args] 亦可）
+  # 鼠标拖选即复制（双击选整行，Esc 取消；Shift+拖拽用终端原生选择）
+  # /grill                         拷问模式：动手前用 ask_user_question 把需求问到没歧义（/grill off 退出）
+  # /plan                          计划模式：先出方案再动手（模型调 exit_plan_mode 提交；/plan off 强制退出）
   # /compact                       立即压缩上下文（可附摘要指引）
   # /chat <内容>                    裸聊：不注入任何提示词直接问模型
   # !ls -la                         本地 bash 直执行：!开头直接运行，命令+输出纳入对话历史

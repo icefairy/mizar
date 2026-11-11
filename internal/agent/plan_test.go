@@ -65,3 +65,42 @@ func TestAskPlanReviewNilCallback(t *testing.T) {
 	// （真实 TUI 回调由 main.go 设置，此处跳过）
 	_ = time.Now()
 }
+
+// 退出模式的参数写法必须统一收口：exit/off/stop/quit/退出… 都算退出，
+// 否则用户按直觉输入 /plan exit 会变成「又进入了计划模式」。
+func TestIsModeExitArg(t *testing.T) {
+	for _, arg := range []string{"exit", "EXIT", "off", "stop", "quit", "退出", "关闭", "  Off "} {
+		if !IsModeExitArg(arg) {
+			t.Errorf("%q 应识别为退出", arg)
+		}
+	}
+	for _, arg := range []string{"", "on", "enter", "进入", "我来决定方案", "exitx"} {
+		if IsModeExitArg(arg) {
+			t.Errorf("%q 不应识别为退出", arg)
+		}
+	}
+}
+
+// Enter/Exit 必须让版本号变化（system prompt 缓存据此失效）。
+func TestPlanModeVersionChanges(t *testing.T) {
+	p := NewPlanMode()
+	v0 := p.Version()
+	p.Enter("")
+	v1 := p.Version()
+	if v1 == v0 {
+		t.Fatal("Enter 应使版本号变化")
+	}
+	p.Exit()
+	if p.Version() == v1 {
+		t.Fatal("Exit 应使版本号变化")
+	}
+}
+
+// 计划模式提示里必须写明「怎么退出」——否则用户只能靠猜 exit_plan_mode。
+func TestPlanSystemSectionMentionsExitCommand(t *testing.T) {
+	p := NewPlanMode()
+	p.Enter("")
+	if !contains(p.SystemSection(), "/plan off") {
+		t.Fatalf("计划模式提示应说明 /plan off 退出: %q", p.SystemSection())
+	}
+}

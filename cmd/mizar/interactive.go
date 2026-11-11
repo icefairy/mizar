@@ -35,7 +35,7 @@ func banner() string {
   ◆ 模型兼容：OpenAI 兼容端点，思考等级 auto/off/low/medium/high
   ◆ TUI 模式：Enter 发送 / Alt+Enter 换行 / Esc 取消(Windows 下需连按两次) / Ctrl+T 思考等级
   ◆ 强制重绘：Ctrl+L（屏幕出现残留文字时一键清干净；也可输入 /redraw）
-  ◆ 复制粘贴：Alt+C 进入拷贝模式(↑↓ 选择任意区域→y 复制) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+Q 复制/Ctrl+V 粘贴
+  ◆ 复制粘贴：鼠标直接拖选即复制 ｜ Alt+C 拷贝模式(↑↓ 选区→y 复制) ｜ Alt+L 复制最近回复 ｜ 输入框 Ctrl+Q 复制
   ◆ 本地 bash：!开头直接执行（如 !ls -la），命令与输出纳入对话历史
   ◆ 命令行模式：Enter 发送 ｜ 多行粘贴自动合并 ｜ /send 手动提交
 %s`, version, scrollHint())
@@ -51,7 +51,7 @@ func banner() string {
 func scrollHint() string {
 	scroll := "  ◆ 翻页：PgUp/PgDn ｜ vim 风格 Ctrl+U/Ctrl+D、Alt+K/Alt+J 上/下 10 行，Alt+G/Alt+Shift+G 到顶/底\n"
 	if shouldEnableMouse() {
-		return scroll + "  ◆ 鼠标：Shift+拖拽 选择复制 ｜ 滚轮滚动 ｜ PgUp/PgDn 翻页\n"
+		return scroll + "  ◆ 鼠标：直接拖选即复制（双击选整行，Esc 取消选区）｜ Shift+拖拽交给终端选择 ｜ 滚轮滚动\n"
 	}
 	return scroll + "  ◆ 鼠标：本平台滚轮不用于滚动（ConPTY 会把它误编码成字符，故禁用鼠标上报）；" +
 		"复制改用终端原生拖选 + Ctrl+Shift+C/V，或 Alt+C 拷贝模式\n"

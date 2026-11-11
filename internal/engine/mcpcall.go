@@ -92,6 +92,29 @@ func (r *MCPRegistry) Conf() []MCPServerConf {
 	return out
 }
 
+// Stats 返回（配置数, 已建立连接数）。
+// 连接是惰性的：只有真正被 mcp_call 用过（握手成功）的 server 才计入 connected，
+// 状态栏据此展示「已连/配置」而不是「配了几个」。
+func (r *MCPRegistry) Stats() (configured, connected int) {
+	if r == nil {
+		return 0, 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.conf), len(r.clients)
+}
+
+// Connected 判断某个 server 当前是否已建立连接（已握手）。
+func (r *MCPRegistry) Connected(name string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.clients[name]
+	return ok
+}
+
 // CallFn 返回可直接装配进 HostFuncs.MCPCall 的调用函数。
 // 每次调用解析 argsJSON（对象）→ 按名查 server → 惰性初始化 → CallTool。
 func (r *MCPRegistry) CallFn() MCPCallFn {
