@@ -1,3 +1,53 @@
+## [v0.8.1] — 2026-11-13
+
+> 主题：**WebUI 后台能力强化**——长任务期间切到别的 App（尤其是 Android 浏览器把
+> 页面冻结/回收）再回来，不再丢消息、不再假死。
+> 三个真实病灶，逐个修：
+> ① 慢客户端阻塞广播：旧实现持 hub 锁逐条 WriteJSON，一台手机切后台就能让所有
+>    客户端的事件流一起停摆；
+> ② 断线期间的流式事件被直接丢弃（浏览器被冻结时收不到 close，也没人缓冲）；
+> ③ 页面整个被系统杀掉后，已生成的内容只存在于内存里。
+
+### 🐛 修复
+
+- **广播不再被单个慢客户端拖死**（`internal/server/ws.go`）
+  - 每个连接独立发送队列（512）+ 独立写泵（单 goroutine，顺序发送）
+  - 广播方只做**非阻塞入队**，永不直接写 socket；队列满即判定死连接清理
+  - 单条消息写超时 `wsWriteTimeout = 5s`（`SetWriteDeadline`）
+  - 修复前：`broadcast` 持锁逐条写 → 一个冻结的手机 = 全家停摆
+  - 回归测试：`TestHubBroadcastDoesNotBlockOnStuckClient`
+- **事件回放日志**（新增 `internal/server/evtlog.go`）
+  - 每个会话维护有界环形缓冲（4000 条）+ 单调递增 `seq`
+  - 所有会话事件统一走 `Server.emit()`（替代 `hub.broadcast`）落 seq 再广播
+  - 新端点 `GET /web/api/events?conversation_id=&after=<seq>` 按游标返回增量
+  - 返回 `truncated` 标记，超长任务被挤出缓冲时前端会明确提示而不是假装完整
+  - 测试：`TestEvtLogSeqMonotonic` / `TestEvtLogResetKeepsSeqMonotonic` /
+    `TestEvtLogCap` / `TestWebEventsEndpoint`
+- **运行中草稿落盘**（新增 `internal/server/drafts.go`）
+  - 正文增量同时写入 `~/.mizar/drafts/<conv>.txt`（1.5s 节流，避免每 token 写盘）
+  - 页面被系统杀掉/刷新后，`GET /web/api/draft` 取回已生成进度先渲染
+  - 本轮结束（正式答复落盘历史）时删除临时文件
+  - 测试：`TestDraftStoreWriteRead` / `TestDraftStoreFlushToDisk`
+- **`run_done` 事件**：本轮结束广播给所有客户端。页面在后台被回收时收不到 HTTP
+  响应，只能靠这条事件知道「跑完了，该刷新历史了」。
+- **`/ws` 不再插入非 JSON-RPC 帧**：`hello` 问候帧只在 `/web/ws` 上发，
+  避免打扰第三方 JSON-RPC 客户端（`/ws` 是对外开放协议）。
+
+### ✨ WebUI（`internal/server/webui/app.js`）
+
+- **断线自愈**：指数退避重连（500ms → 15s，带抖动）+ 应用层心跳（25s ping，
+  55s 无 pong 判定假活主动重连）+ `hello` 帧对齐运行归属。
+- **按 seq 补齐**：本地事件缓存改为「按 seq 有序插入去重」，重连/回前台时带
+  `after=cursor` 拉取缺失部分；缺口检测（`seq > prev+1`）触发补偿。
+- **回到前台即恢复**：`visibilitychange` / `pageshow`（bfcache）/ `online` /
+  `focus` 四个入口统一走 `resumeFromBackground()`。
+- **假忙碌自愈**：`reconcileBusy()` 以服务端 `running` 为准校正 `busyConv`，
+  修「页面被系统杀掉后按钮一直转、排队消息永不发出」。
+- **历史对账**：`syncCurrentConv()` 比对消息条数，后台期间跑完的直接重载历史。
+- **草稿兜底**：`restoreDraft()` 在事件缓冲无法覆盖时补出已生成正文。
+- **持久化**：未发送的输入框内容（按会话）、未发出的排队消息、最后打开的会话
+  都存 `localStorage`，重开后恢复。
+
 ## [v0.8.0] — 2026-11-13
 
 > 主题：**Windows 拆成两份产物**（Win7 兼容版 / Win10+ 原生版），产物自报家门。

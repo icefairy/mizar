@@ -37,6 +37,12 @@ type Server struct {
 	// ask 待回答的 ask_user_question 问题（Web 问答通道，见 ask.go）。
 	ask *askBroker
 
+	// evt 会话事件回放日志（切后台/断线期间的事件补齐，见 evtlog.go）。
+	evt *evtLog
+
+	// draft 运行中答复草稿（页面被刷新/杀掉后不丢已生成内容，见 drafts.go）。
+	draft *draftStore
+
 	// stats Web UI 状态栏用量统计（tokens/缓存/速度），对齐 TUI 状态栏。
 	stats runStats
 	// usageMu 保护 lastUsage/lastModel（去重入账）。
@@ -74,6 +80,8 @@ func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {
 		hub:     newHub(),
 		web:     newWebUI(webStorePath()),
 		ask:     newAskBroker(),
+		evt:     newEvtLog(),
+		draft:   newDraftStore(),
 	}
 	s.wsUp = newWSUpgrader(cfg.Token)
 	s.routes()
@@ -156,7 +164,11 @@ func (s *Server) EmitToWS(event, dataJSON string) {
 // 事件携带当前运行的会话 id（conversation_id），前端按当前打开的会话过滤，
 // 避免切换会话期间旧运行的增量被渲染到新/别的会话窗口里。
 func (s *Server) broadcastStream(step int, delta, kind string) {
-	s.hub.broadcast(map[string]any{
+	// 正文增量同时写草稿：页面被系统杀掉/用户刷新时，重开还能看到已生成的进度。
+	if kind == "reply" {
+		s.draft.append(s.RunConv(), delta)
+	}
+	s.emit(map[string]any{
 		"type": "event", "event": "stream", "step": step, "delta": delta, "kind": kind,
 		"conversation_id": s.RunConv(),
 	})

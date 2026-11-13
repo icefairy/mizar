@@ -29,13 +29,28 @@
   // evtLog：按会话缓存运行中事件。切走期间 A 会话持续输出，前端仍会收 WS 事件
   // （只是不渲染到 DOM），先缓存起来；切回 A 时重放，避免「切走期间的内容丢失」。
   // 结构：{ convId: [ {kind, ...} ] }，每轮开始时清空对应会话。
+  // 每条事件带服务端分配的 seq（单调递增），按 seq 有序插入去重：
+  // 断线重连补齐的「空洞」事件可能比已缓存的事件更旧，必须插到正确位置，
+  // 而重复补齐（重放 + 实时双路径）则直接丢弃。
   let evtLog = {};
   function pushEvt(conv, e) {
     const key = conv == null ? "" : conv;
     const arr = evtLog[key] || (evtLog[key] = []);
+    if (typeof e.seq === "number") {
+      let lo = 0, hi = arr.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (typeof arr[mid].seq === "number" && arr[mid].seq < e.seq) lo = mid + 1;
+        else hi = mid;
+      }
+      if (arr[lo] && arr[lo].seq === e.seq) return false;  // 已存在
+      arr.splice(lo, 0, e);
+    } else {
+      arr.push(e);
+    }
     // 防御性上限，避免极端长任务把内存撑爆（保留最近的）
-    arr.push(e);
     if (arr.length > 4000) arr.splice(0, arr.length - 4000);
+    return true;
   }
   // 打断/排队模式：true=打断（等待期间发送=注入当前循环），false=排队（本轮结束再发）。
   // 默认打断，选择持久化到 localStorage。
@@ -434,6 +449,7 @@
     }
     input.focus();
     connectWS();
+    loadQueue();          // 恢复上次未发出的排队消息（页面被回收前的）
     startStatusPoll();
     loadSettings(j.settings);
     loadConversations(true);
@@ -484,7 +500,12 @@
     } catch (e) { convs = []; }
     renderConvList();
     if (autoSelect) {
-      if (convs.length > 0) selectConv(convs[0].id);
+      // 恢复上次打开的会话（刷新/页面被系统杀掉后重开，应回到原来那个会话，
+      // 而不是每次都跳回列表第一条）。找不到则退回首条。
+      let last = null;
+      try { last = localStorage.getItem("mizar-last-conv"); } catch (e) {}
+      const pick = last && convs.some((c) => c.id === last) ? last : (convs.length ? convs[0].id : null);
+      if (pick) selectConv(pick);
       else createConv();
     }
   }
@@ -515,6 +536,7 @@
   }
   async function selectConv(id) {
     curConv = id;
+    try { localStorage.setItem("mizar-last-conv", id); } catch (e) {}
     renderConvList();
     collapseOnMobile();
     clearLog();
@@ -561,7 +583,17 @@
       // 该会话 runningConv——可能来自别的标签页），把切走期间缓存的事件重放到界面，
       // 否则用户会看到「切回来要等一会才有新内容 / 中间内容缺失」。
       const liveHere = (busyConv === id || runningConv === id);
-      if (liveHere) { newTurn(); replayEvtLog(id); }
+      if (liveHere) {
+        newTurn();
+        replayEvtLog(id);
+        // 本地缓存只覆盖「页面还活着时收到的 WS 事件」。若期间页面被冻结/断线，
+        // 缺失的部分必须向服务端按 seq 补齐，否则切回来仍会缺中间过程。
+        backfillEvents(id, true).then(() => restoreDraft(id));
+      } else {
+        // 本页不知道它是否在跑（刚打开页面/刚换设备）：问服务端。
+        resumeConvIfRunning(id);
+      }
+      restoreInputDraft();
       // 切回本会话：若服务端空闲且有本会话排队的消息，立即补发（不再需要等下一轮）
       drainPending();
     } catch (e) { addMsg("error", "错误", e.message); }
@@ -704,36 +736,290 @@
   }
 
   // ---------- WebSocket 事件 ----------
+  // 断线自愈：手机切到后台、锁屏、切网络时，WS 会被系统掐断且 JS 收不到 close；
+  // 回到前台后必须重连，并把「期间缺失的事件」按 seq 补齐，否则界面就停在切走前
+  // 那一刻——这正是「切回来发现中间过程全没了」的根因。
+  let wsReconnectDelay = 500;      // 重连退避（ms），成功后复位
+  let wsReconnectTimer = null;
+  let wsEverOpened = false;
+  let pendingBackfill = false;     // 需要在连接就绪后补齐事件
+  // evtCursor：每个会话「已经渲染/缓存到的最大 seq」。断线期间服务端继续跑，
+  // 重连后带 after=cursor 拉取缺失部分即可，天然去重。
+  let evtCursor = {};
+  function setCursor(conv, seq) {
+    if (typeof seq !== "number" || seq <= 0) return;
+    const k = conv == null ? "" : conv;
+    if (!evtCursor[k] || seq > evtCursor[k]) evtCursor[k] = seq;
+  }
+  function getCursor(conv) { return evtCursor[conv == null ? "" : conv] || 0; }
+
   function connectWS() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(proto + "://" + location.host + "/web/ws");
-    ws.onmessage = (ev) => {
+    const sock = new WebSocket(proto + "://" + location.host + "/web/ws");
+    ws = sock;
+    sock.onopen = () => {
+      wsReconnectDelay = 500;
+      wsEverOpened = true;
+      startHeartbeat(sock);
+      restorePendingAsks();
+      // 重连成功：先补齐断线期间的事件，再刷新一次状态/历史
+      backfillEvents(curConv, true);
+      refreshAfterReconnect();
+    };
+    sock.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === "pong") { hbLastPong = Date.now(); return; }
+      if (m.type === "hello") {
+        // 服务端主动告知当前运行归属；若正在跑当前会话而后台期间漏了事件，立即补齐
+        if (m.running && m.running_conv === curConv) backfillEvents(curConv, true);
+        return;
+      }
       if (m.type !== "event") return;
-      // 会话过滤：服务端事件携带 conversation_id。当前打开的会话与之不符时，
-      // 不再直接丢弃 —— 先按会话缓存（A 会话在后台持续输出的内容不能丢），
-      // 等用户切回该会话时再从缓存重放。修复「切到 B 期间 A 的内容丢失 / 切回要等一会才出现」。
-      const evConv = m.conversation_id == null ? "" : m.conversation_id;
-      const forCurrent = (evConv === "" || evConv === curConv);
-      if (m.event === "tool_call") {
-        pushEvt(evConv, { kind: "tool_call", tool: m.tool, args: m.args });
-        if (forCurrent) onToolCall(m.tool, m.args);
-      } else if (m.event === "tool_result") {
-        pushEvt(evConv, { kind: "tool_result", tool: m.tool, result: m.result });
-        if (forCurrent) onToolResult(m.tool, m.result);
-      } else if (m.event === "stream") {
-        pushEvt(evConv, { kind: "stream", step: m.step, delta: m.delta, skind: m.kind });
-        if (forCurrent) handleStream(m.step, m.delta, m.kind);
-      } else if (m.event === "ask_user") {
-        showAsk(m.id, m.questions, m.conversation_id);
-      } else if (m.event === "ask_close") {
-        closeAsk(m.id);
+      handleServerEvent(m);
+      // seq 缺口检测：链路抖动丢了一条时（极少数），补偿性补齐。
+      // 注意：cursor 由 pushEvt 维护（按 seq 有序插入），这里只判断缺口。
+      if (typeof m.seq === "number") {
+        const conv = m.conversation_id == null ? "" : m.conversation_id;
+        const prev = getCursor(conv);
+        if (prev && m.seq > prev + 1 && conv === curConv) backfillEvents(conv, false);
       }
     };
-    ws.onclose = () => { ws = null; };
-    ws.onopen = () => { restorePendingAsks(); };
+    sock.onerror = () => { /* onclose 会接手 */ };
+    sock.onclose = () => {
+      if (ws !== sock) return;   // 已被替换
+      ws = null;
+      stopHeartbeat();
+      scheduleReconnect();
+    };
   }
+  // startHeartbeat 应用层心跳：移动网络/代理会静默回收空闲连接（浏览器收不到
+  // close，readyState 仍是 OPEN 的「假活」）。定时 ping 能及时暴露断链，
+  // 触发 onclose → 重连 → 按 seq 补齐事件。
+  let hbTimer = null;
+  let hbLastPong = 0;
+  function startHeartbeat(sock) {
+    stopHeartbeat();
+    hbLastPong = Date.now();
+    hbTimer = setInterval(() => {
+      if (ws !== sock || sock.readyState !== WebSocket.OPEN) return;
+      // 连续两个周期没有 pong：判定假活，主动关闭触发重连
+      if (Date.now() - hbLastPong > 55000) {
+        try { sock.close(); } catch (e) {}
+        return;
+      }
+      try { sock.send(JSON.stringify({ type: "ping" })); } catch (e) {}
+    }, 25000);
+  }
+  function stopHeartbeat() {
+    if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+  }
+  function scheduleReconnect() {
+    if (wsReconnectTimer) return;
+    // 记录「曾经连上过」：重连后需要补齐事件
+    pendingBackfill = wsEverOpened;
+    const d = wsReconnectDelay;
+    wsReconnectDelay = Math.min(wsReconnectDelay * 2, 15000);
+    // 加抖动，避免多标签页同时重连
+    const jitter = Math.floor(d * 0.2 * Math.random());
+    wsReconnectTimer = setTimeout(() => {
+      wsReconnectTimer = null;
+      if (document.hidden) return;   // 后台不白费电，等 visibilitychange 再连
+      connectWS();
+    }, d + jitter);
+  }
+  // 处理一条服务端事件（live 与 backfill 共用同一路径，保证渲染完全一致）
+  function handleServerEvent(m) {
+    const evConv = m.conversation_id == null ? "" : m.conversation_id;
+    if (typeof m.seq === "number") setCursor(evConv, m.seq);
+    const forCurrent = (evConv === "" || evConv === curConv);
+    if (m.event === "tool_call") {
+      pushEvt(evConv, { kind: "tool_call", tool: m.tool, args: m.args, seq: m.seq });
+      if (forCurrent) onToolCall(m.tool, m.args);
+    } else if (m.event === "tool_result") {
+      pushEvt(evConv, { kind: "tool_result", tool: m.tool, result: m.result, seq: m.seq });
+      if (forCurrent) onToolResult(m.tool, m.result);
+    } else if (m.event === "stream") {
+      pushEvt(evConv, { kind: "stream", step: m.step, delta: m.delta, skind: m.kind, seq: m.seq });
+      if (forCurrent) handleStream(m.step, m.delta, m.kind);
+    } else if (m.event === "llm_response") {
+      // 每步结束的完整回复：作为条目收尾（避免重放后步骤一直显示光标）
+      if (forCurrent && thinkStepEl) { thinkStepEl.classList.remove("cursor"); thinkStepEl = null; }
+    } else if (m.event === "run_done") {
+      // 服务端本轮结束。若本页没有对应的 pending 请求（页面曾在后台被杀/刷新，
+      // 或任务由别的标签页发起），就刷新历史把最终答复拉下来。
+      if (forCurrent) onRunDoneRemote(evConv);
+    } else if (m.event === "ask_user") {
+      showAsk(m.id, m.questions, m.conversation_id);
+    } else if (m.event === "ask_close") {
+      closeAsk(m.id);
+    }
+  }
+  // backfillEvents 用 /web/api/events 拉取 after=cursor 之后的事件并重放。
+  // quiet=true 时不提示用户（常规重连）；quiet=false 时若发现被截断会提示。
+  let backfilling = false;
+  async function backfillEvents(convId, quiet) {
+    if (!convId) return;
+    if (backfilling) { pendingBackfill = true; return; }
+    backfilling = true;
+    try {
+      const after = getCursor(convId);
+      const j = await api("/web/api/events?conversation_id=" + encodeURIComponent(convId) + "&after=" + after);
+      const list = (j && j.events) || [];
+      const serverLive = !!(j && j.running && j.running_conv === convId);
+      // after=0 且该会话并未在跑：说明这是「刚打开页面/刚切换会话」，
+      // 内容已由历史接口完整加载，不能把缓冲事件再重放一遍（否则重复）。
+      if (after === 0 && !serverLive && busyConv !== convId) {
+        if (j && typeof j.last === "number") setCursor(convId, j.last);
+        return;
+      }
+      if (list.length) {
+        // 当前会话且本轮仍在跑：确保有承接容器，否则重放会落到上一轮的旧容器里
+        const live = (busyConv === convId || serverLive);
+        if (convId === curConv && live) { if (!turnEl) newTurn(); }
+        list.forEach((m) => {
+          if (typeof m.seq === "number") setCursor(convId, m.seq);
+          handleServerEvent(m);
+        });
+        scrollLog();
+        flashQuick("已补齐 " + list.length + " 条后台输出");
+      }
+      if (j && typeof j.last === "number") setCursor(convId, j.last);
+      if (j && j.truncated && !quiet) {
+        flashQuick("过程过长，早期部分已省略（完整内容见历史）");
+      }
+    } catch (e) {
+      // 401/网络问题：忽略，下次重连再补
+    } finally {
+      backfilling = false;
+      if (pendingBackfill) { pendingBackfill = false; }
+    }
+  }
+  // refreshAfterReconnect 重连后刷新状态与会话列表（后台期间可能有新会话/新标题）
+  async function refreshAfterReconnect() {
+    if (!appView || appView.classList.contains("hidden")) return;
+    try {
+      const j = await api("/web/api/conversations");
+      convs = j.conversations || [];
+      renderConvList();
+    } catch (e) {}
+  }
+  // onRunDoneRemote 收到服务端的「本轮结束」事件时的收尾。
+  // 本页正持有该轮的 pending 请求时不用管（runTurn 的 finally 会处理）。
+  function onRunDoneRemote(convId) {
+    if (busyConv === convId) return;   // 本页发的，走 runTurn 正常路径
+    if (convId && convId !== curConv) return;
+    runningConv = null;
+    abortBtn.classList.add("hidden");
+    evtLog[convId] = [];
+    syncCurrentConv();
+    renderQueueBar();
+    drainPending();
+  }
+  // restoreDraft 兜底：事件环形缓冲已截断（超长任务）或页面整个被系统杀掉时，
+  // 用服务端落盘的草稿把「已生成的正文」补出来，避免界面一片空白。
+  async function restoreDraft(convId) {
+    if (!convId || convId !== curConv) return;
+    if (streamBuf) return;   // 已经通过事件重放拼出正文，无需草稿
+    try {
+      const j = await api("/web/api/draft?conversation_id=" + encodeURIComponent(convId));
+      if (!j || !j.draft) return;
+      if (convId !== curConv || streamBuf) return;
+      if (!turnEl) newTurn();
+      const body = ensureReply();
+      streamBuf = j.draft;
+      body.parentElement.parentElement.__raw = streamBuf;
+      body.innerHTML = md(streamBuf);
+      body.classList.add("cursor");
+      scrollLog();
+      flashQuick("已恢复后台生成中的内容");
+    } catch (e) {}
+  }
+  // resumeConvIfRunning 打开/切到某会话时确认它是否正在服务端运行：
+  // 若是（例如页面被系统杀掉前发起的长任务，用户在手机上重新打开），
+  // 补一个 turn 容器并补齐事件，让用户直接看到继续增长的输出。
+  async function resumeConvIfRunning(convId) {
+    try {
+      const j = await api("/web/api/draft?conversation_id=" + encodeURIComponent(convId));
+      if (!j || !j.running || j.running_conv !== convId) return;
+      if (convId !== curConv) return;
+      runningConv = convId;
+      abortBtn.classList.remove("hidden");
+      newTurn();
+      await backfillEvents(convId, true);
+      await restoreDraft(convId);
+      renderQueueBar();
+    } catch (e) {}
+  }
+  // reconcileBusy 前台恢复时校正「假忙碌」：
+  // 移动端页面被系统丢弃/网络中断时，runTurn 的 finally 可能没机会执行，
+  // busyConv 会永远停在该会话上——表现为按钮一直转、排队消息永不发出。
+  // 以服务端 running 为准，不一致就纠正并重载该会话历史。
+  async function reconcileBusy() {
+    try {
+      const j = await api("/web/api/status" + (curConv ? "?id=" + encodeURIComponent(curConv) : ""));
+      const srvRunning = !!(j && j.running);
+      const srvConv = (j && j.running_conv) || "";
+      runningConv = srvRunning ? srvConv : null;
+      if (busyConv && (!srvRunning || (srvConv && srvConv !== busyConv))) {
+        // 本标签页以为在跑，其实服务端早已结束（或已换会话跑）：收尾
+        const was = busyConv;
+        busyConv = null;
+        evtLog[was] = [];
+        abortBtn.classList.add("hidden");
+        if (was === curConv) await selectConv(curConv);
+        drainPending();
+      } else if (busyConv && srvRunning) {
+        // 服务端仍在跑本会话，只是本页漏了事件：确保有承接容器
+        if (busyConv === curConv && !turnEl) newTurn();
+      }
+      renderQueueBar();
+    } catch (e) {}
+  }
+  // syncCurrentConv 后台期间会话可能已被跑完（本标签页或其他设备/标签页）：
+  // 最终答复只落在服务端历史里，没有对应「事件」可重放。这里比对消息条数，
+  // 发现变化就重载当前会话，保证切回来看到的是完整结果。
+  let syncing = false;
+  async function syncCurrentConv() {
+    if (syncing || !curConv) return;
+    if (busyConv === curConv) return;   // 本轮还在本页跑，不打断
+    syncing = true;
+    try {
+      const j = await api("/web/api/conversations");
+      const list = j.conversations || [];
+      convs = list;
+      renderConvList();
+      const mine = list.find((c) => c.id === curConv);
+      if (!mine) return;
+      const shown = log.querySelectorAll(".msg").length;
+      if (mine.count !== shown) await selectConv(curConv);
+    } catch (e) {
+    } finally { syncing = false; }
+  }
+  // 回到前台 / 网络恢复：立即重连并补齐。移动端浏览器从后台唤醒时
+  // WS 往往已死但 readyState 仍是 OPEN（假活），这里主动探活。
+  function resumeFromBackground() {
+    if (!appView || appView.classList.contains("hidden")) return;
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      connectWS();
+    }
+    // 无论连接状态如何都补一次：假活连接上丢的事件只能靠 seq 补齐
+    backfillEvents(curConv, true);
+    refreshAfterReconnect();
+    reconcileBusy();
+    // 等补齐落地后再比对历史（避免把刚重放的内容误判为条数不一致而整页重载）
+    setTimeout(syncCurrentConv, 500);
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) resumeFromBackground();
+  });
+  window.addEventListener("pageshow", (e) => {
+    // 移动端 bfcache 恢复（返回键回到页面）也走同一套
+    if (e.persisted) resumeFromBackground();
+  });
+  window.addEventListener("online", resumeFromBackground);
+  window.addEventListener("focus", () => { if (!document.hidden) resumeFromBackground(); });
 
   // 工具调用：追加到答复框的步骤容器（累加可见）
   function onToolCall(tool, args) {
@@ -946,18 +1232,42 @@
   // 直到本轮结束。此前这些消息在 WebUI 里完全不可见，用户以为丢了。
   let pendingQueue = [];   // { id, text, conv, kind: "queue"|"steer" }
   let queueSeq = 0;
+  // 排队消息持久化：手机切后台被回收/刷新后，还没发出去的排队消息不能丢。
+  // 只存 "queue" 类（"steer" 已注入当前循环，重发会重复）。
+  function saveQueue() {
+    try {
+      const keep = pendingQueue.filter((x) => x.kind === "queue");
+      if (keep.length) localStorage.setItem("mizar-queue", JSON.stringify(keep));
+      else localStorage.removeItem("mizar-queue");
+    } catch (e) {}
+  }
+  function loadQueue() {
+    try {
+      const raw = localStorage.getItem("mizar-queue");
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        arr.forEach((it) => {
+          if (it && it.text) pendingQueue.push({ id: ++queueSeq, text: it.text, conv: it.conv, kind: "queue" });
+        });
+      }
+    } catch (e) {}
+    renderQueueBar();
+  }
   function pushQueue(text, conv, kind) {
     const id = ++queueSeq;
     pendingQueue.push({ id: id, text: text, conv: conv, kind: kind || "queue" });
+    saveQueue();
     renderQueueBar();
     return id;
   }
   function setQueueKind(id, kind) {
     const it = pendingQueue.find((x) => x.id === id);
-    if (it) { it.kind = kind; renderQueueBar(); }
+    if (it) { it.kind = kind; saveQueue(); renderQueueBar(); }
   }
   function dropQueue(id) {
     pendingQueue = pendingQueue.filter((x) => x.id !== id);
+    saveQueue();
     renderQueueBar();
   }
   function renderQueueBar() {
@@ -1008,6 +1318,7 @@
     historySaved = "";
     input.value = "";
     autoGrow();
+    clearInputDraft();
     const convId = curConv;
     // 服务端当前正在跑的会话（可能不是本会话，也可能来自别的浏览器标签）。
     const serverRunning = (busyConv !== null) ? busyConv : runningConv;
@@ -1046,6 +1357,7 @@
     if (askState) closeAsk();
     // 先把本会话的排队消息清掉（停止后不应再自动补发）
     pendingQueue = pendingQueue.filter((x) => x.conv !== convId);
+    saveQueue();
     renderQueueBar();
     let stopped = false;
     try {
@@ -1123,6 +1435,7 @@
     const resend = mine.filter((it) => it.kind === "queue");
     // 本会话待发消息放回队首，保持顺序；随后统一 drain（也覆盖别的会话排队的消息）
     if (resend.length) pendingQueue = resend.concat(pendingQueue);
+    saveQueue();
     renderQueueBar();
     input.focus();
     api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
@@ -1142,6 +1455,7 @@
     const items = pendingQueue.filter((it) => it.conv === curConv && it.kind === "queue");
     if (!items.length) return;
     pendingQueue = pendingQueue.filter((it) => !(it.conv === curConv && it.kind === "queue"));
+    saveQueue();
     renderQueueBar();
     draining = true;
     runTurn(items.map((it) => it.text).join("\n"), curConv).finally(() => { draining = false; });
@@ -1184,6 +1498,29 @@
       try { localStorage.setItem("mizar-queue-mode", interruptMode ? "0" : "1"); } catch (e) {}
       applyQueueToggle();
     });
+  }
+  // ---------- 输入框草稿（未发送内容的本地保留） ----------
+  // 手机上切走/被系统回收很常见，输入框里写了半天的长消息不能丢。
+  // 按会话分别存 localStorage，发送成功或切换会话时清理。
+  function draftKey(conv) { return "mizar-draft-" + (conv || ""); }
+  let draftSaveTimer = null;
+  input.addEventListener("input", () => {
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(() => {
+      try {
+        if (input.value) localStorage.setItem(draftKey(curConv), input.value);
+        else localStorage.removeItem(draftKey(curConv));
+      } catch (e) {}
+    }, 300);
+  });
+  function restoreInputDraft() {
+    try {
+      const v = localStorage.getItem(draftKey(curConv)) || "";
+      if (v && !input.value) { input.value = v; autoGrow(); }
+    } catch (e) {}
+  }
+  function clearInputDraft() {
+    try { localStorage.removeItem(draftKey(curConv)); } catch (e) {}
   }
   function autoGrow() {
     // 固定 5 行高度（由 CSS min-height 控制），超过则纵向滚动

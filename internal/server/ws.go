@@ -2,13 +2,25 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 
 	"mizar/internal/agent"
 )
+
+// wsWriteTimeout 单条消息写超时。
+//
+// 手机浏览器切后台后，页面被冻结、TCP 接收窗口读空，服务端 WriteJSON 会被
+// 内核缓冲区堵住（不再返回）。若不设超时，广播就会卡在这条死连接上——
+// 更糟的是旧实现是在持 hub 锁的情况下逐条写，一次阻塞会让**所有**客户端
+// 的事件流全部停摆，表现为「手机切后台，电脑上也不动了」。
+const wsWriteTimeout = 5 * time.Second
 
 // ============================================================================
 // WebSocket 端点（/ws）
@@ -42,17 +54,87 @@ func newWSUpgrader(token string) *wsUpgrader {
 	}
 }
 
-// wsClient 一个 WS 连接。
+// wsSendQueue 每个连接的发送队列长度。
+//
+// 慢客户端（手机切后台、页面被冻结）不能阻塞广播：事件先入队，队列满说明
+// 该连接确实收不动了，直接判定为死连接清理掉（前端会用 /web/api/events
+// 按 seq 重新补齐，不会丢内容）。
+const wsSendQueue = 512
+
+// wsClient 一个 WS 连接（带独立写泵，广播方永不直接写 socket）。
 type wsClient struct {
-	conn *websocket.Conn
-	mu   sync.Mutex // 保护并发写
+	conn      *websocket.Conn
+	out       chan []byte
+	sendMu    sync.Mutex // 保护「发送 vs 关闭」竞争（向已关闭 channel 发送会 panic）
+	closed    bool
+	closeOnce sync.Once
+	dead      atomic.Bool
 }
 
-func (c *wsClient) send(v any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.WriteJSON(v)
+func newWSClient(conn *websocket.Conn) *wsClient {
+	c := &wsClient{conn: conn, out: make(chan []byte, wsSendQueue)}
+	go c.writePump()
+	return c
 }
+
+// writePump 单 goroutine 顺序发送：保证同一连接的事件顺序，同时把「写阻塞」
+// 隔离在这一个连接内（带写超时），完全不影响广播方和其它客户端。
+func (c *wsClient) writePump() {
+	for b := range c.out {
+		_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+		if err := c.conn.WriteMessage(websocket.TextMessage, b); err != nil {
+			c.dead.Store(true)
+			_ = c.conn.Close()
+			// 继续排空队列（丢弃），避免广播方 enqueue 时永久阻塞
+			for range c.out {
+			}
+			return
+		}
+	}
+}
+
+// send 序列化入队（非阻塞）。队列满 → 判定死连接。
+func (c *wsClient) send(v any) error {
+	if c.dead.Load() {
+		return errWsDead
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return errWsDead
+	}
+	select {
+	case c.out <- b:
+		return nil
+	default:
+		// 队列满：这个连接已经跟不上了。关掉它，让前端重连后用 seq 补齐。
+		c.closed = true
+		c.close()
+		c.dead.Store(true)
+		return errWsSlow
+	}
+}
+
+func (c *wsClient) close() {
+	c.closeOnce.Do(func() {
+		c.sendMu.Lock()
+		if !c.closed {
+			c.closed = true
+			close(c.out)
+		}
+		c.sendMu.Unlock()
+		_ = c.conn.Close()
+	})
+}
+
+var (
+	errWsDead = errors.New("ws client closed")
+	errWsSlow = errors.New("ws client too slow")
+)
 
 // hub 管理活跃 WS 连接并广播事件。
 type hub struct {
@@ -72,20 +154,40 @@ func (h *hub) add(c *wsClient) {
 
 func (h *hub) remove(c *wsClient) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	delete(h.clients, c)
+	h.mu.Unlock()
+	c.close()
 }
 
-// broadcast 向所有活跃客户端推送事件（忽略已断开连接的发送错误）。
+// broadcast 向所有活跃客户端推送事件。
+//
+// 关键：**只做非阻塞入队，不在这里写 socket**。旧实现在持 hub 锁的情况下
+// 逐个 WriteJSON，只要有一个客户端（典型是切到后台的手机）写阻塞，所有
+// 客户端的事件流都会被一起卡住——表现为「手机切后台，电脑上也不动了」。
+// 现在每个连接有自己的写泵和队列，慢客户端的后果仅限于它自己。
 func (h *hub) broadcast(v any) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
+		targets = append(targets, c)
+	}
+	h.mu.Unlock()
+	var dead []*wsClient
+	for _, c := range targets {
 		if err := c.send(v); err != nil {
-			// 发送失败：移除（客户端已断）
-			delete(h.clients, c)
-			_ = c.conn.Close()
+			dead = append(dead, c)
 		}
+	}
+	if len(dead) == 0 {
+		return
+	}
+	h.mu.Lock()
+	for _, c := range dead {
+		delete(h.clients, c)
+	}
+	h.mu.Unlock()
+	for _, c := range dead {
+		c.close()
 	}
 }
 
@@ -97,15 +199,15 @@ func (s *Server) attachHooks() {
 	h := s.agent.Hooks
 	// 事件携带 conversation_id（当前运行的 Web 会话）：前端据此过滤，避免串台。
 	h.OnLLMResponse(func(ctx *agent.HookContext) error {
-		s.hub.broadcast(map[string]any{"type": "event", "event": "llm_response", "step": ctx.Step, "content": ctx.Reply, "conversation_id": s.RunConv()})
+		s.emit(map[string]any{"type": "event", "event": "llm_response", "step": ctx.Step, "content": ctx.Reply, "conversation_id": s.RunConv()})
 		return nil
 	})
 	h.OnToolCall(func(ctx *agent.HookContext) error {
-		s.hub.broadcast(map[string]any{"type": "event", "event": "tool_call", "step": ctx.Step, "tool": ctx.Tool, "args": ctx.Args, "conversation_id": s.RunConv()})
+		s.emit(map[string]any{"type": "event", "event": "tool_call", "step": ctx.Step, "tool": ctx.Tool, "args": ctx.Args, "conversation_id": s.RunConv()})
 		return nil
 	})
 	h.OnToolResult(func(ctx *agent.HookContext) error {
-		s.hub.broadcast(map[string]any{"type": "event", "event": "tool_result", "step": ctx.Step, "tool": ctx.Tool, "result": ctx.Result, "conversation_id": s.RunConv()})
+		s.emit(map[string]any{"type": "event", "event": "tool_result", "step": ctx.Step, "tool": ctx.Tool, "result": ctx.Result, "conversation_id": s.RunConv()})
 		return nil
 	})
 }
@@ -122,15 +224,31 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	client := &wsClient{conn: conn}
+	client := newWSClient(conn)
 	s.hub.add(client)
 	defer s.hub.remove(client)
 	s.logf("ws connected: %s (active=%d)", r.RemoteAddr, s.hub.active())
+	// Web UI 连接建立时先推一条 hello：告知当前运行归属，前端据此判断是否
+	// 需要用 /web/api/events 补齐「断线/切后台期间」缺失的事件。
+	// 只在 /web/ws 上推——/ws 是对第三方开放的 JSON-RPC 通道，不能插入
+	// 非 JSON-RPC 帧打扰客户端。
+	if strings.HasPrefix(r.URL.Path, "/web/") {
+		client.send(map[string]any{
+			"type": "hello", "running": s.agent.Running(), "running_conv": s.RunConv(),
+			"time": time.Now().Format(time.RFC3339),
+		})
+	}
 
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			break
+		}
+		// 应用层心跳：移动网络下 NAT/代理会回收长时间无数据的连接（且浏览器
+		// 收不到 close），前端定时发 ping，服务端回 pong，用来看住链路。
+		if isPingFrame(data) {
+			client.send(map[string]any{"type": "pong", "time": time.Now().Format(time.RFC3339)})
+			continue
 		}
 		var req rpcRequest
 		if err := json.Unmarshal(data, &req); err != nil {
@@ -165,4 +283,15 @@ func (h *hub) active() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.clients)
+}
+
+// isPingFrame 判断是否为应用层心跳帧（{"type":"ping"}）。
+func isPingFrame(data []byte) bool {
+	var m struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &m) != nil {
+		return false
+	}
+	return m.Type == "ping"
 }

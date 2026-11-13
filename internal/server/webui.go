@@ -150,6 +150,10 @@ func (s *Server) webRoutes() {
 	s.mux.HandleFunc("/web/api/run", s.webAuth(s.handleWebRun))
 	s.mux.HandleFunc("/web/api/abort", s.webAuth(s.handleWebAbort))
 	s.mux.HandleFunc("/web/api/steer", s.webAuth(s.handleWebSteer))
+	// 事件回放：断线/切后台期间缺失的流式事件（前端带 after=seq 补齐）
+	s.mux.HandleFunc("/web/api/events", s.webAuth(s.handleWebEvents))
+	// 运行中草稿：页面刷新/被杀后重开时先显示已有进度
+	s.mux.HandleFunc("/web/api/draft", s.webAuth(s.handleWebDraft))
 	// ask_user_question 问答通道：作答 + 恢复未答问题（刷新页面后重弹）
 	s.mux.HandleFunc("/web/api/answer", s.webAuth(s.handleWebAnswer))
 	s.mux.HandleFunc("/web/api/ask", s.webAuth(s.handleWebAskPending))
@@ -360,9 +364,19 @@ func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	// 普通对话也记录归属会话，使流式事件带上 conversation_id（前端按会话过滤）
 	s.setRunConv(body.ConversationID)
 	defer s.setRunConv("")
+	if body.ConversationID != "" {
+		s.evt.reset(body.ConversationID)
+	}
 	s.runStartAt = time.Now()
 	reply, err := s.chatOnce(body.ConversationID, body.Message)
 	s.recordLLMUsage()
+	if body.ConversationID != "" {
+		s.draft.finish(body.ConversationID)
+		s.emit(map[string]any{
+			"type": "event", "event": "run_done", "conversation_id": body.ConversationID,
+			"ok": err == nil,
+		})
+	}
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -589,6 +603,11 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// 记录本次运行的归属会话：WS 事件带 conversation_id，前端据此过滤避免串台。
 	s.setRunConv(body.ConversationID)
+	// 新一轮开始：清空该会话的事件回放缓冲（上一轮的增量已并入落盘历史）。
+	// seq 不清零，保持单调，避免前端游标回退导致重复重放。
+	if body.ConversationID != "" {
+		s.evt.reset(body.ConversationID)
+	}
 	defer func() { s.setRunConv(""); s.releaseRun() }()
 
 	// Agent 模式复用会话历史：把该会话的 user/assistant 消息注入 a.Initial，
@@ -635,6 +654,16 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	}
 	reply, err := s.agent.Run(body.Message)
 	s.recordLLMUsage()
+	// 本轮结束：草稿已并入正式答复（落盘历史），清掉临时文件
+	if body.ConversationID != "" {
+		s.draft.finish(body.ConversationID)
+		// 广播「本轮结束」：页面在后台被系统杀掉/刷新时，发起请求的那个标签页
+		// 已经收不到 HTTP 响应，只能靠这条事件知道「跑完了，该刷新历史了」。
+		s.emit(map[string]any{
+			"type": "event", "event": "run_done", "conversation_id": body.ConversationID,
+			"aborted": errors.Is(err, agent.ErrAborted), "ok": err == nil,
+		})
+	}
 	if err != nil {
 		// 用户主动停止（/stop、中止按钮）不是错误：返回 200 + aborted 标记，
 		// 前端据此显示「已停止」而不是一条刺眼的报错。

@@ -112,7 +112,7 @@ func (s *Server) AskUser(questionsJSON string) (string, error) {
 	s.logf("web ask_user: id=%s conv=%s questions=%d", id, p.convID, len(probe))
 
 	// 广播给前端：questions 用 RawMessage，前端直接拿到数组而不是转义字符串。
-	s.hub.broadcast(map[string]any{
+	s.emit(map[string]any{
 		"type": "event", "event": "ask_user",
 		"id": id, "questions": json.RawMessage(q),
 		"conversation_id": p.convID,
@@ -120,7 +120,7 @@ func (s *Server) AskUser(questionsJSON string) (string, error) {
 	defer func() {
 		s.ask.remove(id)
 		// 通知前端关闭弹窗（无论是answered 还是被取消）
-		s.hub.broadcast(map[string]any{
+		s.emit(map[string]any{
 			"type": "event", "event": "ask_close",
 			"id": id, "conversation_id": p.convID,
 		})
