@@ -26,6 +26,16 @@
   // Agent 是单实例，全局只有一个循环在跑；用它区分「哪个会话占着循环」，
   // 这样在 B 会话发送时能明确提示「A 会话正在运行」，而不是莫名其妙排队。
   let runningConv = null;
+  // runningConvs：服务端上报的「正在运行的会话」集合（多会话并发）。
+  // 单值 runningConv 已不够用 —— 两个会话同时跑时只记一个会误判。
+  let runningConvs = new Set();
+  // isConvRunningHere 该会话此刻是否真的在跑。
+  // 优先看集合（服务端真值），集合为空时退回 busyConv/runningConv 兼容老服务端。
+  function isConvRunningHere(convId) {
+    if (runningConvs.size > 0) return runningConvs.has(convId);
+    return (runningConv !== null && runningConv === convId) ||
+           (busyConv !== null && busyConv === convId && runningConv === null);
+  }
   // evtLog：按会话缓存运行中事件。切走期间 A 会话持续输出，前端仍会收 WS 事件
   // （只是不渲染到 DOM），先缓存起来；切回 A 时重放，避免「切走期间的内容丢失」。
   // 结构：{ convId: [ {kind, ...} ] }，每轮开始时清空对应会话。
@@ -677,15 +687,24 @@
         const q = curConv ? ("?id=" + encodeURIComponent(curConv)) : "";
         const j = await api("/web/api/status" + q);
         renderStatus(j);
-        // 记录服务端当前运行的会话：用于区分「哪个会话在跑」，并在空闲时补发排队消息
+        // 记录服务端当前运行的会话：多会话并发下用集合，单值仅作兼容兜底。
         const rc = (j && j.running) ? (j.running_conv || "") : null;
-        if (rc !== runningConv) {
-          // 某个会话的运行结束了：清掉它的增量缓存（内容已落盘，切回时从历史加载）
+        const convList = (j && Array.isArray(j.running_convs)) ? j.running_convs : null;
+        if (convList) {
+          const next = new Set(convList);
+          // 边跑边被移出集合的会话：清掉它的增量缓存（内容已落盘）
+          runningConvs.forEach((id) => { if (!next.has(id)) evtLog[id] = []; });
+          runningConvs = next;
+        } else if (rc !== runningConv) {
           if (runningConv && runningConv !== rc) evtLog[runningConv] = [];
+          runningConvs = rc ? new Set([rc]) : new Set();
+        }
+        if (rc !== runningConv) {
           runningConv = rc;
           renderQueueBar();
         }
-        if (j && !j.running) drainPending();
+        // 本会话不在运行集合里就尝试补发排队消息（别的会话在跑不再阻挡）
+        if (j && !runningConvs.has(curConv)) drainPending();
         // 运行中更快刷新速度/上下文
         statusTimer = setTimeout(tick, j && j.running ? 700 : 1500);
       } catch (e) {
@@ -1288,8 +1307,8 @@
     if (nSteer) head.push(nSteer + " 条已注入当前任务");
     if (nPending) head.push(nPending + " 条注入中…");
     if (nQueue) {
-      const otherBusy = (busyConv !== null || runningConv !== null) && busyConv !== curConv && runningConv !== curConv;
-      head.push(nQueue + " 条" + (otherBusy ? "等待其它会话结束后发送" : "等待本轮结束后发送"));
+      // 多会话并发后「别的会话在跑」不再导致排队，排队只可能因为本会话忙或服务端并发满
+      head.push(nQueue + " 条等待发送");
     }
     let html = '<div class="qhead">待处理消息 · ' + esc(head.join(" · ")) + '</div>';
     mine.forEach((it) => {
@@ -1334,19 +1353,11 @@
     // 注意：busyConv 只是「本页发起的运行」的本地记录，不能代表服务端真实状态——
     // 本页发起后、服务端还没置 running 时，busyConv 已有值而 runningConv 还是 null；
     // 反过来服务端跑着别的会话时，busyConv 可能是 null。两者都要看，取非空的。
-    const serverRunning = busyConv !== null ? busyConv : runningConv;
-    // 本会话是否真的在服务端跑着：以服务端状态为准，busyConv 仅作本页兜底。
-    const runningHere = (runningConv !== null && runningConv === convId) ||
-                        (busyConv !== null && busyConv === convId && runningConv === null);
-    if (serverRunning !== null && serverRunning !== convId) {
-      // 别的会话正在占用 Agent（单实例）：本会话消息排到「本会话」队列，
-      // 并明确告知用户是谁在跑 —— 不是莫名排队，也不是串台。
-      // 关键：消息已受理、不会丢，等服务端那轮一结束自动发出（切回本会话也会立刻发）。
-      pushQueue(text, convId, "queue");
-      flashQuick("「" + convLabelOf(serverRunning) + "」正在运行，本消息已排队，那轮结束自动发送");
-      return;
-    }
-    if (runningHere) {
+    // 多会话并发：服务端每个会话用独立 Agent 实例，B 会话可以直接跑，
+    // 不需要等 A 结束。只有同一个会话正在跑时才需要打断/排队。
+    // runningConvs 是服务端上报的「正在跑的会话集合」；单值 runningConv
+    // 作为兼容兜底（老服务端只返回 running_conv）。
+    if (isConvRunningHere(convId)) {
       // 本会话正在跑一轮。
       if (!interruptMode || mode !== "agent") {
         pushQueue(text, convId, "queue");
@@ -1387,7 +1398,10 @@
     renderQueueBar();
     let stopped = false;
     try {
-      const j = await api("/web/api/abort", { method: "POST" });
+      const j = await api("/web/api/abort", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation_id: convId }),
+    });
       stopped = !!(j && j.ok);
     } catch (e) {}
     if (stopped && busyConv === convId) flashQuick("已停止当前任务");
@@ -1435,10 +1449,11 @@
       }
     } catch (e) {
       if (e && e.status === 409) {
-        // 服务端仍在跑（别的标签页/竞态）：不当错误展示，改为排队，稍后自动补发。
+        // 409 现在只可能两种原因：本会话已有一轮在跑，或服务端跨会话并发已满。
+        // 都当排队处理，稍后自动补发；不当错误展示。
         if (turnEl) { try { turnEl.remove(); } catch (e2) {} }
         pushQueue(text, myConv, "queue");
-        flashQuick("其它会话正在运行，已排队，结束后自动发送");
+        flashQuick("服务端正忙，已排队，稍后自动发送");
       } else if (curConv === myConv) {
         const body = ensureReply();
         const wrap = body.parentElement.parentElement;
@@ -1450,7 +1465,9 @@
   }
   function finish(myConv) {
     if (curConv === myConv) finalizeTurn();
-    busyConv = null;
+    // 只清本次自己那一轮的标记：多会话并发时别把别的会话的状态一起清掉
+    if (busyConv === myConv) busyConv = null;
+    runningConvs.delete(myConv);
     evtLog[myConv] = [];   // 本轮已结束，增量事件已并入最终答复，清空缓存避免重复渲染
     abortBtn.classList.add("hidden");
     // 本轮结束后清理属于本会话的待处理项：
@@ -1479,7 +1496,8 @@
   let draining = false;
   function drainPending() {
     if (draining) return;
-    if (busyConv !== null || runningConv !== null) return;
+    // 只看本会话是否在跑：别的会话并发跑着不该挡住本会话的补发
+    if (isConvRunningHere(curConv)) return;
     const items = pendingQueue.filter((it) => it.conv === curConv && it.kind !== "steer");
     if (!items.length) return;
     pendingQueue = pendingQueue.filter((it) => !(it.conv === curConv && it.kind !== "steer"));

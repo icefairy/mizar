@@ -29,6 +29,18 @@ type Server struct {
 	// 避免请求无限排队；steer/abort 不走此锁，等待期间仍可实时纠正。
 	runMu sync.Mutex
 
+	// runLocks 按会话的独占锁（多会话并发）。同一会话串行，不同会话互不阻塞。
+	// runMu 仍保留：非 Web 入口（convID 为空）走它，与改造前行为一致。
+	runLocksMu sync.Mutex
+	runLocks   map[string]*sync.Mutex
+
+	// maxConcurrentRuns 全局并发上限（跨会话），0 = 不限。
+	// 对齐 Hermes gateway 的 max_concurrent_sessions：防止一次开几十个会话
+	// 把上游 LLM 与内存打爆。
+	maxConcurrentRuns int
+	runCountMu        sync.Mutex
+	runCount          int
+
 	// busyRun 标记「已抢到 runMu、但 Run() 可能还没置 runActive」的窗口期。
 	// runActive 只覆盖 Run() 体内，acquireRun 成功到 Run 真正开始之间有一小段，
 	// 此时 agent.Running() 仍为 false。用户在这个窗口发纠正消息会被误判成
@@ -38,10 +50,20 @@ type Server struct {
 	// runConv 当前正在执行 Agent.Run 的 Web 会话 id（空 = 非 Web 会话发起的运行）。
 	// WS 事件会带上该 id，前端据此把流式增量只渲染到「发起该运行的那个会话窗口」，
 	// 修复多会话切换时事件串台（新会话的消息出现在老会话窗口里）。
+	// 注意：多会话并发时它只反映「最后一次置位」，真正的归属判断用 runningConvs。
 	runConv atomic.Value // string
+
+	// runningConvs 正在运行的会话 id 集合（多会话并发）。与 runConv 并存：
+	// runConv 保留给单运行入口做快速归属判断，集合用于状态查询与并发上报。
+	runningMu    sync.Mutex
+	runningConvs map[string]bool
 
 	// ask 待回答的 ask_user_question 问题（Web 问答通道，见 ask.go）。
 	ask *askBroker
+
+	// pool 按会话提供独立的 Agent 实例，支持多会话真并发（见 agentpool.go）。
+	// 为空时退回 s.agent 单实例（老行为），保证非 Web 入口不受影响。
+	pool *agentPool
 
 	// evt 会话事件回放日志（切后台/断线期间的事件补齐，见 evtlog.go）。
 	evt *evtLog
@@ -80,38 +102,177 @@ func (s *Server) runLive() bool {
 	if s.busyRun.Load() {
 		return true
 	}
+	if a := s.agentFor(s.RunConv()); a != nil {
+		return a.Running()
+	}
 	return s.agent != nil && s.agent.Running()
 }
 
-func (s *Server) acquireRun() bool {
-	if !s.runMu.TryLock() {
+// runLiveFor 该会话是否正在运行（多会话并发下按会话判断）。
+// convID 为空时退回全局判断（非 Web 入口）。
+func (s *Server) runLiveFor(convID string) bool {
+	if convID == "" {
+		return s.runLive()
+	}
+	if s.pool != nil {
+		if a := s.pool.peek(convID); a != nil {
+			return a.Running()
+		}
 		return false
+	}
+	return s.runLive()
+}
+
+// agentFor 取该会话专属的 Agent 实例（没有则克隆）。
+// 非 Web 入口（convID 空）返回主实例，行为与改造前一致。
+func (s *Server) agentFor(convID string) *agent.Agent {
+	if s.pool != nil {
+		return s.pool.forConv(convID)
+	}
+	return s.agent
+}
+
+// acquireRun 尝试独占「该会话」的 Agent。
+//
+// 多会话并发语义（对齐 Hermes gateway 的 max_concurrent_sessions）：
+// 不同会话各自用各自的 Agent 实例，互不阻塞；同一会话仍然串行
+// （一个会话里同时跑两个循环必然互相覆盖上下文）。
+//
+// 全局并发上限由 maxConcurrentRuns 兜底（0 = 不限），防止一次开几十个会话
+// 把上游 LLM 和内存打爆。
+func (s *Server) acquireRun() bool { return s.acquireRunFor(s.RunConv()) }
+
+func (s *Server) acquireRunFor(convID string) bool {
+	s.runLocksMu.Lock()
+	if s.runLocks == nil {
+		s.runLocks = map[string]*sync.Mutex{}
+	}
+	lk := s.runLocks[convID]
+	if lk == nil {
+		lk = &sync.Mutex{}
+		s.runLocks[convID] = lk
+	}
+	s.runLocksMu.Unlock()
+	if !lk.TryLock() {
+		// 同一会话已有一轮在跑
+		return false
+	}
+	// 全局并发上限（跨会话）
+	if cap := s.maxConcurrentRuns; cap > 0 {
+		s.runCountMu.Lock()
+		if s.runCount >= cap {
+			s.runCountMu.Unlock()
+			lk.Unlock()
+			return false
+		}
+		s.runCount++
+		s.runCountMu.Unlock()
 	}
 	// 抢到锁即视为一轮已开始（Run 可能还没跑到置 runActive 的地方）
 	s.busyRun.Store(true)
 	return true
 }
 
-// releaseRun 释放 Agent 独占。
-func (s *Server) releaseRun() {
+// releaseRun 释放该会话的独占。
+func (s *Server) releaseRun() { s.releaseRunFor(s.RunConv()) }
+
+func (s *Server) releaseRunFor(convID string) {
+	s.runLocksMu.Lock()
+	lk := s.runLocks[convID]
+	s.runLocksMu.Unlock()
+	if s.maxConcurrentRuns > 0 {
+		s.runCountMu.Lock()
+		if s.runCount > 0 {
+			s.runCount--
+		}
+		s.runCountMu.Unlock()
+	}
 	s.busyRun.Store(false)
-	s.runMu.Unlock()
+	if lk != nil {
+		lk.Unlock()
+	}
+}
+
+// firstRunningConv 返回任一在跑的会话 id（多会话并发下「running_conv」单值语义
+// 已不够用，保留该字段兼容旧前端；新前端读 running_convs 数组）。
+func (s *Server) firstRunningConv() string {
+	if id := s.RunConv(); id != "" && s.isConvRunning(id) {
+		return id
+	}
+	for _, id := range s.runningConvsSnapshot() {
+		return id
+	}
+	return ""
+}
+
+// markRunning 维护「哪些会话正在跑」的集合（多会话并发时单个 runConv 不够用）。
+func (s *Server) markRunning(convID string, on bool) {
+	if convID == "" {
+		return
+	}
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	if s.runningConvs == nil {
+		s.runningConvs = map[string]bool{}
+	}
+	if on {
+		s.runningConvs[convID] = true
+	} else {
+		delete(s.runningConvs, convID)
+	}
+}
+
+// runningConvsSnapshot 当前在跑的会话 id 列表（前端状态栏据此显示）。
+func (s *Server) runningConvsSnapshot() []string {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	out := make([]string, 0, len(s.runningConvs))
+	for id := range s.runningConvs {
+		out = append(out, id)
+	}
+	return out
+}
+
+// isConvRunning 指定会话是否在跑。
+func (s *Server) isConvRunning(convID string) bool {
+	if convID == "" {
+		return false
+	}
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	return s.runningConvs[convID]
+}
+
+// busyRunActive 当前是否有任意会话在跑（用于 /status 的全局 running）。
+func (s *Server) anyRunLive() bool {
+	if s.busyRun.Load() {
+		return true
+	}
+	if s.pool != nil {
+		if len(s.pool.busyConvs()) > 0 {
+			return true
+		}
+	}
+	return s.agent != nil && s.agent.Running()
 }
 
 // New 创建 Server。
 func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {
 	s := &Server{
-		cfg:     cfg,
-		agent:   a,
-		session: st,
-		mux:     http.NewServeMux(),
-		hub:     newHub(),
-		web:     newWebUI(webStorePath()),
-		ask:     newAskBroker(),
-		evt:     newEvtLog(),
-		draft:   newDraftStore(),
+		cfg:      cfg,
+		agent:    a,
+		session:  st,
+		mux:      http.NewServeMux(),
+		hub:      newHub(),
+		web:      newWebUI(webStorePath()),
+		ask:      newAskBroker(),
+		evt:      newEvtLog(),
+		draft:    newDraftStore(),
+		runLocks: map[string]*sync.Mutex{},
 	}
 	s.wsUp = newWSUpgrader(cfg.Token)
+	s.pool = newAgentPool(a)
+	s.maxConcurrentRuns = cfg.MaxConcurrentRuns
 	s.routes()
 	s.attachHooks()
 	return s

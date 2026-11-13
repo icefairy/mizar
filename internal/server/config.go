@@ -23,6 +23,11 @@ type Config struct {
 	// Version 程序版本号（v0.7.6 之类），Web UI 标题展示用（空=不展示）。
 	Version string
 
+	// MaxConcurrentRuns 跨会话并发上限（多会话真并发）。0 或负数 = 不限。
+	// 对齐 Hermes gateway 的 max_concurrent_sessions：默认不限，
+	// 想限制上游 LLM 压力时设成 2~4。超过上限的请求返回 409，前端转排队。
+	MaxConcurrentRuns int
+
 	// MCPStats 可选：返回（已配置数, 已连接数），供 Web UI 状态栏展示 MCP 状态。
 	// 由调用方注入（MCP 注册表在 main 包），nil 时 Web UI 显示「-」。
 	MCPStats func() (configured, connected int)

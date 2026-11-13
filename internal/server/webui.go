@@ -595,10 +595,17 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logf("web agent.run: %s", truncateStr(body.Message, 80))
 
-	// 串行化 Agent.Run：避免并发请求互相覆盖 Initial/OnLLMStream。
-	// 忙时返回 409，前端会提示用户；steer/abort 仍可实时生效。
-	if !s.acquireRun() {
-		errJSON(w, http.StatusConflict, "agent 正在处理上一条消息，请稍候或发送纠正消息")
+	// 同一会话串行、不同会话并发：每个会话用自己的 Agent 实例与独占锁。
+	// 忙时返回 409（同一会话重复发才会命中），steer/abort 仍可实时生效。
+	if !s.acquireRunFor(body.ConversationID) {
+		errJSON(w, http.StatusConflict, "该会话正在处理上一条消息，请稍候或发送纠正消息")
+		return
+	}
+	// 该会话专属的 Agent 实例（首次使用自动克隆，共享 LLM/插件/Jobs 等进程级服务）
+	ag := s.agentFor(body.ConversationID)
+	if ag == nil {
+		s.releaseRunFor(body.ConversationID)
+		errJSON(w, http.StatusInternalServerError, "agent 未初始化")
 		return
 	}
 	// 记录本次运行的归属会话：WS 事件带 conversation_id，前端据此过滤避免串台。
@@ -608,7 +615,8 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 	if body.ConversationID != "" {
 		s.evt.reset(body.ConversationID)
 	}
-	defer func() { s.setRunConv(""); s.releaseRun() }()
+	convID := body.ConversationID
+	defer func() { s.setRunConv(""); s.releaseRunFor(convID) }()
 
 	// Agent 模式复用会话历史：把该会话的 user/assistant 消息注入 a.Initial，
 	// 使切换模式时上下文连续（修复"切 Agent 模式后列表无变化"的割裂感）。
@@ -618,15 +626,17 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 			for _, m := range c.Messages {
 				initial = append(initial, agent.Message{Role: m.Role, Content: m.Content})
 			}
-			s.agent.Initial = initial
+			ag.Initial = initial
 		}
 	}
 
 	// 流式输出：把每步 LLM 的 reply 文本增量 + 思考过程通过 WS 广播给前端。
 	// 用 StreamTextExtractor 提取可显示文本（剥掉控制 JSON / 工具调用 JSON）。
+	// 每个会话的 Agent 实例各有自己的 OnLLMStream，闭包独占 extr/curStep，
+	// 并发跑多个会话时互不干扰（共享一个实例才会串台）。
 	var extr agent.StreamTextExtractor
 	var curStep = -1
-	s.agent.OnLLMStream = func(step int, d agent.StreamDelta) {
+	ag.OnLLMStream = func(step int, d agent.StreamDelta) {
 		if step != curStep {
 			// 步骤切换：新的一步开始，重置提取器（工具调用后模型会重新输出）
 			extr.Reset()
@@ -642,7 +652,11 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 			s.broadcastStream(step, inc, "reply")
 		}
 	}
-	defer func() { s.agent.OnLLMStream = nil }()
+	defer func() { ag.OnLLMStream = nil }()
+
+	// 会话级运行归属：多会话并发时分不清「谁在跑」，用集合维护。
+	s.markRunning(body.ConversationID, true)
+	defer s.markRunning(body.ConversationID, false)
 
 	s.runStartAt = time.Now()
 	// 用户消息先落盘：这样本轮运行期间新增的 steer/排队消息能按正确顺序
@@ -652,7 +666,7 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 		s.web.store.appendMsg(body.ConversationID, convMessage{Role: "user", Content: body.Message})
 		s.web.store.setMode(body.ConversationID, "agent")
 	}
-	reply, err := s.agent.Run(body.Message)
+	reply, err := ag.Run(body.Message)
 	s.recordLLMUsage()
 	// 本轮结束：草稿已并入正式答复（落盘历史），清掉临时文件
 	if body.ConversationID != "" {
@@ -685,8 +699,19 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 // 中止当前运行，并丢弃尚未被消费的 steer——否则停止后残留的纠正消息会被
 // 下一次 Run 当作待注入消息消费（表现为「停止后新任务莫名其妙换了方向」）。
 func (s *Server) handleWebAbort(w http.ResponseWriter, r *http.Request) {
-	s.agent.Abort()
-	s.agent.ClearSteer()
+	// 按会话中止：多会话并发时不能把别人的循环一起停掉
+	var body struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	ag := s.agentFor(body.ConversationID)
+	if ag != nil {
+		ag.Abort()
+		ag.ClearSteer()
+	} else {
+		s.agent.Abort()
+		s.agent.ClearSteer()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -702,15 +727,19 @@ func (s *Server) handleWebSteer(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, http.StatusBadRequest, "content required")
 		return
 	}
-	running := s.runLive()
-	// 归属校验：当前运行属于别的会话时不注入（否则会把 A 会话的纠正串进 B 会话的循环）
-	if running && body.ConversationID != "" {
-		if cur := s.RunConv(); cur != "" && cur != body.ConversationID {
-			running = false
-		}
+	// 归属判断：多会话并发下按会话查，不再用全局 runConv（并发时会互相覆盖）
+	running := s.runLiveFor(body.ConversationID)
+	if body.ConversationID == "" {
+		// 非 Web 入口：沿用全局判断
+		running = s.runLive()
 	}
 	if running {
-		s.agent.Steer(body.Content)
+		ag := s.agentFor(body.ConversationID)
+		if ag == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "running": false})
+			return
+		}
+		ag.Steer(body.Content)
 		// 落盘到会话历史：否则刷新页面后这条纠正消息就不见了（只有内存里被循环消费）。
 		if body.ConversationID != "" {
 			s.web.store.appendMsg(body.ConversationID, convMessage{Role: "user", Content: body.Content})

@@ -1,3 +1,49 @@
+## [v0.8.3] — 2026-11-13
+
+> 主题：**多会话真并发** —— B 会话不再等 A 跑完。参照 Hermes gateway 的
+> `max_concurrent_sessions` + 每会话独立 Agent 实例模型。
+
+### ✨ 新增
+
+- **每个会话一个独立 Agent 实例**（`internal/agent/clone.go`、`internal/server/agentpool.go`）
+  - `Agent.Clone()`：共享进程级服务（LLM、插件/工具注册表、Jobs、GoalService、
+    Tuner、Guard、Compactor、Hooks…），隔离运行态（`Initial`、`OnLLMStream`/
+    `OnToolExchange`/`OnCompact` 回调、`StatsData`、steer 槽位、aborted、
+    runActive/runCancel、currentTask）。
+  - `agentPool` 按 `conversation_id` 缓存实例，首次使用自动克隆；共享的原因
+    是复制会让两边的注册表/计数器不一致，隔离的原因是这些字段被两个循环
+    同时写就会串台。
+- **锁按会话拆分**：`acquireRunFor(convID)` 用 `map[string]*sync.Mutex`，
+  同一会话仍串行（一个会话里同时跑两个循环必然互相覆盖上下文），
+  不同会话互不阻塞。
+- **全局并发上限** `Config.MaxConcurrentRuns`（0/负数 = 不限，默认不限）：
+  对齐 Hermes 的 `max_concurrent_sessions: null`。想限制上游压力时设 2~4，
+  超出者返回 409 由前端转排队。
+- **`/web/api/status` 新增 `running_convs` 数组**：单值 `running_conv`
+  在多会话并发下只够表达一个；保留旧字段兼容。
+
+### 🔧 改动
+
+- `handleWebRun` / `handleWebSteer` / `handleWebAbort` 全部按会话路由到
+  对应 Agent 实例 —— steer 只注入该会话、abort 只停该会话的循环。
+- 前端 `runningConvs` 集合取代单值判断；`finish()` 只清自己那条，
+  不再无脑 `busyConv = null` 把别的会话状态一起抹掉。
+- `drainPending` 只看**本会话**是否在跑：别的会话并发运行不再挡住补发。
+- 队列条文案：不再说「等待其它会话结束」（并发后此情况不存在），改为「等待发送」。
+
+### 🧪 验证
+
+- **真实服务 + 假 SSE 上游实测并发**（`/web/api/run` 同时打两个会话）：
+  - 改造前（全局单锁）：A=**409** 提示排队、B=200，上游只收到 **1** 次调用
+  - 改造后（每会话实例）：A=200、B=200，总耗时 **2269ms**（= 单请求 2s，
+    非串行 4s），上游两次调用相差 **0.7 毫秒**同时到达
+- 回归 11 项：`concurrency_test.go`(7) + `clone_test.go`(4)
+  - 反向验证过：把 `acquireRunFor` 改回全局锁 → `TestDifferentConvsRunConcurrently`
+    当场变红（报「B 会话必须能同时开始」）
+- `go build ./...` 通过；server/agent/cmd 三包 **465 项全过**
+- 已知无关失败：`internal/context` 的 `TestFindUpwards`/`TestLoadNone`
+  读宿主全局 `~/.hermes/profiles/dev/AGENTS.md`，stash 掉本次改动同样失败
+
 ## [v0.8.2] — 2026-11-13
 
 > 主题：**「明明发出去了，却显示在排队」**——打断模式下的状态误报。

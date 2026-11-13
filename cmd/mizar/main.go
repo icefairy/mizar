@@ -39,7 +39,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.8.2"
+var version = "v0.8.3"
 
 // buildTag 标识 Windows 产物用的是哪条构建链，由 -ldflags -X main.buildTag=... 注入。
 //

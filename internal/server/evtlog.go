@@ -106,14 +106,16 @@ func (s *Server) handleWebEvents(w http.ResponseWriter, r *http.Request) {
 	if conv == "" {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"events": []any{}, "last": int64(0),
-			"running": s.runLive(), "running_conv": s.RunConv(),
+			"running": s.anyRunLive(), "running_conv": s.firstRunningConv(),
+			"running_convs": s.runningConvsSnapshot(),
 		})
 		return
 	}
 	if s.evt == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"events": []any{}, "last": int64(0), "after": after,
-			"running": s.runLive(), "running_conv": s.RunConv(),
+			"running": s.runLiveFor(conv), "running_conv": s.firstRunningConv(),
+			"running_convs": s.runningConvsSnapshot(),
 		})
 		return
 	}
@@ -128,8 +130,10 @@ func (s *Server) handleWebEvents(w http.ResponseWriter, r *http.Request) {
 		"after":           after,
 		// 是否还有更早的、已被环形缓冲挤掉的事件（前端据此提示「过程已截断，
 		// 请重新打开会话查看完整历史」而不是假装完整）。
-		"truncated":    (last - after) > int64(len(evs)),
-		"running":      s.runLive(),
-		"running_conv": s.RunConv(),
+		"truncated": (last - after) > int64(len(evs)),
+		// running 按「这个会话」判断：多会话并发时别的会话在跑不代表本会话在跑。
+		"running":       s.runLiveFor(conv),
+		"running_conv":  s.firstRunningConv(),
+		"running_convs": s.runningConvsSnapshot(),
 	})
 }
