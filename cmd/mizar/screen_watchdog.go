@@ -19,6 +19,8 @@ package main
 //     兜底清掉成 2 类残留。忙时不打扰，避免与输入/流式渲染抢事件循环。
 
 import (
+	"runtime"
+	"sync/atomic"
 	"time"
 
 	"mizar/internal/diag"
@@ -74,6 +76,74 @@ func (m *tuiModel) startScreenWatchdog() {
 					m.requestResyncFromGoroutine()
 					lastSync = time.Now()
 				}
+			}
+		}
+	}()
+}
+
+// =============================================================================
+// 事件循环卡顿看门狗（「TUI 卡住、键盘全哑」的现场取证）
+// =============================================================================
+//
+// 现象：TUI 用着用着突然不接受任何输入，但进程还活着（WebUI 照常可用）。
+// 根因永远是「tcell/tview 事件循环线程被某段代码堵住」——可能是同步跑外部命令、
+// 阻塞式网络请求、或 QueueUpdate 自死锁。这类问题只在特定环境（内网慢盘、
+// 大仓库、慢终端）复现，事后无法回溯。
+//
+// 对策：独立 goroutine 定期往事件循环里投一个空更新，量「多久才被执行」。
+// 超过阈值就说明事件循环被占住了 —— 立刻 dump 全部 goroutine 栈到诊断日志，
+// 下次卡住时 ~/.mizar/logs 里就有现场（谁在堵、堵在哪一行）。
+// 开销：每 loopLagInterval 一次空回调，纳秒级，可忽略。
+
+const (
+	loopLagInterval = 3 * time.Second
+	// loopLagThreshold 事件循环多久没响应算「卡住」。
+	// 3 秒已经远超任何正常渲染耗时（statusBarDirect 缓存后是微秒级），
+	// 取值为阈值的一半：每 3s 探测一次，连续 2 次没响应即 6s，够稳也不误报。
+	loopLagThreshold = 6 * time.Second
+	// loopLagStackCap 栈 dump 上限（防止超长栈把日志撑爆）。
+	loopLagStackCap = 256 << 10
+)
+
+// startLoopLagWatchdog 启动事件循环看门狗（Run 内调用一次，随 watchStop 退出）。
+func (m *tuiModel) startLoopLagWatchdog() {
+	stop := m.watchStop
+	if stop == nil {
+		return
+	}
+	// probePending/probeAt 用原子量：写入发生在事件循环线程（回调里），
+	// 读取发生在看门狗 goroutine，必须避免数据竞争。
+	var probePending atomic.Bool
+	var probeAt atomic.Int64 // UnixNano
+	dumped := &atomic.Bool{}
+	go func() {
+		ticker := time.NewTicker(loopLagInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if probePending.Load() {
+					d := time.Since(time.Unix(0, probeAt.Load()))
+					if d >= loopLagThreshold && !dumped.Swap(true) {
+						buf := make([]byte, loopLagStackCap)
+						n := runtime.Stack(buf, true)
+						diag.Logf("tui", "事件循环已 %.1fs 无响应（疑似 TUI 卡住），goroutine 栈：\n%s",
+							d.Seconds(), string(buf[:n]))
+					}
+					continue
+				}
+				probePending.Store(true)
+				probeAt.Store(time.Now().UnixNano())
+				go func() {
+					// QueueUpdate 会阻塞到回调在事件循环里执行完；
+					// 事件循环正常时这里几乎立刻返回。
+					m.app.QueueUpdate(func() {
+						probePending.Store(false)
+						dumped.Store(false) // 恢复响应：下次卡住可再取证
+					})
+				}()
 			}
 		}
 	}()

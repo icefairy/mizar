@@ -437,6 +437,7 @@
     startStatusPoll();
     loadSettings(j.settings);
     loadConversations(true);
+    if (isMobile()) sidebar.classList.add("collapsed"); // 手机端初始收起抽屉
   }
   function setModelTag(m) { modelTag.textContent = m || ""; }
   loginForm.addEventListener("submit", async (e) => {
@@ -594,27 +595,45 @@
       input.focus();
     } catch (e) { addMsg("error", "错误", e.message); }
   }
+  function isMobile() { return window.matchMedia("(max-width: 720px)").matches; }
   function collapseOnMobile() {
+    // 手机端侧栏是覆盖式抽屉，选完会话必须收起，否则挡住内容；
+    // pin（常驻锁定）只对 PC 有意义，移动端忽略。
+    if (isMobile()) { sidebar.classList.add("collapsed"); return; }
     if (pinned) return; // 已锁定常驻，不自动收起
-    if (window.matchMedia("(max-width: 720px)").matches) sidebar.classList.add("collapsed");
   }
+  // 从窄屏切回宽屏时，把抽屉状态复位成正常展开（避免 PC 上看不到侧栏）
+  let wasMobile = isMobile();
+  window.addEventListener("resize", () => {
+    const nowMobile = isMobile();
+    if (wasMobile && !nowMobile) {
+      sidebar.classList.remove("collapsed");
+    }
+    wasMobile = nowMobile;
+  });
   // 侧栏开关：主动打开后，点主区空白处自动收起（含桌面端）
   let sidebarToggled = false;
   if (menuBtn) menuBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (pinned) return; // 锁定时不允许收起
+    if (pinned && !isMobile()) return; // 锁定时不允许收起（仅 PC 有意义）
     const willOpen = sidebar.classList.contains("collapsed");
     sidebar.classList.toggle("collapsed");
     sidebarToggled = willOpen;
   });
   document.addEventListener("click", (e) => {
-    if (pinned) return;
+    if (pinned && !isMobile()) return;
     if (!sidebarToggled) return;
     if (sidebar.contains(e.target) || (menuBtn && menuBtn.contains(e.target))) return;
     sidebar.classList.add("collapsed");
     sidebarToggled = false;
   });
   newConvBtn.addEventListener("click", createConv);
+  // 移动端抽屉遮罩：点击关闭侧栏
+  const sideOverlay = $("sideOverlay");
+  if (sideOverlay) sideOverlay.addEventListener("click", () => {
+    sidebar.classList.add("collapsed");
+    sidebarToggled = false;
+  });
 
   // ---------- 状态栏（对齐 TUI 状态栏） ----------
   // 每 1.5s 拉一次 /web/api/status；运行中加密到 700ms 以内（由服务端 running 决定）。

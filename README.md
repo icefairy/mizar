@@ -895,7 +895,9 @@ make release           # 一次编三个平台，各自内嵌对应 Zig
 make release-xz        # 同上，并额外生成 dist/*.xz（发布上传用这个）
 make release-amd64     # 只编 linux/amd64（内嵌 x86_64-linux）
 make release-arm64     # 只编 linux/arm64（内嵌 aarch64-linux）
-make release-windows   # 只编 windows/amd64（内嵌 x86_64-windows）
+make release-windows   # 只编 windows/amd64 官方版（Win8.1/10/11，build: win10-native）
+make release-windows-win7    # 只编 Windows 7 兼容版（补丁 SDK，build: win7-compat）
+make release-windows-both    # 一次出两份 Windows 产物（内网同时有 Win7 + Win10 时用）
 make release-xz-arm64  # 只编 arm64 并压成 dist/mizar-linux-arm64.xz
 ```
 
@@ -910,7 +912,24 @@ make release-xz-arm64  # 只编 arm64 并压成 dist/mizar-linux-arm64.xz
 |---|---|---|---|
 | `mizar-linux-amd64` | 126 MB | `zig-x86_64-linux-0.17.1.tar.xz`（55 MB） | 74 MB |
 | `mizar-linux-arm64` | 119 MB | `zig-aarch64-linux-0.17.1.tar.xz`（51 MB） | 68 MB |
-| `mizar-windows-amd64.exe` | 168 MB | `zig-x86_64-windows-0.17.1.zip`（96 MB） | 110 MB |
+| `mizar-windows-amd64.exe` | 168 MB | `zig-x86_64-windows-0.17.1.zip`（96 MB） | 106 MB |
+| `mizar-win7.exe` | 168 MB | 同上 | 106 MB |
+
+### Windows 两份产物（Win7 / Win10+ 分开）
+
+Go 1.21 起官方最低要求 Windows 10，官方 SDK 编出的 exe 在 **Win7 上启动即崩**
+（runtime 用 `ProcessPrng`，Win8+ 才有）。因此 Windows 出两份，业务代码完全一致，
+只换编译器：
+
+| 目标系统 | 产物 | `-version` 显示 | 长路径行为 |
+|---|---|---|---|
+| Windows 7 SP1 / Server 2008 R2 | `mizar-win7.exe` | `(win7-compat)` | 手动加 `\\?\` 前缀 |
+| Windows 8.1 / 10 / 11 | `mizar-windows-amd64.exe` | `(win10-native)` | 系统原生处理 |
+
+两份产物的 `-version`、启动诊断日志、Web UI 状态栏都会显示构建标识，
+现场装错包一眼可见。Win7 上还想额外说明：**TUI 需要支持 VT 转义的终端**，
+Win7 自带 conhost 不支持，启动时会明确提示并降级经典模式（
+`mizar -tui=false`）或用 `mizar -serve` 走网页界面。
 
 归档目录 `internal/zigboot/zigdist/` 已被 `.gitignore` 忽略（属构建产物）。
 **未内嵌时二进制照常构建**，只是 `/zig` 会提示未内嵌。

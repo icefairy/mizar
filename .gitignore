@@ -18,3 +18,7 @@ workerpool.go
 # Zig 工具链归档：构建产物，不入库（scripts/fetch-zig.sh --embed 生成）
 internal/zigboot/zigdist/*.tar.xz
 internal/zigboot/zigdist/*.zip
+
+# 交接记录（工作过程文档，不入库）
+handoff.md
+/docs/handoff-*

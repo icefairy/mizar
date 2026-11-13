@@ -46,6 +46,9 @@ html, body { height: 100%; margin: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   background: var(--bg); color: var(--text); font-size: 14px;
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
 }
 .hidden { display: none !important; }
 button { font-family: inherit; cursor: pointer; }
@@ -104,6 +107,11 @@ button { font-family: inherit; cursor: pointer; }
   background: var(--bg-panel); color: var(--text-dim); font-size: 13px;
 }
 .pin-btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+/* 移动端抽屉遮罩：默认不显示，只在手机断点启用 */
+.side-overlay {
+  display: none; position: fixed; inset: 0; z-index: 55;
+  background: rgba(0,0,0,.38); -webkit-tap-highlight-color: transparent;
+}
 .conv-list { flex: 1; overflow-y: auto; padding: 4px 8px; }
 .conv-item {
   display: flex; flex-direction: column; gap: 3px; padding: 8px 9px; border-radius: 8px;
@@ -385,12 +393,88 @@ button { font-family: inherit; cursor: pointer; }
 .primary { padding: 9px 18px; border: none; border-radius: 8px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; }
 
 /* ---------- 移动端 ---------- */
+/* 触摸设备：没有 hover，复制按钮/消息操作默认常显，避免"点不出来" */
+@media (hover: none) {
+  .msg-actions { opacity: .92; }
+  .code-wrap .code-copy { opacity: .85; }
+}
+/* iOS 上 input/textarea 字号 <16px 会在聚焦时自动放大页面，统一提到 16px */
 @media (max-width: 720px) {
-  .sidebar { position: absolute; z-index: 40; height: 100%; box-shadow: var(--shadow); }
+  input, textarea, select { font-size: 16px !important; }
+}
+
+@media (max-width: 720px) {
+  /* 用动态视口高度，避开手机浏览器地址栏/工具栏高度抖动（旧浏览器回退 100%） */
+  .app { height: 100%; height: 100dvh; }
+
+  /* --- 侧栏改为抽屉：覆盖式 + 遮罩 --- */
+  .sidebar {
+    position: fixed; top: 0; left: 0; z-index: 60;
+    width: 84vw; max-width: 320px; height: 100vh; height: 100dvh;
+    box-shadow: var(--shadow); transition: transform .22s ease;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pin-btn { display: none; }   /* 常驻锁定对手机无意义（抽屉会挡住内容） */
   .sidebar.collapsed { margin-left: 0; transform: translateX(-100%); }
+  /* 抽屉打开时显示半透明遮罩（点遮罩关闭侧栏） */
+  .sidebar:not(.collapsed) + .side-overlay { display: block; }
   .only-mobile { display: inline-block; }
-  .msg { max-width: 92%; }
-  .quickbar .qk input { width: 130px; }
+  .conv-item { padding: 10px 10px; }      /* 加大触控热区 */
+  .del { padding: 4px 8px; }
+
+  /* --- 顶栏改两行：第一行菜单/标题/操作，第二行模式切换占满宽 --- */
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 9px 12px; padding-top: calc(9px + env(safe-area-inset-top)); }
+  .brand { font-size: 14px; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-tag { display: none; }            /* 模型已在状态栏显示，顶栏省空间 */
+  .topbar .right { margin-left: auto; gap: 6px; }
+  .modes { order: 10; width: 100%; }
+  .mode { flex: 1; padding: 8px 0; text-align: center; }
+
+  /* --- 对话区 --- */
+  .log { padding: 12px; gap: 14px; }
+  .msg { max-width: 100%; }
+  .msg .body { padding: 9px 12px; font-size: 15px; border-radius: 11px; }
+  .proc { max-width: 100%; }
+  .msg .body pre { padding: 9px 10px; }
+  .msg .body table { font-size: 12.5px; }
+  .msg .body th, .msg .body td { padding: 5px 7px; }
+
+  /* --- 状态栏 / 队列 --- */
+  .statusbar { gap: 3px 10px; font-size: 11px; }
+  .queue-bar { padding: 7px 12px; max-height: 110px; }
+
+  /* --- 输入区：贴合底部安全区 --- */
+  .composer {
+    padding: 8px 12px 10px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+  .quickbar { gap: 8px; row-gap: 6px; }
+  .qk { flex: 1 1 0; min-width: 0; }
+  .qk input { width: 100%; }
+  .qk select { flex: 1; min-width: 0; }
+  .quick-msg { margin-left: 0; flex-basis: 100%; }
+  .input-row { gap: 8px; }
+  #input { min-height: 62px; max-height: 40vh; padding: 9px 11px; }
+  #sendBtn { height: 40px; padding: 10px 16px; }
+
+  /* --- 弹窗铺满，避免小屏内容挤压/横向溢出 --- */
+  .modal { padding: 10px; padding-top: calc(10px + env(safe-area-inset-top));
+           padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+  .modal-card, .ask-card { width: 100%; max-width: 100%; max-height: 100%; }
+  .modal-body { padding: 14px; gap: 12px; }
+  .pform { grid-template-columns: 1fr; }
+  .pform button { grid-column: span 1; }
+
+  /* --- 登录页 --- */
+  .login-wrap { height: 100vh; height: 100dvh; padding: 16px; overflow-y: auto; }
+  .login-card { width: 100%; max-width: 340px; padding: 26px 22px; }
+}
+
+/* 超窄屏（小屏手机 / 折叠屏外屏）再收一档 */
+@media (max-width: 380px) {
+  .brand .ver { display: none; }
+  #sendBtn { padding: 10px 12px; }
+  .msg .body { font-size: 14.5px; }
 }
 
 /* 供应商表单 */
@@ -431,5 +515,15 @@ button { font-family: inherit; cursor: pointer; }
 }
 .ask-free:focus { outline: none; border-color: var(--accent); }
 @media (max-width: 720px) {
-  .ask-card { width: 94vw; }
+  .ask-card { width: 100%; }
+}
+
+/* ---------- 移动端尾部覆盖（放在最后，避免被上方同名规则覆盖） ---------- */
+@media (max-width: 720px) {
+  /* 供应商表单在窄屏改单列，避免两块并排把 placeholder 挤断 */
+  .pform { grid-template-columns: 1fr; }
+  .pform button { grid-column: span 1; }
+  .field .row { flex-wrap: wrap; }
+  .field .row > input, .field .row > select { flex: 1 1 100%; }
+  .field .row > button { flex: 1 1 auto; }
 }

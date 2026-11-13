@@ -39,7 +39,24 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.7.7"
+var version = "v0.8.0"
+
+// buildTag 标识 Windows 产物用的是哪条构建链，由 -ldflags -X main.buildTag=... 注入。
+//
+//	win10-native —— 官方 Go SDK 编出，Win8.1/10/11 用（长路径走系统原生处理）
+//	win7-compat  —— 打过 go-win7 补丁的 SDK 编出，Win7 SP1/2008 R2 用
+//
+// 非 Windows 产物留空（Linux 侧两条链编出的东西完全一致，无需区分）。
+// 现场排查时 -version 第一行就能看出装的是哪个包，省掉「你装的是哪份」的往返。
+var buildTag = ""
+
+// versionString 返回带构建标识的版本串，如 "v0.7.9 (win7-compat)"。
+func versionString() string {
+	if buildTag == "" {
+		return version
+	}
+	return version + " (" + buildTag + ")"
+}
 
 // hostPort 把 ":3003" 转成 "127.0.0.1:3003" 便于浏览器访问（空 host 用本机）。
 func hostPort(addr string) string {
@@ -168,7 +185,7 @@ func main() {
 	flag.Parse()
 
 	if *showVer {
-		fmt.Println("mizar", version)
+		fmt.Println("mizar", versionString())
 		return
 	}
 
@@ -181,7 +198,18 @@ func main() {
 	}
 	diag.Init(diagOn)
 	defer diag.Close()
-	diag.Logf("tui", "mizar %s 启动: args=%v", version, os.Args[1:])
+	diag.Logf("tui", "mizar %s 启动: args=%v", versionString(), os.Args[1:])
+
+	// Windows：控制台代码页切 UTF-8（中文乱码），并预检 VT 能力。
+	// tcell 在 Windows 只有 VT 一条实现路径，Win7/8 的 conhost 不支持，
+	// 结果是 NewScreen 失败后「一闪而退」掉进经典模式 —— 需要提前讲明白。
+	ensureConsoleUTF8()
+	if *tui && !consoleVTEnabled() {
+		fmt.Fprintln(os.Stderr, windowsVersionHint())
+		fmt.Fprintln(os.Stderr, "\n已自动切换到经典交互模式。")
+		diag.Logf("tui", "console VT unsupported → 降级经典模式")
+		*tui = false
+	}
 
 	// LSP server 模式：通过 stdio 提供 LSP 能力
 	if *lspServer {
@@ -1823,7 +1851,8 @@ func main() {
 	if *serve {
 		cfg := server.NewConfig(*addr, *token)
 		cfg.SetAll(*httpOn, *rpcOn, *wsOn)
-		cfg.Version = version
+		// Web UI 状态栏也显示构建标识（win10-native / win7-compat），便于现场分辨。
+		cfg.Version = versionString()
 		// Web UI 状态栏：MCP 连接统计（对齐 TUI 项目行）
 		cfg.MCPStats = func() (int, int) {
 			if runtimeMCPRegistry == nil {

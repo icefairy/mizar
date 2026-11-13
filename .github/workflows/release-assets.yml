@@ -1,6 +1,10 @@
 name: release-assets
 
-# 在 GitHub Actions 上构建三平台产物、xz 压缩后上传到指定 release。
+# 在 GitHub Actions 上构建产物、xz 压缩后上传到指定 release。
+#
+# 产物共 5 个：
+#   linux-amd64 / linux-arm64 / windows-amd64.exe(官方 SDK, Win8.1+)
+#   / win7.exe(go-win7 补丁 SDK, Win7 SP1) / 以及它们各自的 .xz
 #
 # 为什么要压缩：产物含内嵌 Zig 工具链，未压缩 126/119/168 MB。本地上传到
 # uploads.github.com 的链路很不稳定（大文件常被 RST 或触发「60 秒无数据」超时），
@@ -47,10 +51,23 @@ jobs:
       - name: 构建三平台产物
         run: make release
 
+      # Windows 7 兼容版：用打了 go-win7 补丁的 SDK 编译。
+      # SDK 需要现场 make.bash（约 3~5 分钟），放在 $RUNNER_TEMP 下不污染仓库。
+      # 失败不阻断整体发布：Win7 版缺失时下面的循环会跳过它。
+      - name: 构建 Windows 7 兼容产物（补丁 SDK）
+        continue-on-error: true
+        env:
+          GOWIN7ROOT: ${{ runner.temp }}/gowin7/go
+          GOWIN7WORK: ${{ runner.temp }}/gowin7
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq patch
+          bash scripts/build-win7.sh
+
       - name: 压缩产物（xz -T0 -6，保留原文件供对比）
         run: |
           set -euo pipefail
-          for f in dist/mizar-linux-amd64 dist/mizar-linux-arm64 dist/mizar-windows-amd64.exe; do
+          for f in dist/mizar-linux-amd64 dist/mizar-linux-arm64 \
+                   dist/mizar-windows-amd64.exe dist/mizar-win7.exe; do
             [ -f "$f" ] || continue
             xz -T0 -6 -k "$f"
             before=$(stat -c %s "$f")
@@ -81,7 +98,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
-          for n in mizar-linux-amd64 mizar-linux-arm64 mizar-windows-amd64.exe; do
+          for n in mizar-linux-amd64 mizar-linux-arm64 \
+                   mizar-windows-amd64.exe mizar-win7.exe; do
             echo "removing raw asset: $n"
             gh release delete-asset "$TAG" "$n" --yes || true
           done

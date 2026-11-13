@@ -2,7 +2,9 @@
 <html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#f5f6f8">
 <title>开阳 Mizar</title>
 <link rel="stylesheet" href="/web/style.css">
 </head>
@@ -33,6 +35,8 @@
       <button id="logoutBtn" class="ghost wide" type="button">退出</button>
     </div>
   </aside>
+  <!-- 移动端侧栏抽屉遮罩（仅手机显示，点它关闭侧栏） -->
+  <div id="sideOverlay" class="side-overlay"></div>
 
   <!-- 右侧主区 -->
   <div class="main">

@@ -1,3 +1,141 @@
+## [v0.8.0] — 2026-11-13
+
+> 主题：**Windows 拆成两份产物**（Win7 兼容版 / Win10+ 原生版），产物自报家门。
+> 背景：v0.7.9 起 Windows 统一用打了 go-win7 补丁的 SDK 编译，一份 exe 通吃
+> Win7~11。代价是 Win10+ 上长路径语义从「系统原生处理」退回「手动加 `\\?\` 前缀」
+> （`\\?\` 前缀会绕过 Win32 路径规范化）。为了不给 Win10 用户留这点边缘差异，
+> 改为 **两份产物**，各用各的编译器。
+
+### ✨ 新增
+
+- **`make release-windows-both`**：一次产出两份 Windows exe
+  - `dist/mizar-windows-amd64.exe` —— 官方 Go SDK 编译，目标 Win8.1/10/11，
+    长路径走系统原生处理（与 v0.7.7 及之前完全一致）
+  - `dist/mizar-win7.exe` —— go-win7 补丁 SDK 编译，目标 Win7 SP1 / 2008 R2
+- **产物构建标识 `buildTag`**（`cmd/mizar/main.go`）：通过
+  `-ldflags "-X main.buildTag=win10-native|win7-compat"` 注入，在
+  - `mizar -version` → `mizar v0.8.0 (win7-compat)`
+  - 启动诊断日志首行
+  - Web UI 状态栏版本号
+
+  三处显示。现场装错包一眼可见，省掉「你装的是哪份」的往返。
+- `make release-xz-windows` 现在同时压缩两份产物。
+
+- **WebUI 移动端可用性改造**（手机/平板上打开网页界面不再难用）：
+  - 侧栏改为**覆盖式抽屉 + 半透明遮罩**（`84vw` 宽、点遮罩关闭），
+    不再挤占对话区；`pin`（常驻锁定）在手机端隐藏 —— 抽屉本来就会挡住内容，
+    常驻锁定对窄屏没有意义。
+  - 视口改用 `100dvh`，避开手机浏览器地址栏/工具栏高度抖动导致的布局跳动。
+  - 顶栏改两行布局（菜单/标题/操作 + 模式切换占满宽），窄屏不再挤成一团。
+  - 触控热区加大（会话项 10px 内边距、发送按钮 40px 高）；
+    `@media (hover:none)` 下复制按钮常显，避免「点不出来」。
+  - iOS 聚焦放大问题：窄屏下 `input/textarea/select` 字号统一提到 16px。
+  - 适配安全区（`env(safe-area-inset-*)`，刘海屏/手势条不遮挡）；
+    弹窗在窄屏改为全宽铺满；超窄屏（≤380px）再收一档。
+  - 宽屏 ↔ 窄屏切换时抽屉状态自动复位（避免 PC 上看不到侧栏）。
+
+### 🔧 变更
+
+- `scripts/build-win7.sh` 产物路径由 `dist/mizar-windows-amd64.exe` 改为
+  `dist/mizar-win7.exe`（避免和官方产物互相覆盖，这是本次拆分的核心）。
+- `Makefile` 的 `release-windows` 显式带 `CGO_ENABLED=0 GOAMD64=v1`
+  （原来漏了 `$(GOENV)`，会跟随宿主环境变量，不够确定）。
+- `scripts/pe-check-win7.py` 文档里的示例路径同步更新。
+
+### 🧪 验证
+
+- Wine 8.0 实跑两份产物：
+  - `mizar-win7.exe -version` → `mizar v0.8.0 (win7-compat)` ✅
+  - `mizar-windows-amd64.exe -version` → **崩在 `runtime.osinit` /
+    `os_windows.go:267`**（即 ProcessPrng），证明「官方版确实不能上 Win7，
+    Win7 必须用 win7-compat 那份」——两份产物不是冗余，是刚需。
+- `pe-check-win7.py`：`mizar-win7.exe` 通过（OS 版本 6.1、静态导入仅
+  kernel32.dll、无 ProcessPrng）；官方产物按预期报 `ProcessPrng` 失败退出 1。
+- `go vet`（linux + windows 双目标）、`go test ./cmd/mizar/`、`gofmt -l` 全绿。
+
+### 📦 分发口径
+
+| 目标系统 | 用哪个包 | `-version` 应显示 |
+|---|---|---|
+| Windows 7 SP1 / Server 2008 R2 | `mizar-win7.exe` | `(win7-compat)` |
+| Windows 8.1 / 10 / 11 | `mizar-windows-amd64.exe` | `(win10-native)` |
+| Linux x86-64 | `mizar-linux-amd64` | 无括号 |
+| Linux arm64（含内网 armv8） | `mizar-linux-arm64` | 无括号 |
+
+## [v0.7.9] — 2026-11-13
+
+> 主题：**修「Windows 7 上启动即闪退」**。
+> 根因不在 mizar 代码里，而在 Go 运行时：**Go 1.21 起官方最低要求 Windows 10 /
+> Server 2016**，官方 SDK 编出的 exe 在 Win7 上会在 runtime 初始化阶段直接崩，栈顶就是
+> `internal/runtime/syscall/windows/asm_windows_amd64.s:NN`（stdcall 到空指针）。
+> 具体两处：① runtime 用 `ProcessPrng`（bcryptprimitives.dll，Win8+）取随机数，
+> Win7 上 GetProcAddress 返回 0；② 长路径支持依赖 Win10 15063+ 的 PEB 位域。
+> 二者都在 `main` 之前跑，业务代码无法规避 —— 只能换编译器。
+
+### 🐛 修复
+
+- **Windows 7 / Server 2008 R2 启动闪退**：新增独立的 Win7 构建链
+  `scripts/build-win7.sh` —— 用 [XTLS/go-win7](https://github.com/XTLS/go-win7)
+  的补丁（`BCryptGenRandom` 替换 `ProcessPrng`、去掉 PEB 长路径劫持、
+  旧控制台句柄回退、`LoadLibraryA` 回退）重新编译 Go SDK，再用该 SDK 编译
+  mizar。**mizar 业务代码零改动**，补丁已 vendor 到 `third_party/go-win7/`。
+- **Win7/8 上 TUI 必然失败却表现为「闪退」**：tcell 在 Windows 只有 VT 序列
+  一条实现路径，Win7/8 的 conhost 不支持，`NewScreen` 报
+  `VT output not supported?`，随后掉进经典模式 —— 观感就像启动闪退。
+  现在启动时先探一次 VT 能力（`cmd/mizar/vtcheck_windows.go`），
+  不支持就**明确打印原因 + 三种可选方案**并自动降级经典模式，不再闪。
+- **Windows 控制台中文乱码**：启动时把控制台代码页切到 UTF-8（65001）。
+
+### ✨ 新增
+
+- `scripts/pe-check-win7.py`：发布前静态自检 PE —— 校验
+  `MajorOperatingSystemVersion/SubsystemVersion <= 6`（Win7 = NT 6.1）、
+  导入表里无 Win8+ API、二进制里无 `ProcessPrng` 引用。发现问题直接返回非 0。
+- `scripts/build-win7.sh --rebuild-sdk`：一条命令重建 Win7 兼容 Go SDK 并出包。
+- `third_party/go-win7/`：vendor 的 GPL-3.0 补丁 + 许可证（仅构建期使用，
+  不影响 mizar 自身分发许可证）。
+
+### 🧪 验证
+
+- Wine 8.0（其 `GetConsoleMode` 不支持 VT 位，行为接近 Win7）实跑
+  `mizar -version` → `mizar v0.7.8`；`-plugin-doc` / 插件加载 / 经典交互全通。
+- `pe-check-win7.py` 对旧官方 SDK 产物报错、对新产物通过（回归有据）。
+- `go test ./cmd/mizar/` 全绿；`go vet`（linux + windows）无输出。
+
+> ⚠ 使用前提：Win7 需 **SP1 + KB4474419**（SHA-2 代码签名支持）以及
+> 2016-04 之前的便利汇总更新（或 KB3020369 + KB3125574 + KB4490628）。
+> 通俗判据：**能正常跑 Chrome 109 的机器就够**。
+
+## [v0.7.8] — 2026-11-13
+
+> 主题：**修「TUI 卡住、键盘全哑，但 WebUI 正常」**。
+> 根因是任务结束时的状态栏项目信息采集（git）同步跑在 tcell 事件循环线程上，
+> 内网/网络盘/超大仓库下 `git status` 可以卡几十秒乃至永久挂住；
+> 事件循环一停，所有按键就再也没人处理。顺带补了一个事件循环卡顿看门狗，
+> 以后再出这类问题能自动把 goroutine 栈落到诊断日志里。
+
+### 🐛 修复
+
+- **TUI 卡死（事件循环被 git 阻塞）**：
+  - `runGit` 改为 `exec.CommandContext` + **2s 超时**，并显式 `Stdin=nil`，
+    追加 `GIT_TERMINAL_PROMPT=0 / GIT_ASKPASS= / GIT_PAGER=cat / GIT_OPTIONAL_LOCKS=0`，
+    彻底避免「等凭据 / 等分页器 / 等文件锁」造成的无限阻塞；失败一律降级为空字段。
+  - 新增 `refreshProjectInfoAsync()`：任务结束后的项目信息采集改为后台 goroutine，
+    采完经 `QueueUpdateDraw` 回填并只重绘项目行；`projRefreshPending` 合并重复请求。
+    **事件循环里不再跑任何外部命令。**
+  - 采集耗时 >500ms 时写一条 diag 日志，便于事后判断是不是 git 拖慢的。
+
+### ✨ 新增
+
+- **事件循环卡顿看门狗**（`startLoopLagWatchdog`）：每 3s 往事件循环投一个空更新测延迟，
+  超过 6s 未响应即 dump 全部 goroutine 栈到 `~/.mizar/logs/`（`tui` 标签），
+  用于定位「TUI 假死、进程还活着」这类只在特定环境复现的问题。
+
+### 🧪 测试
+
+- `projinfo_nonblock_test.go`：异步采集必须立即返回且能合并重复请求；`runGit` 必须在超时内失败；
+  `collectProjectInfo` 在 git 不可用时降级为空字段。
+
 ## [v0.7.7] — 2026-11-11
 
 > 主题：**跨平台环境自适应 + 任务可控可感知（停止/排队/提问）**。

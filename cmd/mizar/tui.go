@@ -322,6 +322,12 @@ type tuiModel struct {
 	widthOverride  int
 	heightOverride int
 
+	// running：事件循环是否在跑（app.Run 期间为 true）。用于判断
+	// QueueUpdateDraw 是否会阻塞（未 Run 时它投递后永久等待）。
+	running atomic.Bool
+	// projRefreshPending：已有一次后台 git 采集在跑（合并重复请求）。
+	projRefreshPending atomic.Bool
+
 	// renderPending：已有一个全量重绘排在事件队列里（合并高频重绘请求，
 	// 避免任务运行期间重绘堆积把按键挤到队尾 —— 各平台共性，见 queueRenderAsync）
 	renderPending atomic.Bool
@@ -869,11 +875,49 @@ func (m *tuiModel) stopProjScroll() {
 	m.projScrollOn.Store(false)
 }
 
-// refreshProjectInfo 重新采集项目信息（会跑 git 命令，勿在事件循环里高频调用）。
-// 调用点：启动时、每次任务结束（工作区可能因工具调用变脏）。
+// refreshProjectInfo 同步采集项目信息（会跑 git 命令）。
+//
+// ⚠ 只允许在「事件循环尚未启动/已停止」时调用（如 newTuiModel 构造期）。
+// 事件循环运行期间一律用 refreshProjectInfoAsync —— 在事件循环里跑外部命令是
+// 「TUI 卡住、键盘全哑，但 WebUI 正常」这类事故的头号成因（见 runGit 注释）。
 func (m *tuiModel) refreshProjectInfo() {
 	wd, _ := os.Getwd()
 	m.project = collectProjectInfo(wd)
+}
+
+// refreshProjectInfoAsync 在后台采集项目信息，采完回事件循环回填并重绘项目行。
+//
+// 调用点：每次任务结束（工作区可能因工具调用变脏）。此时正处在事件循环线程，
+// 绝不能同步跑 git（网络盘/大仓库上 git status 可达数十秒 → 键盘全哑）。
+// projRefreshPending 做合并：任务连续结束多次也只跑一趟。
+func (m *tuiModel) refreshProjectInfoAsync() {
+	if m.projRefreshPending.Swap(true) {
+		return // 已有一次在跑，合并
+	}
+	go func() {
+		wd, _ := os.Getwd()
+		t0 := time.Now()
+		info := collectProjectInfo(wd)
+		// 慢采集留痕：下次再遇到「界面发涩/卡顿」能直接看出是不是 git 拖的。
+		if d := time.Since(t0); d > 500*time.Millisecond {
+			diag.Logf("tui", "项目信息采集耗时 %v（git 慢，状态栏可能短暂滞后）", d)
+		}
+		apply := func() {
+			m.project = info
+			m.projBarDirect()
+		}
+		// 事件循环没在跑（用户已退出/尚未启动）时 QueueUpdateDraw 会永久阻塞，
+		// 此时直接回填即可（没有界面要刷）。
+		if !m.running.Load() {
+			apply()
+			m.projRefreshPending.Store(false)
+			return
+		}
+		m.app.QueueUpdateDraw(func() {
+			apply()
+			m.projRefreshPending.Store(false)
+		})
+	}()
 }
 
 // redactHome 把家目录前缀换成 ~，省一行宽度也更符合终端习惯。
@@ -1018,8 +1062,8 @@ func (m *tuiModel) setLoading(loading bool) {
 		m.startSpinner()
 	} else {
 		m.stopSpinner()
-		// 任务结束：工具可能改动了工作区，刷新项目行的 ✱改动 计数
-		m.refreshProjectInfo()
+		// 任务结束：工具可能改动了工作区，刷新项目行的 ✱改动 计数（异步，勿阻塞事件循环）
+		m.refreshProjectInfoAsync()
 	}
 	m.renderAllDirect()
 }
@@ -1158,8 +1202,8 @@ func (m *tuiModel) setLoadingAsync(loading bool) {
 		m.loading = loading
 		if !loading {
 			m.stopSpinner()
-			// 任务结束：工具可能改动了工作区，刷新项目行的 ✱改动 计数
-			m.refreshProjectInfo()
+			// 任务结束：工具可能改动了工作区，刷新项目行的 ✱改动 计数（异步，勿阻塞事件循环）
+			m.refreshProjectInfoAsync()
 		}
 		if !loading {
 			// 任务收尾：整屏 Sync 一次。任务运行期间可能有过绕过 tcell 的输出
@@ -2470,7 +2514,11 @@ func (m *tuiModel) Run() error {
 	m.app.SetFocus(m.inputField)
 	m.startScreenWatchdog()
 	defer m.stopScreenWatchdog()
+	// 事件循环卡顿看门狗：TUI 假死（键盘全哑、进程仍在）时把 goroutine 栈写进诊断日志。
+	m.startLoopLagWatchdog()
+	m.running.Store(true)
 	err := m.app.Run()
+	m.running.Store(false)
 	diag.Logf("tui", "exit: err=%v", err)
 	return err
 }

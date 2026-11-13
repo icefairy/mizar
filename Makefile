@@ -5,6 +5,9 @@
 #   make debug     本机构建（带调试信息，未 strip）
 #   make test      全量测试
 #   make release   三平台 strip 构建到 dist/（默认发布流程，纯静态）
+#   make release-windows-both  Windows 出**两份**产物：
+#                   dist/mizar-windows-amd64.exe 官方 SDK 编（Win8.1/10/11，build: win10-native）
+#                   dist/mizar-win7.exe          补丁 SDK 编（Win7 SP1/2008 R2，build: win7-compat）
 #   make release-xz 三平台构建 + xz 压缩（发布上传用，体积减少 40%+）
 #   make upx       UPX 压缩（仅在明确要求压缩时用，平时不用）
 #   make clean     清理 dist/
@@ -27,7 +30,7 @@ LDFLAGS := -s -w
 TRIM    := -trimpath
 GOENV   := CGO_ENABLED=0 GOAMD64=v1
 
-.PHONY: all build debug dynamic test build-zig release release-amd64 release-arm64 release-windows release-xz release-xz-amd64 release-xz-arm64 release-xz-windows upx clean zig-kernels zig-fetch zig-embed zig-select zig-clean
+.PHONY: all build debug dynamic test build-zig release release-amd64 release-arm64 release-windows release-windows-win7 release-windows-both release-xz release-xz-amd64 release-xz-arm64 release-xz-windows upx clean zig-kernels zig-fetch zig-embed zig-select zig-clean
 
 all: build
 
@@ -87,7 +90,7 @@ release:
 	GOOS=linux   GOARCH=arm64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-arm64 $(PKG)
 	@echo ">>> windows/amd64（内嵌 x86_64-windows Zig）"
 	@scripts/zigdist-select.sh x86_64-windows || true
-	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
+	GOOS=windows GOARCH=amd64 $(GOENV) go build -ldflags="$(LDFLAGS) -X main.buildTag=win10-native" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
 	@scripts/zigdist-select.sh none >/dev/null 2>&1 || true
 	@echo "--- dist/ ---"
 	@ls -lh dist/ | awk '{print $$5, $$9}'
@@ -106,14 +109,43 @@ release-arm64:
 	GOOS=linux GOARCH=arm64 $(GOENV) go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-linux-arm64 $(PKG)
 	@ls -lh dist/$(BINARY)-linux-arm64 | awk '{print $$5, $$9}'
 
+# 官方 SDK 编 Windows 产物 —— 目标是 Win8.1/10/11（Go 1.21+ 官方最低要求 Win10，
+# 但 Win8.1 也能跑；Win7 必须用下面的 release-windows-win7 产物）。
+# -X main.buildTag=win10-native 让 -version 自报家门，避免现场装错包。
 release-windows:
 	@mkdir -p dist
 	@scripts/zigdist-select.sh x86_64-windows || true
-	GOOS=windows GOARCH=amd64 go build -ldflags="$(LDFLAGS)" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
+	GOOS=windows GOARCH=amd64 $(GOENV) go build -ldflags="$(LDFLAGS) -X main.buildTag=win10-native" $(TRIM) -o dist/$(BINARY)-windows-amd64.exe $(PKG)
+	@scripts/zigdist-select.sh none >/dev/null 2>&1 || true
 	@ls -lh dist/$(BINARY)-windows-amd64.exe | awk '{print $$5, $$9}'
 
+# Windows 7 / Server 2008 R2 专用：官方 Go 1.21+ 产物在 Win7 上启动即崩
+# （runtime 用 ProcessPrng + PEB 长路径，二者都在 main 之前跑）。
+# 这里改用打过 go-win7 补丁的 Go SDK 编译，业务代码零改动。
+# 详见 third_party/go-win7/README.md 与 scripts/build-win7.sh。
+release-windows-win7:
+	@HOME="$${HOME:-/root}" scripts/build-win7.sh
+
+# 一次出两份 Windows 产物（内网同时有 Win7 和 Win10 机器时用这个）。
+# 两份差异只在「构建所用的 Go SDK」，业务代码完全一致；-version 会显示构建标识：
+#   mizar vX.Y.Z (win10-native)  ← dist/mizar-windows-amd64.exe
+#   mizar vX.Y.Z (win7-compat)   ← dist/mizar-win7.exe
+# 分发口径：Win8.1/10/11 用前者，Win7 SP1 / Server 2008 R2 用后者。
+release-windows-both: release-windows release-windows-win7
+	@echo
+	@echo "=== Windows 双产物（部署前请核对 build 标识）==="
+	@for f in dist/$(BINARY)-windows-amd64.exe dist/$(BINARY)-win7.exe; do \
+		[ -f "$$f" ] || continue; \
+		printf "  %-34s %6s MB\n" "$$(basename $$f)" $$(( $$(stat -c %s "$$f") / 1048576 )); \
+	done
+	@echo "  Win8.1/10/11 → $(BINARY)-windows-amd64.exe (win10-native)"
+	@echo "  Win7 SP1     → $(BINARY)-win7.exe          (win7-compat)"
+	@echo "  核对: 各自运行 -version，括号里应显示对应 build 标识" 
+
 # release + UPX 压缩（显式三平台，避免误压 .upx 临时文件）
-UPX_TARGETS := dist/$(BINARY)-linux-amd64 dist/$(BINARY)-linux-arm64 dist/$(BINARY)-windows-amd64.exe
+# 注意：dist/mizar-win7.exe 只有跑过 release-windows-win7/both 才存在，
+# 循环里 `[ -f ] || continue` 会自动跳过；存在则一并压缩。
+UPX_TARGETS := dist/$(BINARY)-linux-amd64 dist/$(BINARY)-linux-arm64 dist/$(BINARY)-windows-amd64.exe dist/$(BINARY)-win7.exe
 upx: release
 	@command -v upx >/dev/null 2>&1 || { echo "upx 未安装，先执行: apt install upx-ucl"; exit 1; }
 	@for f in $(UPX_TARGETS); do \
@@ -150,8 +182,15 @@ release-xz-arm64: release-arm64
 release-xz-amd64: release-amd64
 	@xz -T0 -6 -k -f dist/$(BINARY)-linux-amd64 && ls -lh dist/$(BINARY)-linux-amd64.xz | awk '{print $$5, $$9}'
 
-release-xz-windows: release-windows
-	@xz -T0 -6 -k -f dist/$(BINARY)-windows-amd64.exe && ls -lh dist/$(BINARY)-windows-amd64.exe.xz | awk '{print $$5, $$9}'
+release-xz-windows: release-windows-both
+	@for f in dist/$(BINARY)-windows-amd64.exe dist/$(BINARY)-win7.exe; do \
+		[ -f "$$f" ] || continue; \
+		xz -T0 -6 -k -f "$$f" && \
+		printf "  %-28s %5s MB -> %5s MB\n" "$$(basename $$f)" \
+			$$(( $$(stat -c %s "$$f") / 1048576 )) \
+			$$(( $$(stat -c %s "$$f.xz") / 1048576 )); \
+	done
+	@ls -lh dist/*.xz | awk '{print $$5, $$9}'
 
 # ---- Zig 工具链（内网现场编译用）----
 # 下载官方 Zig 归档到 ~/.cache/zig（优先复用本地缓存，不联网）。

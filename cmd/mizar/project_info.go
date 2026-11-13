@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -45,6 +47,7 @@ func shortDir(p string) string {
 }
 
 // collectProjectInfo 采集一次项目信息（可能跑 git 命令，勿在事件循环高频调用）。
+// 每条 git 都有超时（见 runGit），最坏耗时约 2×gitTimeout，且失败一律降级为空字段。
 func collectProjectInfo(dir string) projectInfo {
 	info := projectInfo{Dir: shortDir(dir)}
 	if dir == "" {
@@ -72,10 +75,35 @@ func collectProjectInfo(dir string) projectInfo {
 	return info
 }
 
+// gitTimeout 单条 git 命令的最长等待时间。
+//
+// 为什么要超时：状态栏要显示分支与改动数，采集时会跑 git；内网/私有化环境里
+// 工作目录常挂在 NFS/SMB 或超大仓库上，git status 可能卡几十秒甚至永久挂住。
+// 采集函数（collectProjectInfo）既有启动时的同步调用，也有任务结束时的调用，
+// 一旦无超时地阻塞，调用它的 goroutine 就永远回不来 —— 若恰好是事件循环线程
+// （见 refreshProjectInfoAsync 的注释），用户看到的就是「TUI 卡住、无法输入」，
+// 而 WebUI 走另一条 HTTP 路径照常工作（本 bug 的典型现象）。
+const gitTimeout = 2 * time.Second
+
 // runGit 在 dir 下执行 git 命令并返回 stdout。
+//
+// 三条硬约束：
+//   - 带 context 超时，超时即放弃（宁可状态栏少一段信息，也不能卡住界面）；
+//   - Stdin 显式置 nil，避免 git 等待终端输入/凭据导致永久阻塞；
+//   - GIT_TERMINAL_PROMPT/GIT_ASKPASS 关闭交互提示，GIT_OPTIONAL_LOCKS 关闭
+//     读操作的可选锁（status 在别的 git 进程持锁时会变慢甚至等待）。
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"GIT_PAGER=cat",
+		"GIT_OPTIONAL_LOCKS=0",
+	)
 	out, err := cmd.Output()
 	return string(out), err
 }
