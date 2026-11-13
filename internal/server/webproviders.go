@@ -229,9 +229,11 @@ func (s *Server) handleWebStatus(w http.ResponseWriter, r *http.Request) {
 		"speed":    snap.ModelTokPerSec,
 		"model":    s.agent.Model(),
 		"thinking": thinking,
-		"running":  s.runLive(),
-		// 当前正在运行的会话 id（空=无归属/空闲）。前端据此区分「哪个会话在跑」，
-		// 多会话下把消息排到对应会话的队列，而不是笼统地全局排队。
-		"running_conv": s.RunConv(),
+		"running":  s.anyRunLive(),
+		// 当前正在运行的会话 id（空=无归属/空闲）。前端据此区分「哪个会话在跑」。
+		// 多会话并发下可能同时有多个，因此额外给出 running_convs 数组；
+		// running_conv 保留单值兼容旧前端。
+		"running_conv":  s.firstRunningConv(),
+		"running_convs": s.runningConvsSnapshot(),
 	})
 }

@@ -196,13 +196,20 @@ func (s *Server) releaseRunFor(convID string) {
 // firstRunningConv 返回任一在跑的会话 id（多会话并发下「running_conv」单值语义
 // 已不够用，保留该字段兼容旧前端；新前端读 running_convs 数组）。
 func (s *Server) firstRunningConv() string {
+	s.runningMu.Lock()
+	n := len(s.runningConvs)
+	s.runningMu.Unlock()
+	// 集合为空时退回 runConv：非 Web 入口与老调用路径只设 runConv 不设集合。
+	if n == 0 {
+		return s.RunConv()
+	}
 	if id := s.RunConv(); id != "" && s.isConvRunning(id) {
 		return id
 	}
 	for _, id := range s.runningConvsSnapshot() {
 		return id
 	}
-	return ""
+	return s.RunConv()
 }
 
 // markRunning 维护「哪些会话正在跑」的集合（多会话并发时单个 runConv 不够用）。
