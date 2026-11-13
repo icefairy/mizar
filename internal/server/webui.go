@@ -702,7 +702,7 @@ func (s *Server) handleWebSteer(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, http.StatusBadRequest, "content required")
 		return
 	}
-	running := s.agent.Running()
+	running := s.runLive()
 	// 归属校验：当前运行属于别的会话时不注入（否则会把 A 会话的纠正串进 B 会话的循环）
 	if running && body.ConversationID != "" {
 		if cur := s.RunConv(); cur != "" && cur != body.ConversationID {

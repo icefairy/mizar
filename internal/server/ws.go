@@ -234,7 +234,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// 非 JSON-RPC 帧打扰客户端。
 	if strings.HasPrefix(r.URL.Path, "/web/") {
 		client.send(map[string]any{
-			"type": "hello", "running": s.agent.Running(), "running_conv": s.RunConv(),
+			"type": "hello", "running": s.runLive(), "running_conv": s.RunConv(),
 			"time": time.Now().Format(time.RFC3339),
 		})
 	}

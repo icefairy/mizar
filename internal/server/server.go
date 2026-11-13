@@ -29,6 +29,12 @@ type Server struct {
 	// 避免请求无限排队；steer/abort 不走此锁，等待期间仍可实时纠正。
 	runMu sync.Mutex
 
+	// busyRun 标记「已抢到 runMu、但 Run() 可能还没置 runActive」的窗口期。
+	// runActive 只覆盖 Run() 体内，acquireRun 成功到 Run 真正开始之间有一小段，
+	// 此时 agent.Running() 仍为 false。用户在这个窗口发纠正消息会被误判成
+	// 「没有活跃循环」而提示排队（实际这一轮已经开始）。判断活跃统一用 runLive()。
+	busyRun atomic.Bool
+
 	// runConv 当前正在执行 Agent.Run 的 Web 会话 id（空 = 非 Web 会话发起的运行）。
 	// WS 事件会带上该 id，前端据此把流式增量只渲染到「发起该运行的那个会话窗口」，
 	// 修复多会话切换时事件串台（新会话的消息出现在老会话窗口里）。
@@ -64,11 +70,33 @@ func (s *Server) RunConv() string {
 	return ""
 }
 
-// acquireRun 尝试独占 Agent；失败返回 false（已有 Run 在执行）。
-func (s *Server) acquireRun() bool { return s.runMu.TryLock() }
+// handleWebRun 的一次运行是否“在跑”：runActive 只管 Run() 体内，
+// acquireRun 成功到 Run() 执行 runActive.Store(true) 之间有一个窗口，
+// 此时 agent.Running() 还是 false，但这一轮确实已经开始（消息已受理、
+// 会话归属已记录）。用户在这个窗口里发纠正消息，若只看 Running() 会误判
+// 成「没有活跃循环」→ 前端提示「已排队，本轮结束后发送」，与事实相反。
+// busyRun 标记这个窗口，判断活跃一律用 runLive()。
+func (s *Server) runLive() bool {
+	if s.busyRun.Load() {
+		return true
+	}
+	return s.agent != nil && s.agent.Running()
+}
+
+func (s *Server) acquireRun() bool {
+	if !s.runMu.TryLock() {
+		return false
+	}
+	// 抢到锁即视为一轮已开始（Run 可能还没跑到置 runActive 的地方）
+	s.busyRun.Store(true)
+	return true
+}
 
 // releaseRun 释放 Agent 独占。
-func (s *Server) releaseRun() { s.runMu.Unlock() }
+func (s *Server) releaseRun() {
+	s.busyRun.Store(false)
+	s.runMu.Unlock()
+}
 
 // New 创建 Server。
 func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {

@@ -1236,7 +1236,8 @@
   // 只存 "queue" 类（"steer" 已注入当前循环，重发会重复）。
   function saveQueue() {
     try {
-      const keep = pendingQueue.filter((x) => x.kind === "queue");
+      // 只存还没被服务端确认消费的（"steer" 已确认注入，重发会重复）。
+      const keep = pendingQueue.filter((x) => x.kind !== "steer");
       if (keep.length) localStorage.setItem("mizar-queue", JSON.stringify(keep));
       else localStorage.removeItem("mizar-queue");
     } catch (e) {}
@@ -1248,7 +1249,7 @@
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) {
         arr.forEach((it) => {
-          if (it && it.text) pendingQueue.push({ id: ++queueSeq, text: it.text, conv: it.conv, kind: "queue" });
+          if (it && it.text) pendingQueue.push({ id: ++queueSeq, text: it.text, conv: it.conv, kind: it.kind === "steer-pending" ? "queue" : (it.kind || "queue") });
         });
       }
     } catch (e) {}
@@ -1270,23 +1271,32 @@
     saveQueue();
     renderQueueBar();
   }
+  // convLabelOf 取会话标题，用于提示「哪个会话正在运行」。找不到就退回 id 前缀。
+  function convLabelOf(id) {
+    const c = convs.find((x) => x.id === id);
+    if (c && c.title) return c.title.length > 12 ? c.title.slice(0, 12) + "…" : c.title;
+    return id ? id.slice(0, 8) : "其它会话";
+  }
   function renderQueueBar() {
     if (!queueBar) return;
     const mine = pendingQueue.filter((x) => x.conv === curConv);
     if (!mine.length) { queueBar.classList.add("hidden"); queueBar.innerHTML = ""; return; }
     const nSteer = mine.filter((x) => x.kind === "steer").length;
-    const nQueue = mine.length - nSteer;
+    const nPending = mine.filter((x) => x.kind === "steer-pending").length;
+    const nQueue = mine.length - nSteer - nPending;
     let head = [];
     if (nSteer) head.push(nSteer + " 条已注入当前任务");
+    if (nPending) head.push(nPending + " 条注入中…");
     if (nQueue) {
       const otherBusy = (busyConv !== null || runningConv !== null) && busyConv !== curConv && runningConv !== curConv;
       head.push(nQueue + " 条" + (otherBusy ? "等待其它会话结束后发送" : "等待本轮结束后发送"));
     }
     let html = '<div class="qhead">待处理消息 · ' + esc(head.join(" · ")) + '</div>';
     mine.forEach((it) => {
+      const kindCls = it.kind === "steer" ? "steer" : (it.kind === "steer-pending" ? "pending" : "");
+      const label = it.kind === "steer" ? "已注入" : (it.kind === "steer-pending" ? "注入中" : "排队");
       html += '<div class="qitem" data-qid="' + it.id + '">' +
-        '<span class="qbadge ' + (it.kind === "steer" ? "steer" : "") + '">' +
-        (it.kind === "steer" ? "已注入" : "排队") + '</span>' +
+        '<span class="qbadge ' + kindCls + '">' + label + '</span>' +
         '<span class="qtext" title="' + esc(it.text) + '">' + esc(it.text) + '</span>' +
         '<button class="qdel" type="button" title="取消这条">✕</button>' +
         '</div>';
@@ -1321,31 +1331,47 @@
     clearInputDraft();
     const convId = curConv;
     // 服务端当前正在跑的会话（可能不是本会话，也可能来自别的浏览器标签）。
-    const serverRunning = (busyConv !== null) ? busyConv : runningConv;
+    // 注意：busyConv 只是「本页发起的运行」的本地记录，不能代表服务端真实状态——
+    // 本页发起后、服务端还没置 running 时，busyConv 已有值而 runningConv 还是 null；
+    // 反过来服务端跑着别的会话时，busyConv 可能是 null。两者都要看，取非空的。
+    const serverRunning = busyConv !== null ? busyConv : runningConv;
+    // 本会话是否真的在服务端跑着：以服务端状态为准，busyConv 仅作本页兜底。
+    const runningHere = (runningConv !== null && runningConv === convId) ||
+                        (busyConv !== null && busyConv === convId && runningConv === null);
     if (serverRunning !== null && serverRunning !== convId) {
       // 别的会话正在占用 Agent（单实例）：本会话消息排到「本会话」队列，
       // 并明确告知用户是谁在跑 —— 不是莫名排队，也不是串台。
+      // 关键：消息已受理、不会丢，等服务端那轮一结束自动发出（切回本会话也会立刻发）。
       pushQueue(text, convId, "queue");
-      flashQuick("其它会话正在运行，已排队，该会话结束后自动发送");
+      flashQuick("「" + convLabelOf(serverRunning) + "」正在运行，本消息已排队，那轮结束自动发送");
       return;
     }
-    if (busyConv !== null) {
+    if (runningHere) {
       // 本会话正在跑一轮。
-      const runningHere = busyConv === convId;
-      if (!interruptMode || mode !== "agent" || !runningHere) {
+      if (!interruptMode || mode !== "agent") {
         pushQueue(text, convId, "queue");
         flashQuick("已排队，本轮结束后自动发送");
         return;
       }
-      const qid = pushQueue(text, convId, "queue");
+      const qid = pushQueue(text, convId, "steer-pending");
       try {
         const j = await api("/web/api/steer", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: text, conversation_id: convId }),
         });
-        if (j && j.running === false) { flashQuick("已排队，本轮结束后自动发送"); }
-        else { setQueueKind(qid, "steer"); flashQuick("已发送纠正，后台生效"); }
-      } catch (e) { flashQuick("已排队，本轮结束后自动发送"); }
+        if (j && j.running === false) {
+          // 服务端确实没有活跃循环（这一轮刚结束）：降级为排队，本轮结束后补发。
+          setQueueKind(qid, "queue");
+          flashQuick("本轮已结束，改为排队，稍后自动发送");
+        } else {
+          // 已注入当前循环：模型下一步就能看到，不是「等这一轮结束」。
+          setQueueKind(qid, "steer");
+          flashQuick("已注入当前任务，模型下一步即生效");
+        }
+      } catch (e) {
+        setQueueKind(qid, "queue");
+        flashQuick("注入失败，已改为排队，本轮结束后自动发送");
+      }
       return;
     }
     await runTurn(text);
@@ -1428,11 +1454,13 @@
     evtLog[myConv] = [];   // 本轮已结束，增量事件已并入最终答复，清空缓存避免重复渲染
     abortBtn.classList.add("hidden");
     // 本轮结束后清理属于本会话的待处理项：
-    //   - "steer"（已注入当前循环）：已被消费或已由服务端落盘，不能再补发（否则重复）；
+    //   - "steer"（已确认注入当前循环）：服务端已被消费或已落盘，不能再补发（否则重复）；
+    //   - "steer-pending"（注入请求还没回话）：状态未确认，按「可能没生效」处理——
+    //     宁可补发一次也不能丢用户的消息；
     //   - "queue"（排队）：本轮结束后补发为新任务。
     const mine = pendingQueue.filter((it) => it.conv === myConv);
     pendingQueue = pendingQueue.filter((it) => it.conv !== myConv);
-    const resend = mine.filter((it) => it.kind === "queue");
+    const resend = mine.filter((it) => it.kind !== "steer");
     // 本会话待发消息放回队首，保持顺序；随后统一 drain（也覆盖别的会话排队的消息）
     if (resend.length) pendingQueue = resend.concat(pendingQueue);
     saveQueue();
@@ -1452,9 +1480,9 @@
   function drainPending() {
     if (draining) return;
     if (busyConv !== null || runningConv !== null) return;
-    const items = pendingQueue.filter((it) => it.conv === curConv && it.kind === "queue");
+    const items = pendingQueue.filter((it) => it.conv === curConv && it.kind !== "steer");
     if (!items.length) return;
-    pendingQueue = pendingQueue.filter((it) => !(it.conv === curConv && it.kind === "queue"));
+    pendingQueue = pendingQueue.filter((it) => !(it.conv === curConv && it.kind !== "steer"));
     saveQueue();
     renderQueueBar();
     draining = true;

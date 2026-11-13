@@ -131,7 +131,7 @@ func (s *Server) handleWebDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conv := r.URL.Query().Get("conversation_id")
-	running := s.agent.Running() && (conv == "" || s.RunConv() == conv)
+	running := s.runLive() && (conv == "" || s.RunConv() == conv)
 	text := ""
 	if running {
 		text = s.draft.get(conv)
