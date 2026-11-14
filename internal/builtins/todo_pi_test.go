@@ -190,3 +190,102 @@ func TestStripTodoMarker(t *testing.T) {
 		t.Fatalf("content lost: %q", out)
 	}
 }
+
+// ============================================================================
+// blocked_by 依赖：C-2（fan-out 的串行依赖承载）
+// ============================================================================
+
+// add 带 blocked_by → list 显示等待标记 → toggle 前置自动解锁后继。
+func TestTodoBlockedBy(t *testing.T) {
+	resetTodoState()
+	tool := toolTodo()
+	tool.Run(`{"action":"add","text":"先构建"}`)
+	out := mustRun(t, tool, `{"action":"add","text":"再跑测试","blocked_by":[1]}`)
+	if !strings.Contains(out, "等待 #1") {
+		t.Fatalf("add 应提示依赖：out=%q", out)
+	}
+	res, _ := extractTodoState(out)
+	if len(res.Todos[1].BlockedBy) != 1 || res.Todos[1].BlockedBy[0] != 1 {
+		t.Fatalf("blocked_by 没落进状态: %+v", res.Todos[1])
+	}
+	// list：未完成前置显示等待标记
+	out = mustRun(t, tool, `{"action":"list"}`)
+	if !strings.Contains(out, "（等待 #1）") {
+		t.Fatalf("list 应显示等待标记: %q", out)
+	}
+	// toggle 前置 → 自动解锁后继
+	out = mustRun(t, tool, `{"action":"toggle","id":1}`)
+	if !strings.Contains(out, "completed") || !strings.Contains(out, "已解锁 #2") {
+		t.Fatalf("toggle 前置应自动解锁后继: %q", out)
+	}
+	// 后继就绪后 list 不再有等待标记
+	out = mustRun(t, tool, `{"action":"list"}`)
+	if strings.Contains(out, "（等待") {
+		t.Fatalf("解锁后 list 不应再有等待标记: %q", out)
+	}
+	// re-open 前置 → 后继恢复等待（就绪状态是派生的）
+	mustRun(t, tool, `{"action":"toggle","id":1}`)
+	out = mustRun(t, tool, `{"action":"list"}`)
+	if !strings.Contains(out, "（等待 #1）") {
+		t.Fatalf("re-open 前置后后继应恢复等待: %q", out)
+	}
+}
+
+// blocked_by 引用不存在的 id 应拒收（模型编错序号时给明确反馈）。
+func TestTodoBlockedByUnknownRef(t *testing.T) {
+	resetTodoState()
+	tool := toolTodo()
+	mustRun(t, tool, `{"action":"add","text":"A"}`)
+	out := mustRun(t, tool, `{"action":"add","text":"B","blocked_by":[99]}`)
+	if !strings.Contains(out, "unknown todo") {
+		t.Fatalf("未知前置应报错: %q", out)
+	}
+	res, _ := extractTodoState(out)
+	if len(res.Todos) != 1 {
+		t.Fatal("被拒收的 todo 不应进清单")
+	}
+	// 重复/自身引用被剔除，不报错
+	out = mustRun(t, tool, `{"action":"add","text":"C","blocked_by":[1,1,2]}`)
+	res, _ = extractTodoState(out)
+	if len(res.Todos) != 2 || len(res.Todos[1].BlockedBy) != 1 {
+		t.Fatalf("重复引用应去重: %+v", res)
+	}
+}
+
+// 跳序完成：前置未完成时 toggle 给提醒但不阻止；多链解锁只报就绪的后继。
+func TestTodoToggleSkipOrderWarns(t *testing.T) {
+	resetTodoState()
+	tool := toolTodo()
+	mustRun(t, tool, `{"action":"add","text":"A"}`)
+	mustRun(t, tool, `{"action":"add","text":"B","blocked_by":[1]}`)
+	mustRun(t, tool, `{"action":"add","text":"C","blocked_by":[1]}`)
+	out := mustRun(t, tool, `{"action":"toggle","id":1}`)
+	if !strings.Contains(out, "已解锁 #2 #3") {
+		t.Fatalf("两个后继应同时解锁: %q", out)
+	}
+	// 没有依赖的完成不该出现解锁提示
+	resetTodoState()
+	mustRun(t, tool, `{"action":"add","text":"独立任务"}`)
+	out = mustRun(t, tool, `{"action":"toggle","id":1}`)
+	if strings.Contains(out, "已解锁") || strings.Contains(out, "前置") {
+		t.Fatalf("无依赖完成不应有解锁/前置提示: %q", out)
+	}
+}
+
+// blocked_by 随状态 JSON 往返，会话回放后依赖关系保留。
+func TestTodoBlockedByReplay(t *testing.T) {
+	resetTodoState()
+	tool := toolTodo()
+	out1 := mustRun(t, tool, `{"action":"add","text":"A"}`)
+	out2 := mustRun(t, tool, `{"action":"add","text":"B","blocked_by":[1]}`)
+	var msgs []agent.Message
+	for _, e := range []struct{ out string }{{out1}, {out2}} {
+		msgs = append(msgs, agent.ToolExchangeMessages("todo", "", "", e.out, nil)...)
+	}
+	resetTodoState()
+	SetTodosFromHistory(msgs)
+	todos := PiTodoList()
+	if len(todos) != 2 || len(todos[1].BlockedBy) != 1 || todos[1].BlockedBy[0] != 1 {
+		t.Fatalf("回放后依赖丢失: %+v", todos)
+	}
+}

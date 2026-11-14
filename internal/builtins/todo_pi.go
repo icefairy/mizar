@@ -14,6 +14,8 @@ package builtins
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,9 +25,10 @@ import (
 
 // PiTodo 单个待办项。
 type PiTodo struct {
-	ID   int    `json:"id"`
-	Text string `json:"text"`
-	Done bool   `json:"done"`
+	ID        int    `json:"id"`
+	Text      string `json:"text"`
+	Done      bool   `json:"done"`
+	BlockedBy []int  `json:"blocked_by,omitempty"` // 前置任务 id：全部完成后本项才算就绪
 }
 
 // piTodoState 全局待办状态（单进程单会话生命周期）。
@@ -167,21 +170,103 @@ func PiTodoList() []PiTodo {
 	return todoS.snapshot().Todos
 }
 
+// ============================================================================
+// 依赖（blocked_by）：就绪判定 / 归一化 / 自动解锁
+// ============================================================================
+
+// todoBlocking 返回 t 尚未完成的前置 id（就绪时为空）。
+// 前置不存在视为已消解（被 clear 掉的依赖不再阻塞）。Done 的 todo 不算等待。
+func todoBlocking(t PiTodo, todos []PiTodo) (waiting []int) {
+	if t.Done {
+		return nil
+	}
+	for _, bid := range t.BlockedBy {
+		found := false
+		for _, o := range todos {
+			if o.ID == bid {
+				found = true
+				if !o.Done {
+					waiting = append(waiting, bid)
+				}
+				break
+			}
+		}
+		_ = found // 前置缺失按已消解处理
+	}
+	return waiting
+}
+
+// normalizeBlockedBy 校验 add 的 blocked_by：剔除 0/负数/自身/重复，
+// 引用不存在的 id 记入 unknown（调用方报错拒收）。
+func normalizeBlockedBy(ids []int, selfID int, todos []PiTodo) (valid, unknown []int) {
+	seen := map[int]bool{}
+	for _, id := range ids {
+		if id <= 0 || id == selfID || seen[id] {
+			continue
+		}
+		found := false
+		for _, t := range todos {
+			if t.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			unknown = append(unknown, id)
+			continue
+		}
+		seen[id] = true
+		valid = append(valid, id)
+	}
+	sort.Ints(valid)
+	sort.Ints(unknown)
+	return valid, unknown
+}
+
+// newlyUnlocked 返回此前被 completedID 阻塞、现在前置全部完成的后继 id。
+// 在 toggle 完成动作、状态已翻转之后调用。
+func newlyUnlocked(completedID int, todos []PiTodo) (unlocked []int) {
+	for _, t := range todos {
+		if t.Done || !containsInt(t.BlockedBy, completedID) {
+			continue
+		}
+		if len(todoBlocking(t, todos)) == 0 {
+			unlocked = append(unlocked, t.ID)
+		}
+	}
+	sort.Ints(unlocked)
+	return unlocked
+}
+
+func containsInt(xs []int, x int) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// idsLabel 把 id 切片渲染成 "#1 #2" 形式（%v 会打印成 "[1 2]"，不像 todo id）。
+func idsLabel(ids []int) string {
+	parts := make([]string, len(ids))
+	for i, v := range ids {
+		parts[i] = "#" + strconv.Itoa(v)
+	}
+	return strings.Join(parts, " ")
+}
+
 // PiTodoRender 渲染待办清单为人类可读文本（TUI /todos 用）。
 func RenderPiTodos() string {
 	todos := PiTodoList()
 	if len(todos) == 0 {
 		return "（暂无待办）"
 	}
-	var sb strings.Builder
+	lines := make([]string, 0, len(todos))
 	for _, t := range todos {
-		mark := "[ ]"
-		if t.Done {
-			mark = "[x]"
-		}
-		fmt.Fprintf(&sb, "%s #%d: %s\n", mark, t.ID, t.Text)
+		lines = append(lines, formatTodoLine(t, todos))
 	}
-	return strings.TrimRight(sb.String(), "\n")
+	return strings.Join(lines, "\n")
 }
 
 // ============================================================================
@@ -201,15 +286,18 @@ func TodoToolForTest() plugins.Tool {
 func todoTool() plugins.Tool {
 	return plugins.Tool{
 		Name: "todo",
-		Description: "Manage a persistent todo list across the session. " +
-			"Actions: list, add (requires text), toggle (requires id), clear. " +
-			"Args example: {\"action\":\"add\",\"text\":\"write tests\"} or {\"action\":\"toggle\",\"id\":1} or {\"action\":\"list\"} or {\"action\":\"clear\"}. " +
+		Description: "Manage a persistent todo list across the session, with dependencies. " +
+			"Actions: list, add (text, optional blocked_by: [ids] to order after existing todos), toggle (id), clear. " +
+			"Args example: {\"action\":\"add\",\"text\":\"run tests\",\"blocked_by\":[1]} or {\"action\":\"toggle\",\"id\":1} or {\"action\":\"list\"} or {\"action\":\"clear\"}. " +
+			"Completing a blocker automatically reports unlocked dependents; blocked todos show（等待 #n）in list. " +
+			"Before delegate_task: record serial dependencies here, then fan out only the independent tasks. " +
 			"State survives session restarts and is shown by the /todos command.",
 		Run: func(args string) (string, error) {
 			var p struct {
-				Action string `json:"action"`
-				Text   string `json:"text"`
-				ID     int    `json:"id"`
+				Action    string `json:"action"`
+				Text      string `json:"text"`
+				ID        int    `json:"id"`
+				BlockedBy []int  `json:"blocked_by"`
 			}
 			if err := json.Unmarshal([]byte(args), &p); err != nil {
 				return "", fmt.Errorf("todo: args must be JSON: {\"action\":\"list|add|toggle|clear\", ...}")
@@ -224,11 +312,7 @@ func todoTool() plugins.Tool {
 				}
 				lines := make([]string, 0, len(todoS.todos))
 				for _, t := range todoS.todos {
-					mark := "[ ]"
-					if t.Done {
-						mark = "[x]"
-					}
-					lines = append(lines, fmt.Sprintf("%s #%d: %s", mark, t.ID, t.Text))
+					lines = append(lines, formatTodoLine(t, todoS.todos))
 				}
 				return encodeTodoState(strings.Join(lines, "\n")), nil
 
@@ -236,10 +320,18 @@ func todoTool() plugins.Tool {
 				if strings.TrimSpace(p.Text) == "" {
 					return "Error: text required for add", nil
 				}
-				t := PiTodo{ID: todoS.next, Text: p.Text}
+				blocked, unknown := normalizeBlockedBy(p.BlockedBy, todoS.next, todoS.todos)
+				if len(unknown) > 0 {
+					return encodeTodoState(fmt.Sprintf("Error: blocked_by references unknown todo(s) %s (use list to see ids)", idsLabel(unknown))), nil
+				}
+				t := PiTodo{ID: todoS.next, Text: p.Text, BlockedBy: blocked}
 				todoS.next++
 				todoS.todos = append(todoS.todos, t)
-				return encodeTodoState(fmt.Sprintf("Added todo #%d: %s", t.ID, t.Text)), nil
+				msg := fmt.Sprintf("Added todo #%d: %s", t.ID, t.Text)
+				if len(blocked) > 0 {
+					msg += fmt.Sprintf("（等待 %s 完成后开始）", idsLabel(blocked))
+				}
+				return encodeTodoState(msg), nil
 
 			case "toggle":
 				idx := -1
@@ -253,10 +345,19 @@ func todoTool() plugins.Tool {
 					return encodeTodoState(fmt.Sprintf("Todo #%d not found (use list to see ids)", p.ID)), nil
 				}
 				todoS.todos[idx].Done = !todoS.todos[idx].Done
-				if todoS.todos[idx].Done {
-					return encodeTodoState(fmt.Sprintf("Todo #%d completed", p.ID)), nil
+				if !todoS.todos[idx].Done {
+					return encodeTodoState(fmt.Sprintf("Todo #%d re-opened", p.ID)), nil
 				}
-				return encodeTodoState(fmt.Sprintf("Todo #%d re-opened", p.ID)), nil
+				// 完成路径：提示仍在阻塞中的前置（模型跳序时给个提醒），
+				// 并自动解锁以此项为前置、且其余前置也已完成的后继。
+				msg := fmt.Sprintf("Todo #%d completed", p.ID)
+				if wait := todoBlocking(todoS.todos[idx], todoS.todos); len(wait) > 0 {
+					msg += fmt.Sprintf(" ⚠ 其前置 %s 尚未完成，请核对顺序", idsLabel(wait))
+				}
+				if unlocked := newlyUnlocked(p.ID, todoS.todos); len(unlocked) > 0 {
+					msg += fmt.Sprintf("；已解锁 %s", idsLabel(unlocked))
+				}
+				return encodeTodoState(msg), nil
 
 			case "clear":
 				n := len(todoS.todos)
@@ -272,4 +373,17 @@ func todoTool() plugins.Tool {
 			}
 		},
 	}
+}
+
+// formatTodoLine 渲染单个 todo 行：完成标记 + 序号 + 文本 + 阻塞提示。
+func formatTodoLine(t PiTodo, todos []PiTodo) string {
+	mark := "[ ]"
+	if t.Done {
+		mark = "[x]"
+	}
+	line := fmt.Sprintf("%s #%d: %s", mark, t.ID, t.Text)
+	if wait := todoBlocking(t, todos); len(wait) > 0 {
+		line += fmt.Sprintf("（等待 %s）", idsLabel(wait))
+	}
+	return line
 }
