@@ -23,21 +23,27 @@ type scriptedLLM struct {
 	script  []string
 	calls   int
 	gotTool [][]plugins.Tool // 每轮收到的工具清单快照
+	gotMsgs [][]Message      // 每轮收到的消息快照
 }
 
-func (s *scriptedLLM) Chat(msgs []Message) (string, error) { return s.next(nil) }
+func (s *scriptedLLM) Chat(msgs []Message) (string, error) {
+	return s.next(msgs, nil)
+}
 
 func (s *scriptedLLM) ChatWithTools(msgs []Message, tools []plugins.Tool) (string, error) {
-	return s.next(tools)
+	return s.next(msgs, tools)
 }
 
-func (s *scriptedLLM) next(tools []plugins.Tool) (string, error) {
+func (s *scriptedLLM) next(msgs []Message, tools []plugins.Tool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// 存一份快照（主循环可能复用底层数组）。
 	snap := make([]plugins.Tool, len(tools))
 	copy(snap, tools)
 	s.gotTool = append(s.gotTool, snap)
+	msgsSnap := make([]Message, len(msgs))
+	copy(msgsSnap, msgs)
+	s.gotMsgs = append(s.gotMsgs, msgsSnap)
 	i := s.calls
 	s.calls++
 	if i < len(s.script) {
@@ -527,6 +533,56 @@ func TestDelegationGuide_ContainsSuppression(t *testing.T) {
 		if !strings.Contains(g, want) {
 			t.Fatalf("委派指引缺少关键内容 %q", want)
 		}
+	}
+}
+
+// ============================================================================
+// P3 收尾：role 生效 / 排队与执行超时分离
+// ============================================================================
+
+// role 必须真正影响子代理的行为指令，而不是赋个默认值就丢弃。
+func TestSubagent_RoleReachesChildTask(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	sm.Launch(SubagentLaunchRequest{Goal: "只读调研", Role: "explore"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && llm.callCount() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	if len(llm.gotMsgs) == 0 {
+		t.Fatal("子 agent 没发起调用")
+	}
+	var all strings.Builder
+	for _, m := range llm.gotMsgs[0] {
+		all.WriteString(m.Content)
+	}
+	if !strings.Contains(all.String(), "探索者") {
+		t.Fatalf("role=explore 的行为指令没进子任务，实际收到: %s", truncate(all.String(), 200))
+	}
+}
+
+// 未知 role 归一化为 leaf，不能原样接受任意字符串。
+func TestSubagent_UnknownRoleNormalized(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	sm.Launch(SubagentLaunchRequest{Goal: "x", Role: "恶意角色注入"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && llm.callCount() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	var all strings.Builder
+	for _, m := range llm.gotMsgs[0] {
+		all.WriteString(m.Content)
+	}
+	if !strings.Contains(all.String(), "叶子执行者") {
+		t.Fatal("未知 role 应归一化为 leaf")
+	}
+	if strings.Contains(all.String(), "恶意角色注入") {
+		t.Fatal("未知 role 内容不该被原样注入")
 	}
 }
 

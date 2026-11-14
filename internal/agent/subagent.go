@@ -195,7 +195,14 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 		if badGoal {
 			req.Goal = fmt.Sprintf("(task %d: 缺少 goal)", i+1)
 		}
+		// role 决定子代理的行为预设，注入到它的任务指令里（此前只赋默认值从不使用，
+		// 是个形同虚设的字段）。未知值按 leaf 处理，不静默接受任意字符串。
 		if req.Role == "" {
+			req.Role = "leaf"
+		}
+		switch req.Role {
+		case "leaf", "explore", "implement", "review":
+		default:
 			req.Role = "leaf"
 		}
 		if req.MaxSteps <= 0 {
@@ -227,17 +234,26 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 
 // runSubagent 跑一个子 agent：独立 Agent 实例 → 原生 Run() 主循环。
 func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequest) {
-	// 并发上限：拿不到槽就限时排队（不丢弃任务）。
+	// 并发上限：拿不到槽就排队（不丢弃任务）。
+	//
+	// 排队超时与执行超时必须分开：早前两段共用 req.TimeoutSecs，排队 250s 才拿到槽
+	// 的任务执行只剩 50s，实际是被饿死的——这不是任务本身跑不动，是排队吃掉了预算。
+	// 排队窗口独立给一个等待上限（取 max(30s, TimeoutSecs)），拿到槽后重新计时。
+	waitLimit := time.Duration(req.TimeoutSecs) * time.Second
+	if waitLimit < 30*time.Second {
+		waitLimit = 30 * time.Second
+	}
 	select {
 	case sm.sem <- struct{}{}:
 		defer func() { <-sm.sem }()
-	case <-time.After(time.Duration(req.TimeoutSecs) * time.Second):
-		sm.setState(h.ID, SubagentFailed, "", "subagent: 等待并发槽超时")
+	case <-time.After(waitLimit):
+		sm.setState(h.ID, SubagentFailed, "", "subagent: 等待并发槽超时（执行预算未消耗）")
 		sm.notify(h, "")
 		return
 	}
 
 	sm.setState(h.ID, SubagentRunning, "", "")
+	// 执行预算从拿到槽后才开始计。
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.TimeoutSecs)*time.Second)
 	sm.mu.Lock()
 	h.cancel = cancel
@@ -318,8 +334,20 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 		h.child = nil
 		sm.mu.Unlock()
 	}()
-	task := fmt.Sprintf("%s\n\n【子任务背景/上下文】\n%s\n\n你是被委派的子代理，只完成上面这一件子任务，做完用 respond 工具直接交付结果，不要再委派。",
-		req.Goal, req.Context)
+	// 按 role 给子代理定行为边界（此前 role 从不生效）。
+	roleHint := ""
+	switch req.Role {
+	case "explore":
+		roleHint = "\n你的角色：**探索者**。只读调研，弄清事实与位置即可，不要修改任何文件；结论里写清关键文件:行号与证据。"
+	case "implement":
+		roleHint = "\n你的角色：**实现者**。按 goal 直接动手改代码/写文件，完成后简述改了哪些文件与验证方式。"
+	case "review":
+		roleHint = "\n你的角色：**审查者**。只读审查，指出问题（含文件:行号、严重度、理由与修法），不要自行修改。"
+	default: // leaf
+		roleHint = "\n你的角色：**叶子执行者**。独立完成这一件子任务并交付结果。"
+	}
+	task := fmt.Sprintf("%s\n\n【子任务背景/上下文】\n%s\n\n你是被委派的子代理，只完成上面这一件子任务，做完用 respond 工具直接交付结果，不要再委派。%s",
+		req.Goal, req.Context, roleHint)
 
 	type runRes struct {
 		reply string
