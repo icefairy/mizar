@@ -638,7 +638,7 @@ export function rpc_notify(params) {
 | - plan mode | exit_plan_mode 工具 + /plan 命令 + TUI 审批界面 |
 | - goal | get_goal / create_goal / update_goal（人类权限约束 + 自阻塞阈值） |
 | - schedule | schedule_create / list / delete（after / at / every 三种模式） |
-| subagent / workflow engine | 无 | ⏳ | 后续迭代（需引入并发调度抽象） |
+| **subagent / delegate_task** | ✅ 复刻 hermes delegate_task | ✅ | v0.8.7 重写：`tasks[]` 并行 fan-out（上限 10）、子代理独立 Agent 跑原生 Run()（自带完整工具）、句柄登记可查、async 绕开 30s plugin 超时、结果经 Jobs.DrainDone 回灌、并发 semaphore/超时/真 Cancel、防递归工具过滤 |
 | session fork / telemetry | 无 | ⏳ | 后续迭代 |
 | 100% 覆盖率门禁 / 快照测试 | scenarios 框架部分覆盖 | 📝 | 工程流程借鉴；不改变产品 |
 

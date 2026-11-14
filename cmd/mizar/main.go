@@ -39,7 +39,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.8.6"
+var version = "v0.8.7"
 
 // buildTag 标识 Windows 产物用的是哪条构建链，由 -ldflags -X main.buildTag=... 注入。
 //
@@ -663,12 +663,19 @@ func main() {
 	auxLLM := a.LLM
 	a.AuxLLM = auxLLM
 	goalSvc.SetJudgeFn(agent.BuildDefaultJudgeFn(auxLLM))
-	// Subagent 管理器
-	var subLLM agent.ToolCallLLM
-	if tllm, ok := a.LLM.(agent.ToolCallLLM); ok {
-		subLLM = tllm
-	}
-	a.SubAgents = agent.NewSubagentManager(subLLM, a.System)
+	// Subagent 管理器：共享 LLM + 插件注册表，结果通过 Jobs 完成通知回灌主循环。
+	// 用 a.LLM（LLM 接口，Run 内部按能力选 tools/ctx），不再只取 ToolCallLLM——
+	// 后者会把子 agent 困在「无工具、不可取消」的纯聊天壳里。
+	a.SubAgents = agent.NewSubagentManager(agent.SubagentConfig{
+		ParentLLM: a.LLM,
+		ParentSys: a.System,
+		Plugins:   pm,
+		JobNotify: func(note string) {
+			// 复用 Jobs.DrainDone() 已挂进主循环(loop.go:655)的完成通知通道：
+			// Start 一个瞬时即完的任务，DrainDone 会把 note 注入主对话。
+			a.Jobs.Start("subagent", note, func() (string, error) { return note, nil })
+		},
+	})
 	// BackgroundReview：后台自学习
 	homeDir, _ := os.UserHomeDir()
 	skillsDir := filepath.Join(homeDir, ".mizar", "skills")
@@ -705,10 +712,11 @@ func main() {
 	for _, t := range builtins.GoalExtendedTools(goalSvc) {
 		pm.RegisterBuiltin(t)
 	}
-	// 子代理委派工具
+	// 子代理委派工具（支持 tasks[] 并行 fan-out）
 	pm.RegisterBuiltin(agent.DelegateTool(a.SubAgents))
 	pm.RegisterBuiltin(agent.GetSubagentTool(a.SubAgents))
 	pm.RegisterBuiltin(agent.ListSubagentsTool(a.SubAgents))
+	pm.RegisterBuiltin(agent.CancelSubagentTool(a.SubAgents))
 	// Skill Manager 工具（agent 可自创 skill）
 	pm.RegisterBuiltin(builtins.SkillManagerTool(skillsDir))
 	// Session Insights 工具
