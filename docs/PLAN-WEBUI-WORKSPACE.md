@@ -1,186 +1,248 @@
 # Mizar Web UI · 文件上传与工作空间规划
 
-> v1.0 ｜ 2026-11-14 ｜ 目标仓库 `/data/codes/mizar`（Go 单二进制，Web UI 走 `//go:embed`）
+> v2.0 ｜ 2026-11-14 13:55 ｜ 目标仓库 `/data/codes/mizar`（Go 单二进制，Web UI 走 `//go:embed`）
 >
 > 需求：Web UI 是 **B/S 架构**，客户端（浏览器）要能把**本地文件上传到运行 Mizar 的服务器磁盘**；
-> 在设置里配置一个「工作空间根目录」，上传的文件**按会话 ID 分目录**存放，形成网页版「工作空间」概念，
-> 让 Agent 能读到、能处理这些文件。
+> 工作空间**开箱可用**、前端可改根目录；上传文件**按会话 ID 分目录**存放，形成网页版「工作空间」概念，
+> 让 Agent 能读到、能处理；**会话删除时联动清理**目录。
+
+**已拍板的三个决策（2026-11-14 13:55）**：
+
+| # | 决策 |
+| --- | --- |
+| 1 | **方案 3：保留跨会话并发 + per-conv 工作空间**（不用 `os.Chdir`、不降级串行） |
+| 2 | **默认开箱可用**（无需配置即可上传），前端可选其他路径作为工作空间根目录 |
+| 3 | **会话删除 → 联动清理**该会话的工作空间目录 |
 
 ⚠️ 本文是**规划**，不含实现。当前版本 `v0.8.6`。落地前先读 `mizar-development` 技能 +
-`docs/api.md` + `internal/server/webui.go`，本规划里的路径/结构以 2026-11-14 代码为准。
+`docs/api.md` + `internal/server/webui.go`。本规划路径/结构以 2026-11-14 代码为准。
+
+> **v2.0 相对 v1.0 的重大修订**：v1.0 推荐「运行前 `os.Chdir` + 工作空间模式降级串行」（方案 1）。
+> 用户选了方案 3 之后，**Chdir 路线整体作废**——进程级 cwd 是全局状态，跨会话并发时必然互相踩，
+> 方案 3 与方案 1 不是「去掉串行锁」的关系，而是**完全不同的实现：per-call 路径注入**。
+> 本版 §一 / §四 / §六 / §九 全部重写。
 
 ---
 
-## 一、先说结论（含一个必须先拍板的地基矛盾）
+## 一、先说结论（方案 3 的技术本质）
 
 | 结论 | 内容 |
 | --- | --- |
-| **上传本身不难，难在「Agent 能不能读到」** | 加一个 `POST /web/api/upload`（multipart，cookie 鉴权）把文件落到服务器磁盘，是 1 天量的活。但**只把文件按会话分目录存好，Agent 默认读不到**——见下方矛盾 |
-| ⚠️ **核心矛盾：工具全部共享进程 cwd** | `internal/builtins/files.go` 的 `read`/`write`/`grep`/`find`/`ls` 全用**相对路径**直接 `os.Stat`/`os.WriteFile`，`bash` 用 `shell.Command`（`exec.Command` 默认继承进程 cwd，**无 `cmd.Dir`**）。工具注册表在 `Agent.Clone()` 里是**共享指针**（clone.go），所有会话用同一份工具实例。因此**没有任何 per-call / per-conv 的 cwd 注入点** |
-| ⚠️ **`a.WorkDir` 只是提示词，不是执行目录** | `internal/agent/loop.go:455-460` 把 `WorkDir` 注入系统提示词「告诉模型你在哪」，**不改变工具实际执行目录**。改它不会让 `read("a.txt")` 读到别处 |
-| **推荐方案：每会话目录 + 运行前 `os.Chdir`** | 工作空间根 `<root>/<convID>/`，每次 `/web/api/run`、`/web/api/chat` 执行**前**把进程 cwd 切到该会话目录、执行后恢复。因为已有「同会话串行锁 + 跨会话全局 runMu」（`server.go` runMu/runLocks），**同一时刻只有一个会话在跑，进程级 Chdir 不会互相踩**。这是复用现有并发模型、改动最小、真正闭环的做法 |
-| **不建议为这需求重写工具层** | 方案 B（给每个工具加 cwd 参数 / 每个会话独立工具注册表）要改 `internal/builtins` 全部工具 + `plugins.Manager` + Clone 语义，横切十几个文件，且插件工具无法统一注入。复杂度与收益不成正比 |
-| **「设置里配根目录」= `webSettings` 加一个字段** | `webSettings`（`webstore.go`）已持久化到 `~/.mizar/webui.json`，加 `workspace_root string` 即可，复用现有 `/web/api/settings` GET/POST，重启由 `ApplyStoredSettings` 恢复路径天然继承 |
-| **上传文件与会话强绑定** | 上传必须带 `conversation_id`，落 `<root>/<convID>/<安全文件名>`；会话删除时可选联动清理目录（默认保留，避免误删） |
-| **安全是硬约束** | 路径穿越（文件名 `../`）、绝对路径、软链、大文件、文件类型——上传端点必须全部挡住。这是把「浏览器任意文件」写到服务器磁盘，RCE/覆盖风险最高的一个入口 |
+| **方案 3 = per-call 路径注入，不是 Chdir** | 进程只有一个 cwd，`os.Chdir` 是全局可变状态，跨会话并发必冲突。方案 3 要在保留并发的前提下 per-conv 隔离，**唯一干净的路是：把「会话目录」作为参数逐次传给工具，工具内部用绝对路径解析，绝不动进程 cwd** |
+| **不用改 `Tool.Run` 签名、不碰插件 ABI** | `plugins.Tool`（loader.go:25）加一个**可选**字段 `RunInDir func(cwd, args string) (string, error)`；`Manager` 加 `CallInDir(name, args, cwd)`。老工具（含全部 JS 插件 tool_*）不填该字段 → 自动退回原 `Call`，行为字节不变 |
+| **bash 侧几乎零成本** | `shell.Command()` 返回 `*exec.Cmd`，`cmd.Dir = cwd` 一行即让命令在会话目录执行（builtins.go:70）。不需要改 shell 包 |
+| **真实横切 = 8 个内置工具、约 20 处路径解析** | `read`/`write`/`edit`/`ls`/`grep`/`find`/`repo_map` 的 `os.Stat`/`ReadFile`/`WriteFile`/`ReadDir`/`filepath.Walk` 全部改成经过统一 helper `resolvePath(cwd, p.Path)`；`bash` 设 `cmd.Dir`。`CreateTemp` 那 3 处是临时文件，不碰 |
+| **注入点只需改 loop.go 一行** | `loop.go:1077` `a.Plugins.Call(c.Tool, c.Args)` → `a.Plugins.CallInDir(c.Tool, c.Args, a.WorkDir)`。`a.WorkDir` 在每会话 Clone 后设为 `<root>/<convID>`（WorkDir 是可写字段，Clone 复制后可覆盖） |
+| **跨会话并发天然成立** | cwd 是**参数**不是全局状态。A 会话的工具拿 `root/A/`、B 拿 `root/B/`，各自 goroutine 互不干扰。无需 `workspaceMu`、无需降级串行 |
+| **`a.WorkDir` 一物两用** | ① loop.go:455-460 注入系统提示词「当前工作目录=`<root>/<convID>`」，模型知道该用相对文件名；② 作为 `CallInDir` 的 cwd 实参，让工具真正在该目录执行。**这次两者终于一致了** |
+| ⚠️ **JS 插件工具的路径操作不在改造内** | 插件 `tool_*` 在 goja VM 里跑 JS，路径由 JS 侧 fs API 决定，Go 层注入不到。一期只保证**内置工具** per-conv；插件工具若需要工作空间，二期给 VM 注入 `MIZAR_CWD` 全局并约定插件改用它（见 §十） |
+| **开箱可用 = 默认根目录** | 未配置时用 `~/.mizar/workspaces/`（跟随 HOME，测试可隔离），首次上传自动 `MkdirAll`。`webSettings.WorkspaceRoot` 为空即取默认值 |
+| **联动清理** | 删除会话时 `os.RemoveAll(<root>/<convID>)`，必须先校验路径落在 root 内、convID 合法，防误删 |
 
-> **一句话**：这需求的真实工作量 80% 不在「上传」，在「让 per-conv 目录成为 Agent 的 cwd 且不出并发/安全问题」。
-> 拍板方案 A（Chdir）后再动手，别先写上传接口。
+> **一句话**：方案 3 的代价是「改 8 个内置工具 + 1 个注入点 + 1 行 loop」，换来「不动全局状态、保留并发、
+> 插件零改动」。比 v1.0 的 Chdir 方案改动面大，但语义干净、无并发坑。
 
 ---
 
-## 二、需求拆解（三块，别混为一谈）
+## 二、需求拆解（四块）
 
-1. **上传能力**：浏览器选文件 → `POST /web/api/upload` → 服务器落盘。要能一次多选、显示进度/结果、失败可重试。
-2. **工作空间配置**：设置面板加「工作空间根目录」输入框（服务端绝对路径，如 `/data/mizar-workspaces`），
-   存 `~/.mizar/webui.json`，进程启动时校验/创建目录。
-3. **按会话隔离 + Agent 可读**：`<root>/<convID>/` 存该会话所有上传文件；**切 cwd** 让 `read`/`bash`/`ls`
-   直接以会话目录为基准，模型用相对文件名即可读到；前端展示「本会话工作空间文件列表」，可下载/删除。
+1. **上传能力**：浏览器选/拖拽文件 → `POST /web/api/workspace/upload` → 服务器落盘。多选、进度、失败重试。
+2. **开箱可用 + 前端可改路径**：默认 `~/.mizar/workspaces/` 直接可用；设置面板可改成服务器其他绝对路径，
+   存 `~/.mizar/webui.json`，重启 `ApplyStoredSettings` 恢复。
+3. **按会话隔离 + Agent 可读（方案 3）**：`<root>/<convID>/` 存该会话文件；通过 `CallInDir` 让
+   `read`/`bash`/`ls` 以会话目录为基准，模型用相对文件名即可读到；跨会话并发不互相干扰。
+4. **联动清理**：删会话 → 删该会话工作空间目录。
 
 ---
 
 ## 三、现状地基（写任何代码前先认这些）
 
-| 地基 | 位置 | 对本次的约束 |
+| 地基 | 位置 | 对方案 3 的约束 |
 | --- | --- | --- |
-| Web 端点统一 cookie 鉴权 `webAuth` | `webui.go:265` | 上传/文件列表/下载/删除全部要过它，未登录 401 |
-| 端点注册 = `mux.HandleFunc` + `routeTable` + `docs/api.md` **三处同步** | `webui.go:232-261`、`routemeta.go` | 加 4~5 个端点，`/admin/routes` 与 `-gen-openapi` 才会不漏报 |
-| `webSettings` 持久化到 `~/.mizar/webui.json`，`ApplyStoredSettings` 重启恢复 | `webstore.go`、`webui.go:878` | 根目录配置直接加字段，零新增持久化机制 |
-| 会话 `conversation.ID` 已是唯一键、有 `CreatedAt` | `webstore.go` | 直接拿它做子目录名，不用另造 ID |
-| `webStore` 有 `mu` 锁 + 指纹检测外部修改 | `webstore.go` | 文件元数据若也存 JSON，复用这套；或纯靠磁盘扫描 |
-| 同会话串行锁 `runLocks[convID]` + 全局 `runMu`/`runCount` | `server.go:34-44` | **方案 A 成立的前提**：同一时刻仅一个 Run 在跑，Chdir 安全 |
-| `handleWebRun` / `handleWebChat` 注入历史 → `agent.Run` / `AIChatStream` | `webui.go:434,686` | Chdir 的切入/恢复点就在这两个 handler 的执行边界 |
-| `read`/`write`/`grep`/`find`/`ls` 相对路径、无 cwd 参数 | `files.go` | 不能靠传参改目录，只能靠进程 cwd |
-| `bash` = `shell.Command`（`exec.Command`，继承进程 cwd） | `builtins.go:70`、`shell.go:283` | 同 |
-| `a.WorkDir` 仅注入系统提示词 | `loop.go:455-460` | 可**顺带**把会话目录写进 `WorkDir` 让模型知道，但真正生效靠 Chdir |
-| Agent 每会话 `Clone()`，`WorkDir`/`Plugins` 共享复制 | `clone.go` | 系统提示词可 per-conv 覆盖 WorkDir（改 Clone 后的实例），工具不行 |
-| 前端 `//go:embed`，改完可能要重编（或走 `web.frontend_dir` 外部化） | 技能 | 加上传 UI 前先 `-webui-out` 释放外部目录，改完即时生效不必重编 |
+| `plugins.Tool.Run func(args string)` 无 ctx/cwd | `loader.go:25-40` | 不改签名，用**新增可选字段** `RunInDir` 旁路注入，保持 ABI 兼容 |
+| `Manager.Call(name,args)` → `Get` → `go func(){ t.Run(args) }()` | `loader.go:721-760` | 加 `CallInDir` 同构实现；工具仍在独立 goroutine + panic recover，结构照抄 |
+| JS 插件工具 `Run` 闭包 `vm.Call(name,args)` | `loader.go:478-510` | 不填 `RunInDir`，走原 `Call`，零改动 |
+| `CallCommand` / RPC 各有独立 `Run` 调用点 | `commands.go:105`、`rpc.go:98` | 斜杠命令 / RPC **不接工作空间**（控制面，非文件操作），保持不动 |
+| loop.go:1077 是 Agent 工具调用唯一入口 | `internal/agent/loop.go` | 改这一行为 `CallInDir(..., a.WorkDir)` |
+| `a.WorkDir` 可写、Clone 复制、仅注入提示词 | `clone.go:29`、`loop.go:455-460` | Clone 后覆盖成会话目录；一物两用（提示词 + cwd 实参） |
+| `a.ConvID` 每会话独立 | `loop.go:123` | 会话目录名来源（也可直接用 handler 里的 convID） |
+| 8 个内置工具用相对路径 | `builtins.go:58`、`files.go:191/304/331/438`、`repo.go:16`、`search.go:18/107` | 逐个接 `resolvePath`；`files.go` 约 12 处、`search.go` 约 6 处 `filepath.Walk/ReadFile` |
+| `shell.Command` 返回 `*exec.Cmd` | `builtins.go:70`、`shell.go:281` | `cmd.Dir = cwd` 一行搞定 bash |
+| 全量 `os.`/`filepath.` 调用 64 处 / 10 文件 | `internal/builtins/*.go` | 真正要改的只有「解析用户传入 path」的 ~20 处；临时文件、BOM、NFKC 等不碰 |
+| Web 端点 cookie 鉴权 `webAuth` | `webui.go:265` | 5 个新端点全过它 |
+| 端点三处同步登记 | `webui.go:232-261`、`routemeta.go:41`、`docs/api.md` | 加 5 端点，`/admin/routes` 与 `-gen-openapi` 才不漏报 |
+| `webSettings` 持久化 + 重启恢复 | `webstore.go:66`、`webui.go:878` | 加 `workspace_root`，零新增持久化机制 |
+| `webStore` 有 `mu` 锁 + 指纹检测 | `webstore.go` | 元数据若存 JSON 复用；或纯磁盘扫描 |
+| 同会话串行锁 + 跨会话并发 | `server.go:34-44` | **方案 3 不需要动这些锁**——这正是选它的意义 |
+| 前端 `//go:embed` / `web.frontend_dir` 外部化 | 技能 | 改前端前先 `-webui-out` 释放外部目录，改完即时生效 |
 
 ---
 
-## 四、数据模型与目录布局
+## 四、方案 3 核心架构（per-call 路径注入）
+
+### 4.1 数据结构改动（ABI 兼容）
+
+```go
+// internal/plugins/loader.go
+type Tool struct {
+    Name, Description, PluginFile string
+    Run      func(args string) (string, error)          // 保留，老工具/插件都用
+    // RunInDir 可选：需要 per-call 工作目录的工具填这个。
+    // 非空时 Manager.CallInDir 优先调它；为空则 CallInDir 退回 Call（走 Run）。
+    // 这样内置文件工具能接 cwd，JS 插件工具零改动。
+    RunInDir func(cwd, args string) (string, error)
+    Terminate bool
+    NoTimeout bool
+}
+```
+
+### 4.2 Manager 加同构调用路径
+
+```go
+// CallInDir：优先 RunInDir(cwd,args)，否则退回 Call(name,args)。
+// 结构照抄 Call（独立 goroutine + panic recover + maxExec 超时），只把 t.Run(args)
+// 换成 t.RunInDir(cwd, args)。
+func (m *Manager) CallInDir(name, args, cwd string) (string, error)
+```
+
+> 别把 cwd 塞进 `Manager` 字段（`m.cwd`）——那是共享 Manager，跨会话并发会互相覆盖，又退回全局状态陷阱。
+> **cwd 必须是每次调用的参数**，这是方案 3 的灵魂。
+
+### 4.3 统一路径解析 helper（新增 `internal/builtins/workspace.go`）
+
+```go
+// resolvePath 把用户/模型给的相对路径锚到会话目录。
+// cwd 为空 → 原样返回（CLI/TUI 行为完全不变）；绝对/含 .. → 清洗后仍须落在 cwd 内，
+// 否则拒绝（防模型用 ../ 跳出工作空间读到别的会话或系统文件）。
+func resolvePath(cwd, p string) (string, error) {
+    if cwd == "" { return p, nil }
+    if p == "" { p = "." }
+    abs := p
+    if !filepath.IsAbs(p) { abs = filepath.Join(cwd, p) }
+    abs = filepath.Clean(abs)
+    // 边界校验：abs 必须等于 cwd 或以 cwd+sep 开头
+    if abs != cwd && !strings.HasPrefix(abs, cwd+string(os.PathSeparator)) {
+        return "", fmt.Errorf("path %q escapes workspace %q", p, cwd)
+    }
+    return abs, nil
+}
+```
+
+- **CLI/TUI 零回归**：`cwd==""` 时直接返回原路径，现有 958 个测试不因这层改变行为。
+- **防越界**：模型给 `../../etc/passwd` 或别的会话相对路径会被拒，这是 per-conv 隔离的安全边界。
+
+### 4.4 8 个内置工具接 cwd
+
+| 工具 | 改法 |
+| --- | --- |
+| `bash` | `cmd := shell.Command(p.Command)` → `cmd.Dir = cwd`（cwd 空则不设） |
+| `read` | `p.Path = resolvePath(cwd, p.Path)` 后再 `os.Stat` / `ReadFile` / 文档解析 |
+| `write` | `resolvePath` → `MkdirAll(filepath.Dir)` → `WriteFile` |
+| `edit` | `resolvePath` → `ReadFile` / `WriteFile` |
+| `ls` | `resolvePath` → `os.ReadDir` |
+| `grep` | `resolvePath(p.Path)` 作为 `filepath.Walk` 根；`Walk` 回调里的绝对路径天然在 cwd 内 |
+| `find` | 同 grep，`filepath.Rel` 基准改 `resolve` 后的根 |
+| `repo_map` | `resolvePath(base)`（其 `os.Getwd()` 回退在 cwd 非空时改为用 cwd） |
+
+> 实现方式：`builtins.All` 里每个 `toolXxx()` 改造成「返回同时填 `Run` 和 `RunInDir` 的 Tool」，
+> `Run` = `RunInDir("", args)`（保证老调用点行为一致），`RunInDir` = 带路径解析的正体。
+> 这样 `Manager.Call`（老路径）与 `CallInDir`（新路径）都可用，改动集中、可单测。
+
+### 4.5 Agent 注入（loop.go 一行 + Clone 后一行）
+
+```go
+// loop.go:1077
+out, err := a.Plugins.CallInDir(c.Tool, c.Args, a.WorkDir)
+
+// server 侧每会话克隆后（handleWebRun / handleWebChat 建 clone 处）：
+clone.WorkDir = filepath.Join(workspaceRoot, convID)   // 覆盖提示词 + 作为 cwd 实参
+```
+
+- 非 Web 入口（CLI/TUI/RPC）`WorkDir` 是进程 cwd 或空 → `CallInDir` 的 cwd 为空 → `resolvePath` 原样返回 → **行为完全不变**。
+- 系统提示词自动出现「当前工作目录=`<root>/<convID>`」，模型用相对文件名 `read("report.pdf")` 即可命中。
+
+### 4.6 为什么这样能保留并发
+
+```
+会话 A goroutine: CallInDir("read", {...}, "/ws/convA") → resolvePath → "/ws/convA/report.pdf"
+会话 B goroutine: CallInDir("read", {...}, "/ws/convB") → resolvePath → "/ws/convB/report.pdf"
+                  ↑ 各自参数，无共享可变状态，无锁，无 Chdir
+```
+
+进程 cwd 始终不变（服务器启动目录），所有路径都是绝对路径。**这是方案 3 与方案 1 的根本区别**。
+
+---
+
+## 五、目录布局与配置
 
 ### 目录（服务器磁盘）
 
 ```
-<workspace_root>/                     # 设置里配，如 /data/mizar-workspaces
-├── <convID-1>/                      # 会话 A 的独立工作空间
-│   ├── report.pdf                   # 用户上传，保持原文件名（净化后）
-│   ├── data.csv
-│   └── .mizar-uploads.json          # 可选：上传元数据（原名/大小/时间/mime），纯磁盘扫描可不存
-├── <convID-2>/
-│   └── main.go
-└── ...
+<workspace_root>/                     # 默认 ~/.mizar/workspaces/（开箱可用）
+├── <convID-1>/
+│   ├── report.pdf
+│   └── data.csv
+└── <convID-2>/
+    └── main.go
 ```
 
-- 子目录名 = `conversation.ID`（现成唯一键）。**会话 ID 必须白名单校验**（只允许 `[A-Za-z0-9_-]`），
-  它要进文件路径，绝不能直接拼未经校验的字符串。
-- 上传文件名净化：`filepath.Base` 去掉任何目录成分 → 拒绝 `.`/`..`/空 → 白名单字符 → 拒绝绝对路径。
-  **先 `filepath.Clean` + `Base`，再拼，再 `filepath.Abs` 校验落在 `<root>/<convID>/` 之内**（防 `..` 穿越）。
+- 子目录名 = `conversation.ID`（现成唯一键），进路径前**白名单** `[A-Za-z0-9_-]`。
+- 上传文件名：`filepath.Base` 净化 → 拒绝 `.`/`..`/空/绝对路径 → 拼 `<root>/<convID>/` →
+  `filepath.Abs` 校验前缀。
+- **会话删除联动清理**：`os.RemoveAll(<root>/<convID>)`，删前校验 convID 合法 + 路径在 root 内。
 
 ### 配置（webSettings 增字段）
 
 ```go
 type webSettings struct {
     // ...existing...
-    WorkspaceRoot string `json:"workspace_root,omitempty"` // 服务器绝对路径，空=禁用上传/工作空间
+    WorkspaceRoot string `json:"workspace_root,omitempty"` // 空 = 用默认 ~/.mizar/workspaces/
 }
 ```
 
-- 空 = 功能关闭（上传接口返回 400「未配置工作空间」，前端隐藏上传按钮）。**默认关闭**，避免没人配就往
-  `~/.mizar` 或进程 cwd 乱写。
-- POST settings 时校验：必须是绝对路径、转 `filepath.Abs` 后不含 `..`、`os.MkdirAll(root, 0o700)` 可创建、
-  且**不是** `/`、`/etc`、`/root/.mizar` 等敏感路径（黑名单 + 必须位于某个允许基目录下更稳）。
-- 存进 `~/.mizar/webui.json`，重启 `ApplyStoredSettings` 读回。
+- **决策 2「开箱可用」**：空值不再代表「功能关闭」，而是**回退默认根目录** `~/.mizar/workspaces/`。
+  `resolveWorkspaceRoot()` 返回 `配置值` 或 `filepath.Join(home, ".mizar", "workspaces")`。
+- 前端可改：POST settings 时校验绝对路径、`filepath.Abs` 无 `..`、`MkdirAll` 可创建、非敏感系统目录。
+- 存 `~/.mizar/webui.json`，重启恢复。改根目录后**已有会话目录不迁移**（前端提示：旧会话文件仍在原路径）。
 
 ---
 
-## 五、上传协议与端点
+## 六、上传协议与端点
 
-新增端点（全部 `webAuth` cookie 鉴权，三处同步登记）：
+新增 5 个端点（全 `webAuth` cookie 鉴权，三处同步登记）：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/web/api/workspace/upload` | `multipart/form-data`：`conversation_id` + 多个 `file`。落 `<root>/<convID>/`，返回每个文件的 `{name,size,saved_as}` |
-| GET | `/web/api/workspace/files?conversation_id=` | 列该会话目录下的文件（名称/大小/修改时间），不返回内容 |
-| GET | `/web/api/workspace/download?conversation_id=&name=` | 下载单个文件（带 `Content-Disposition`，防目录穿越同上传） |
-| DELETE | `/web/api/workspace/file?conversation_id=&name=` | 删单个文件 |
-| GET | `/web/api/workspace/root` | 返回当前配置的根目录（前端展示 / 校验用） |
+| POST | `/web/api/workspace/upload` | multipart：`conversation_id` + 多个 `file`，落 `<root>/<convID>/`，返回 `{name,size,saved_as}` |
+| GET | `/web/api/workspace/files?conversation_id=` | 列该会话文件（名/大小/mtime） |
+| GET | `/web/api/workspace/download?conversation_id=&name=` | 下载单文件（带 `Content-Disposition`） |
+| DELETE | `/web/api/workspace/file?conversation_id=&name=` | 删单文件 |
+| GET | `/web/api/workspace/root` | 返回当前生效根目录（前端展示/校验） |
 
 **上传 handler 硬约束**：
 
 ```go
-r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotal)   // 单次总上限，如 100MB
+r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotal)   // 总上限 100MB
 mr := r.MultipartReader()                                 // 流式，别 ParseMultipartForm 全量进内存
-// 每个 part：
-//   1. convID 白名单
-//   2. name := filepath.Base(part.FileName())；净化 + 拒绝穿越
-//   3. dst := filepath.Join(root, convID, name)；filepath.Abs 后必须仍在 <root>/<convID>/ 内
-//   4. 若 dst 已存在是软链 → 拒绝（os.Lstat）；单文件上限（如 50MB）
-//   5. io.Copy 到临时文件（同目录 .tmp）→ 原子 rename，避免半文件
-//   6. 不做任何执行/解压/内容解析（zip 炸弹、可执行文件一律只当字节存）
+// 每 part：convID 白名单 → filepath.Base 净化文件名 → filepath.Abs 校验在 <root>/<convID>/ 内
+// → os.Lstat 拒绝已存在软链 → 单文件上限 50MB → 同目录 .tmp 临时文件 → 原子 rename
+// → 不执行 / 不解压 / 不解析内容，0644 只存字节
 ```
 
-- **不自动解压、不扫描内容、不执行**——服务端只搬运字节。要看内容由 Agent 的 `read` 工具去读。
-- 同名文件：默认覆盖（提示），或加时间戳后缀——规划选「覆盖 + 返回 `saved_as` 实际名」，语义最简单。
-- 鉴权后还要校验 `conversation_id` 属于当前用户可见会话（Web 目前单用户 admin，但仍 `getConv` 确认存在，
-  别让任意字符串建目录）。
+- 同名文件覆盖，返回 `saved_as` 实际名。
+- 鉴权后校验 `conversation_id` 属于当前可见会话（`getConv` 确认存在），别让任意字符串建目录。
+
+**删除端点**：同上传的路径净化 + 边界校验；会话删除联动见 §五。
 
 ---
 
-## 六、让 Agent 真正读到（方案 A：运行前 Chdir）
+## 七、前端
 
-这是闭环的关键，**不是可选优化**。
-
-### 执行边界
-
-`handleWebRun` / `handleWebChat` 在拿到会话、抢到 runLock **之后**、调用 `agent.Run`/`AIChatStream` **之前**：
-
-```go
-wsDir := filepath.Join(workspaceRoot, convID)   // 已确保存在
-restore, err := chdirFor(wsDir)                  // os.Chdir + 返回恢复闭包
-if err != nil { /* 410/500，回退到进程 cwd 或禁用 */ }
-defer restore()                                  // 务必恢复，别污染后续请求
-```
-
-- `chdirFor` 用 `os.Getwd()` 存旧值 → `os.Chdir(wsDir)` → 返回 `func(){ os.Chdir(old) }`。
-- **为什么安全**：已有 `runLocks[convID]` 同会话串行 + 全局 `runMu`（非 Web 入口）/`runCount` 并发上限。
-  但注意——**跨会话是真并发**（技能明确：「不同 session_key 并发是产品正常形态」）。两个会话同时跑时，
-  进程级 `os.Chdir` 会互相覆盖 cwd！这是方案 A 的**致命细节**，必须处理 ↓
-
-### ⚠️ 并发下的 Chdir 冲突 —— 必须拍板
-
-进程只有一个 cwd，跨会话并发时 A 切到 `convA`、B 切到 `convB`，谁后切谁生效，另一个的工具就读错目录。
-三条路，**推荐第 1 条**：
-
-1. **工作空间模式 = 全局降级为串行**（推荐）：一旦 `workspace_root` 启用，Web 的 Run/Chat 走**一把全局锁**
-   （复用/新建 `workspaceMu`），保证同一时刻只有一个会话在执行、独占 cwd。代价：启用工作空间后
-   失去跨会话并发（但换来「每个会话文件严格隔离 + Agent 直接可读」，符合个人 B/S 工具定位）。
-   前端可提示「工作空间模式下会话串行执行」。**改动小、语义清晰、可验证**。
-2. **每会话独立子进程/独立 cwd**：为每个会话 fork 一个 worker 进程（各自 cwd），架构改动大，不做。
-3. **方案 B 重写工具层**（每工具注入 cwd）：横切 `internal/builtins` + 插件工具无法统一，不做。
-
-> 若坚持「跨会话并发 + per-conv 工作空间」两者都要，只能走方案 B，排期翻倍。
-> 规划默认选 **1**：工作空间开启时 Web 执行串行，且 `workspaceMu` 与现有 `runMu` 合一，别造两套锁。
-
-### 顺带：把会话目录告诉模型
-
-`agent.Clone()` 后、Run 前，把该实例的 `WorkDir` 覆盖成 `wsDir`（`WorkDir` 是可写字段，Clone 复制后可改），
-让系统提示词里出现「当前工作目录 = `<wsDir>`」。这样模型知道该用**相对文件名**还是绝对路径去 `read`，
-与 Chdir 形成双重保障。`ls` 工具配合文件列表接口，让模型能先看到有哪些文件。
-
----
-
-## 七、前端（Web UI）
-
-- **设置面板**：加「工作空间根目录」输入 + 「已启用/未配置」状态；空时上传相关 UI 隐藏。
-- **会话主区**：加一个「工作空间」折叠面板/标签：
-  - 文件列表（名称/大小/时间），支持**拖拽或多选上传**、下载、删除；
-  - 上传中进度条（用 `XMLHttpRequest`/fetch 的 multipart，WS 不必掺和）；
-  - 新文件上传后，往对话里插入一条**可见的系统提示**（`kind=tool` 或直接一条 user 可见说明）
-    「已上传 report.pdf 到本会话工作空间」，让模型下一轮知道有文件可读——**但不要把它塞进 LLM 上下文
-    当 tool 消息**（技能：裸 tool 消息会 400），用普通文本提示即可。
-- 改前端前先 `-webui-out` 释放到外部目录（技能要求），改完即时生效、不必重编二进制。
+- **设置面板**：工作空间根目录输入（留空=显示默认路径）、「当前生效路径」回显；改路径即时生效（下次上传/工具调用即按新根）。
+- **会话工作空间面板**：文件列表（名/大小/时间）、拖拽或多选上传、下载、删除；上传进度条（fetch/XHR multipart，不掺 WS）。
+- **上传后提示**：往对话插一条**普通文本**「已上传 report.pdf 到本会话工作空间」，让模型下轮知道有文件可读——
+  **不要塞 `role:tool` 消息**（技能：裸 tool 消息进上下文会让上游 400），普通文本提示即可。
+- 改前端前先 `-webui-out` 释放外部目录，改完即时生效、不必重编二进制。
 
 ---
 
@@ -188,15 +250,15 @@ defer restore()                                  // 务必恢复，别污染后�
 
 | 风险 | 防线 |
 | --- | --- |
-| 路径穿越 `../../etc/passwd` | `filepath.Base` + `filepath.Abs` 校验前缀 + convID 白名单 |
+| 路径穿越 `../../etc/passwd` | `filepath.Base` + `filepath.Abs` 前缀校验 + convID 白名单 |
 | 绝对路径 / 覆盖系统文件 | 拒绝绝对、根目录黑名单、dst 必须在 `<root>/<convID>/` 内 |
-| 软链逃逸 | `os.Lstat` 拒绝已存在的软链目标 |
+| **模型用 `../` 跳出会话工作空间** | `resolvePath` 边界校验：清洗后必须落在 cwd 内（§4.3）——这是 per-conv 隔离的核心 |
+| 软链逃逸 | 上传 `os.Lstat` 拒已存在软链目标 |
 | 大文件 / 磁盘打满 | `MaxBytesReader` 总上限 + 单文件上限 + 可选会话配额 |
-| 可执行/脚本上传 | 只存字节，不执行、不设可执行位（0644）、不解压 |
-| 未鉴权访问 | 全部端点 `webAuth`；`convID` 校验属于当前会话 |
-| 会话 ID 注入 | 白名单 `[A-Za-z0-9_-]`，进路径前一律校验 |
-| cwd 污染 | `defer restore()`；工作空间模式串行化（§六） |
-| 删除误删 | 删单个文件需二次确认（前端）；会话删除**默认不**联动删目录 |
+| 可执行/脚本上传 | 只存字节，不执行、0644、不解压（zip 炸弹一律当字节） |
+| 未鉴权访问 | 5 端点全 `webAuth`；convID 校验属于当前会话 |
+| **联动清理误删** | 删目录前 convID 白名单 + `filepath.Abs` 校验在 root 内 + 只删单层 `<root>/<convID>` |
+| cwd 污染 | **方案 3 不改进程 cwd**，`os.Getwd()` 永远不变，此项天然免疫 |
 
 ---
 
@@ -204,30 +266,34 @@ defer restore()                                  // 务必恢复，别污染后�
 
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
-| **WS-0 配置 + 目录骨架** | `webSettings.WorkspaceRoot` + settings 校验/创建 + `/web/api/workspace/root` | GET/POST settings 往返；空=禁用；非法路径被拒；重启恢复 |
-| **WS-1 上传/列/下载/删** | 4 个端点 + routeTable + api.md；安全单测（穿越/软链/大文件/绝对） | curl 真传一个文件到隔离实例，列得出、下得回、删得掉；恶意文件名全部 400 |
-| **WS-2 Chdir 闭环** | `chdirFor` + 工作空间模式串行锁 + Clone 后覆盖 WorkDir | 隔离实例真跑 Agent：`read("上传的文件名")` 能读到内容；两会话并发时目录不串 |
-| **WS-3 前端** | 设置项 + 文件面板 + 拖拽上传 + 上传提示插入对话 | 浏览器端真实上传→对话让模型读文件→得到正确内容（真上游端到端） |
-| **WS-4 打磨** | 上传元数据、配额、会话删除策略、OpenAPI 生成、移动端适配 | `-gen-openapi` 端点齐全；`go test ./...` 不回归（忽略已知 context 包 2 环境假红） |
+| **WS-0 配置 + 开箱默认** | `webSettings.WorkspaceRoot` + `resolveWorkspaceRoot()` 默认 `~/.mizar/workspaces/` + `/workspace/root` + settings 校验 | 空配置首次上传自动建目录；改路径后即时生效；重启恢复；非法路径被拒 |
+| **WS-1 上传/列/下载/删 + 联动清理** | 5 端点 + routeTable + api.md；删会话联动 `RemoveAll`；安全单测（穿越/软链/绝对/大文件/误删） | curl 真传一个文件到隔离实例，列得出/下得回/删得掉；删会话目录消失；恶意文件名全 400 |
+| **WS-2 方案 3 工具层（核心）** | `plugins.Tool.RunInDir` + `Manager.CallInDir` + `resolvePath` + 8 个内置工具接 cwd + loop.go:1077 注入 + Clone 覆盖 WorkDir | **CLI/TUI 全量测试不回归**（cwd 空=原行为）；单测：`resolvePath` 越界拒绝；`CallInDir("read", ..., "/ws/A")` 读到 A 的文件；**两会话并发各读各的、互不串** |
+| **WS-3 前端** | 设置项 + 工作空间面板 + 拖拽上传 + 上传提示 | 浏览器真上传 → 对话让模型 `read("文件名")` → 得到正确内容（真上游端到端） |
+| **WS-4 打磨** | 上传元数据、配额、OpenAPI 生成、路径迁移提示、移动端 | `-gen-openapi` 端点齐全；`go test ./...` 不回归（忽略已知 context 包 2 环境假红） |
 
 **验证姿势**（照技能）：`HOME=/tmp/mzt /tmp/mizar-test -serve -addr :3201 ...` 起隔离实例，
 从 `/tmp/mzt/.mizar/config.json` 读随机密码登录，`-c jar` 存 cookie（父目录要先建，否则静默不写→全 401），
-再 curl 上传 + `/web/api/run` 让 Agent 读文件。**必须真跑一轮**证明 Chdir 生效，单测证不了回调/进程 cwd。
+curl 上传 → `/web/api/run` 让 Agent `read` 文件。**WS-2 必须真起两个并发会话各传同名文件，
+证明读到的内容分别是各自的**（这是方案 3 的立身之本，单测 + 真跑都要有）。
 
 ---
 
 ## 十、明确不做（避免过度设计）
 
-- **不重写工具层注入 cwd**（方案 B），除非明确要「跨会话并发 + per-conv 目录」两者兼得。
-- **不做服务端解压/预览/杀毒扫描**：只搬运字节，内容交给 Agent 工具。
-- **不做多用户文件权限**：当前 Web 单用户 admin，上传与会话绑定即可，不引入 RBAC。
-- **不做云存储/对象存储**：本地磁盘目录，符合零配置部署定位。
-- **不把上传内容塞进 LLM 上下文**：只插入一条可见文本提示，避免 token 爆炸与 tool 消息协议问题。
+- **不用 `os.Chdir`、不加全局串行锁、不降级并发**（方案 1 作废）——方案 3 的灵魂就是无全局状态。
+- **不改 `Tool.Run` 签名、不动 JS 插件 ABI**：插件 tool_* 保持走 `Run`，一期不接工作空间；
+  若二期要支持，给 goja VM 注入 `MIZAR_CWD` 全局并约定插件改用它，属独立改动。
+- **斜杠命令 / RPC 不接 cwd**：控制面工具，不做文件操作。
+- **不做服务端解压/预览/杀毒**：只搬字节，内容交给 Agent 工具。
+- **不做多用户 RBAC**：Web 当前单用户 admin，上传与会话绑定即可。
+- **不做云存储**：本地磁盘，符合零配置定位。
+- **不把上传内容塞进 LLM 上下文**：只插一条可见文本提示。
+- **暂不改 session 目录归属**：`~/.mizar/sessions` 与工作空间是两回事，不合并。
 
 ---
 
-## 待用户拍板
+## 已决策 / 待确认
 
-1. **§六的并发取舍**：启用工作空间时**降级为全局串行**（推荐，改动小），还是必须保留跨会话并发（→ 方案 B，排期翻倍）？
-2. 工作空间**默认关闭**（空配置），还是给个默认根目录（如 `~/.mizar/workspaces`）开箱即用？
-3. 会话删除时，工作空间目录**保留**（推荐）还是联动清理？
+- ✅ 方案 3（保留并发 + per-conv 注入）、✅ 开箱可用 + 前端可改路径、✅ 联动清理。
+- 待定（不阻塞开工）：单文件/会话配额默认值；前端拖拽还是仅点选；改根目录后旧会话文件是否提供「迁移」按钮（规划默认不迁移，仅提示）。
