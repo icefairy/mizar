@@ -1466,9 +1466,16 @@
     // 作为兼容兜底（老服务端只返回 running_conv）。
     if (isConvRunningHere(convId)) {
       // 本会话正在跑一轮。
+      // 打断（steer）只在 Agent 模式有意义：steer 的消息由 Agent 循环里的
+      // drainSteer() 在下一步消费；普通对话是一次 AIChatStream 调用，没有循环
+      // 去取这条纠正，存进去也没人读（烂在槽位里）。所以 chat 模式必须排队。
+      // 之前这里只显示「已排队，本轮结束后自动发送」，用户看到自己明明选的是
+      // 「打断」却提示排队，以为功能坏了 —— 实际是模式限制，得说清楚。
       if (!interruptMode || mode !== "agent") {
         pushQueue(text, convId, "queue");
-        flashQuick("已排队，本轮结束后自动发送");
+        flashQuick(mode !== "agent"
+          ? "普通对话无法中途注入，已排队，本轮结束后自动发送（切到 Agent 模式可打断）"
+          : "已排队，本轮结束后自动发送");
         return;
       }
       const qid = pushQueue(text, convId, "steer-pending");

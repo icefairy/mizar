@@ -1,3 +1,63 @@
+## [v0.8.6] — 2026-11-14
+
+> 主题：**工具调用历史落盘** —— 刷新 Web 界面后不再只剩一问一答。
+
+### 🐛 修复
+
+- **Agent 模式下打断被误报成「排队」**（`internal/server/server.go`）
+  - 根因：`runLiveFor(conv)` 只查 `agent.Running()`，漏了 `busyRun` 那个窗口。
+    `acquireRunFor` 成功到 `agent.Run()` 真正置 `runActive` 之间有一段空档
+    （首个 LLM 请求还没返回时最典型），这段里 `Running()` 仍是 false，
+    但这一轮早已开始、steer 完全能生效 → `/web/api/steer` 返回
+    `running:false`，前端据此显示「排队」。
+  - v0.8.2 修过全局 `runLive()` 的这个坑，**按会话判断的 `runLiveFor` 当时漏了**。
+  - 修法：新增按会话的 `busyConvs` 集合（`busyRun` 是全局布尔，多会话并发下
+    会让「A 刚起步、B 空闲」被误判成 B 也在跑），`runLiveFor` 优先查它。
+- **普通对话模式的提示不诚实**（`webui/app.js`）
+  - chat 模式是一次 `AIChatStream` 调用，没有 Agent 循环去 `drainSteer()`，
+    steer 存进去没人消费，所以该模式**确实只能排队**。
+  - 但原来只提示「已排队，本轮结束后自动发送」，用户明明选了「打断」看到这句
+    会以为功能坏了。改为「普通对话无法中途注入，已排队…（切到 Agent 模式可打断）」。
+- **`/web/api/chat` 未占会话锁**（`webui.go`）
+  - 普通对话只 `markRunning`，不 `acquireRunFor`，导致 `busyRun` 不置位、
+    steer 判定失败，且同一会话并发两次 chat 会把历史写乱。补上锁与 409。
+
+### ✨ 新增
+
+- **工具调用过程落盘**（`internal/server/webstore.go`、`webui.go`）
+  - 此前 Agent 模式只落盘 `user` 提问和最终 `reply`，中间所有工具调用/输出
+    只存在于内存与 WS 事件流里，**页面一刷新全丢**。
+  - `convMessage` 新增 `Kind` / `Tool` / `Args` / `Reason` / `Result` / `Err` 字段。
+  - **不引入 `role: "tool"`**：OpenAI 协议要求 tool 消息必须紧跟带 `tool_calls`
+    的 assistant 消息，裸存进上下文会被上游 400。改用 `kind: "tool"` 标记为
+    纯展示消息，注入 LLM 时按 `isText()` 过滤掉。
+  - `Kind` 为空视为 `text`，旧数据零迁移兼容。
+- **模型说明文字（reason）单独存字段**
+  - 模型调用工具前那句「我先看一下这个文件」是意图陈述，与工具真实输出语义不同，
+    分字段保存、分区域显示（reason 一行 + 🔧 参数 + ↳ 结果）。
+- **Agent 模式挂 `OnToolExchange`**：每次工具交换按执行顺序落盘。
+- **落盘截断**：`args`/`result` 上限 4000 字节、`reason` 上限 2000，
+  超长标注「已截断，原长 N 字节」，防止读大文件/长命令输出把 `webui.json` 撑爆。
+- **前端历史回放**（`webui/app.js`）：新增 `appendToolStep`，与实时
+  `onToolCall`/`onToolResult` 视觉一致；工具执行失败整行染红（`.pstep-err`）。
+
+### 🧪 测试
+
+- `runlive_for_test.go` 新增 3 项：窗口期 `runLiveFor` 为 true、按会话隔离
+  （A 忙不能污染 B）、空 convID 走全局。**反向验证过**：去掉 `isBusyConv`
+  后前两项当场变红，恢复后转绿。
+- `toolhistory_test.go` 新增 6 项：落盘持久化、失败记 `err`、超长截断、
+  **工具消息不进 LLM 上下文**、`/web/api/conversation` 完整返回、旧数据兼容。
+- 真实上游端到端验证（隔离实例 + 璇玑网关，非 mock）：
+  - 工具调用：跑「用 bash 执行 echo HELLO_TOOLTEST」→ `webui.json` 落 3 条
+    （user / assistant+kind=tool 含 reason/args/result / assistant text）。
+  - 打断：发起三步任务后 1.2s 连发 3 次 steer → **全部 `running:true`**
+    （修复前窗口期会返回 false），日志见 `query.steer ... content=补充说明3`，
+    三条均落盘且被模型消费。
+- 全仓回归 **958 passed**（`context` 包 2 项为环境相关的既有失败）。
+
+---
+
 ## [v0.8.5] — 2026-11-14
 
 > 主题：**技能文件夹分类** —— 技能多到几十个时不再挤成一坨，按领域分组。

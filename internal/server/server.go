@@ -49,6 +49,11 @@ type Server struct {
 	// 「没有活跃循环」而提示排队（实际这一轮已经开始）。判断活跃统一用 runLive()。
 	busyRun atomic.Bool
 
+	// busyConvs 同上，但按会话记录（多会话并发下 busyRun 这个全局布尔会让
+	// 「A 刚起步、B 空闲」被误判成 B 也在跑）。Web 入口按会话查这个集合。
+	busyMu    sync.Mutex
+	busyConvs map[string]bool
+
 	// runConv 当前正在执行 Agent.Run 的 Web 会话 id（空 = 非 Web 会话发起的运行）。
 	// WS 事件会带上该 id，前端据此把流式增量只渲染到「发起该运行的那个会话窗口」，
 	// 修复多会话切换时事件串台（新会话的消息出现在老会话窗口里）。
@@ -112,9 +117,18 @@ func (s *Server) runLive() bool {
 
 // runLiveFor 该会话是否正在运行（多会话并发下按会话判断）。
 // convID 为空时退回全局判断（非 Web 入口）。
+//
+// 注意：必须把 busyRun 算进来。acquireRunFor 成功到 agent.Run() 真正置
+// runActive 之间有一个窗口（首个 LLM 请求还没返回时最典型，长思考模型可达数十秒），
+// 这段里 a.Running() 仍是 false，但这一轮早已开始、steer 完全能生效。
+// 只看 Running() 会让打断模式下的纠正被误报成「排队等本轮结束」——
+// v0.8.2 修过全局 runLive() 的这个坑，按会话判断的这里当时漏了。
 func (s *Server) runLiveFor(convID string) bool {
 	if convID == "" {
 		return s.runLive()
+	}
+	if s.isBusyConv(convID) {
+		return true
 	}
 	if s.pool != nil {
 		if a := s.pool.peek(convID); a != nil {
@@ -172,7 +186,32 @@ func (s *Server) acquireRunFor(convID string) bool {
 	}
 	// 抢到锁即视为一轮已开始（Run 可能还没跑到置 runActive 的地方）
 	s.busyRun.Store(true)
+	s.setBusyConv(convID, true)
 	return true
+}
+
+// setBusyConv 记录/清除某会话的「已开始但 Run 还没置 runActive」窗口期。
+func (s *Server) setBusyConv(convID string, on bool) {
+	if convID == "" {
+		return
+	}
+	s.busyMu.Lock()
+	defer s.busyMu.Unlock()
+	if s.busyConvs == nil {
+		s.busyConvs = map[string]bool{}
+	}
+	if on {
+		s.busyConvs[convID] = true
+	} else {
+		delete(s.busyConvs, convID)
+	}
+}
+
+// isBusyConv 该会话是否处于「已开始、但 Run 还没置 runActive」的窗口期。
+func (s *Server) isBusyConv(convID string) bool {
+	s.busyMu.Lock()
+	defer s.busyMu.Unlock()
+	return s.busyConvs[convID]
 }
 
 // releaseRun 释放该会话的独占。
@@ -190,6 +229,7 @@ func (s *Server) releaseRunFor(convID string) {
 		s.runCountMu.Unlock()
 	}
 	s.busyRun.Store(false)
+	s.setBusyConv(convID, false)
 	if lk != nil {
 		lk.Unlock()
 	}

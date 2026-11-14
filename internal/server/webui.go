@@ -464,6 +464,15 @@ func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 		s.markRunning(body.ConversationID, true)
 		defer s.markRunning(body.ConversationID, false)
 	}
+	// 同会话串行 + 置 busyRun：普通对话也要占这把按会话的锁，否则
+	// runLiveFor() 读不到「正在跑」，导致打断模式下发来的纠正被判成
+	// running=false → 前端显示排队（实际这一轮明明还在跑）。
+	// 同时防止同一会话并发两次 /web/api/chat 把历史写乱。
+	if !s.acquireRunFor(body.ConversationID) {
+		errJSON(w, http.StatusConflict, "该会话正在处理上一条消息，请稍候或发送纠正消息")
+		return
+	}
+	defer s.releaseRunFor(body.ConversationID)
 	if body.ConversationID != "" {
 		s.evt.reset(body.ConversationID)
 	}
