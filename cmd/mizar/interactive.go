@@ -59,7 +59,7 @@ func scrollHint() string {
 // interactive 运行交互式对话（readline 支持：退格删除 / 历史上下键 / Tab 补全）。
 // 退出时会打印会话 ID，告知用户如何续接。
 // 多行粘贴：快速连续输入（<300ms）自动合并为多行文本；输入 /send 手动提交当前 buffer。
-func interactive(a *agent.Agent, st *session.Store, sessionID string) {
+func interactive(a *agent.Agent, st *session.Store, sessionID *string) {
 	rl := liner.NewLiner()
 	defer rl.Close()
 	rl.SetCtrlCAborts(true)
@@ -78,12 +78,12 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 	agent.SetPlanAskUser(askUser)
 
 	// 退出提示
-	if sessionID != "" {
-		short := sessionID
+	if *sessionID != "" {
+		short := *sessionID
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接（或 mizar -c 续接最后一次退出的会话）\n", short, sessionID)
+		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接（或 mizar -c 续接最后一次退出的会话）\n", short, *sessionID)
 	}
 
 	// 渲染已加载的历史消息
@@ -153,12 +153,12 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		if err != nil {
 			fmt.Println()
 			// 退出时显示续接提示
-			if sessionID != "" {
-				short := sessionID
+			if *sessionID != "" {
+				short := *sessionID
 				if len(short) > 8 {
 					short = short[:8]
 				}
-				fmt.Printf("会话 %s: 用 mizar -session %s 续接（或 mizar -c）\n", short, sessionID)
+				fmt.Printf("会话 %s: 用 mizar -session %s 续接（或 mizar -c）\n", short, *sessionID)
 			}
 			return // EOF / Ctrl-C
 		}
@@ -207,8 +207,8 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 				fmt.Printf("(! 退出非零: %v)\n", err)
 			}
 			// 落盘 + 内存历史：user=bash 命令，assistant=命令输出（带非零退出标记）
-			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
-			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: buildBashEchoContent(cmd, out, err)})
+			st.Append(*sessionID, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
+			st.Append(*sessionID, agent.Message{Role: agent.RoleAssistant, Content: buildBashEchoContent(cmd, out, err)})
 			a.Initial = append(a.Initial, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
 			a.Initial = append(a.Initial, agent.Message{Role: agent.RoleAssistant, Content: buildBashEchoContent(cmd, out, err)})
 			continue
@@ -217,12 +217,12 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		// /quit 与 /exit 在命令分发之前拦截（注册表 quit 不再 os.Exit，
 		// 由本层打印续接提示后正常返回，不依赖退出后的 stdout/stderr 时序）
 		if trimmed == "/quit" || trimmed == "/exit" {
-			if sessionID != "" {
-				short := sessionID
+			if *sessionID != "" {
+				short := *sessionID
 				if len(short) > 8 {
 					short = short[:8]
 				}
-				fmt.Printf("会话 %s: 用 mizar -session %s 续接（或 mizar -c）\n", short, sessionID)
+				fmt.Printf("会话 %s: 用 mizar -session %s 续接（或 mizar -c）\n", short, *sessionID)
 			}
 			return
 		}
@@ -289,13 +289,13 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 			fmt.Println()
 		}
 
-		if sessionID != "" {
+		if *sessionID != "" {
 			// 落盘顺序与循环内消息顺序一致：user → (tool_call, tool_result)* → assistant reply
-			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: trimmed})
+			st.Append(*sessionID, agent.Message{Role: agent.RoleUser, Content: trimmed})
 			for _, msg := range exchanges {
-				st.Append(sessionID, msg)
+				st.Append(*sessionID, msg)
 			}
-			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+			st.Append(*sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 		// 维护内存历史：否则 /compact 永远读不到历史（"消息不足"），
 		// 且后续轮次上下文丢失（每轮 Run 都从空 Initial 开始）。

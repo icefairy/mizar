@@ -144,11 +144,23 @@ func (m *tuiModel) recordUsage(u *agent.Usage, dur time.Duration) string {
 	return m.cacheMiss.Observe(u)
 }
 
+// curSessionID 返回当前会话 ID：优先走动态函数（/session //fork 切换后跟随），
+// 未接线时回退启动时的静态值（测试直接构造 newTuiModel 的场景）。
+func (m *tuiModel) curSessionID() string {
+	if m.sessionIDFn != nil {
+		return m.sessionIDFn()
+	}
+	return m.sessionID
+}
+
 type tuiModel struct {
-	agent            *agent.Agent
-	store            *session.Store
-	sessionID        string
-	lines            []chatLine
+	agent     *agent.Agent
+	store     *session.Store
+	sessionID string // 启动时的会话 ID（sessionIDFn 为 nil 时的兜底）
+	// sessionIDFn 动态取当前会话 ID：/session 切换、/fork 分叉在 TUI 内执行后
+	// 落盘目标立即跟随（读 main 持有的 *sessionID）。nil = 用启动时的静态值。
+	sessionIDFn func() string
+	lines       []chatLine
 	stats            tuiStats
 	userColor        string                // 用户消息颜色（默认 white）
 	aiColor          string                // AI 回复颜色（默认 green）
@@ -804,7 +816,7 @@ func (m *tuiModel) projBarDirect() {
 	}
 	modeText, modeColor := m.modeStatus()
 	info.Mode = modeText
-	line := projectLine(info, m.sessionID, m.startedAt, time.Now())
+	line := projectLine(info, m.curSessionID(), m.startedAt, time.Now())
 	if _, _, w, _ := m.projBar.GetInnerRect(); w > 0 {
 		// 固定段宽度 = 完整行 + 目录段 + 「📁 」前缀 → 用空白目录算出的固定部分
 		// （不用空串避免 fallback "?" 干扰宽度）
@@ -1248,8 +1260,8 @@ func (m *tuiModel) setLoadingAsync(loading bool) {
 
 func (m *tuiModel) startTask(input string) {
 	// 持久化用户消息
-	if len(m.lines) > 0 && m.store != nil && m.sessionID != "" {
-		m.store.Append(m.sessionID, agent.Message{Role: agent.RoleUser, Content: input})
+	if len(m.lines) > 0 && m.store != nil && m.curSessionID() != "" {
+		m.store.Append(m.curSessionID(), agent.Message{Role: agent.RoleUser, Content: input})
 	}
 
 	m.liveMu.Lock()
@@ -1460,8 +1472,8 @@ func (m *tuiModel) startTask(input string) {
 
 		// 工具交换历史落盘：会话文件（Initial 的追加在下方 user 之后，保持对话顺序）
 		for _, msg := range exchanges {
-			if m.store != nil && m.sessionID != "" {
-				_ = m.store.Append(m.sessionID, msg)
+			if m.store != nil && m.curSessionID() != "" {
+				_ = m.store.Append(m.curSessionID(), msg)
 			}
 		}
 
@@ -1510,8 +1522,8 @@ func (m *tuiModel) startTask(input string) {
 		} else {
 			diag.Logf("agent", "run end: ok (reply=%d chars)", len(reply))
 			m.addChatLineAsync(chatLine{role: "bot", content: reply, ts: time.Now()})
-			if m.store != nil && m.sessionID != "" {
-				m.store.Append(m.sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+			if m.store != nil && m.curSessionID() != "" {
+				m.store.Append(m.curSessionID(), agent.Message{Role: agent.RoleAssistant, Content: reply})
 			}
 			// 追加 bot 回复到初始历史（工具调用/结果不追加，它们是内部实现细节）
 			m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleAssistant, Content: reply})
@@ -2247,12 +2259,12 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 // 不依赖退出后的 stdout/stderr 时序）。
 func (m *tuiModel) addQuitHint() {
 	hint := "“再见”"
-	if m.sessionID != "" {
-		short := m.sessionID
+	if m.curSessionID() != "" {
+		short := m.curSessionID()
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		hint = fmt.Sprintf("会话 %s: 用 mizar -session %s 续接\n下次可直接 mizar -c 续接最后一次退出的会话", short, m.sessionID)
+		hint = fmt.Sprintf("会话 %s: 用 mizar -session %s 续接\n下次可直接 mizar -c 续接最后一次退出的会话", short, m.curSessionID())
 	}
 	// addChatLine 会立即 renderAllDirect（事件循环内调用，提交在 app.Stop 前的最后一次绘制）
 	m.addChatLine(chatLine{role: "system", content: hint, ts: time.Now()})
@@ -2329,9 +2341,9 @@ func (m *tuiModel) submitInput(s string) {
 				m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
 				m.agent.Initial = append(m.agent.Initial, agent.Message{Role: agent.RoleAssistant, Content: echo})
 				// 落盘，保证会话重启后仍可续接
-				if m.store != nil && m.sessionID != "" {
-					m.store.Append(m.sessionID, agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
-					m.store.Append(m.sessionID, agent.Message{Role: agent.RoleAssistant, Content: echo})
+				if m.store != nil && m.curSessionID() != "" {
+					m.store.Append(m.curSessionID(), agent.Message{Role: agent.RoleUser, Content: "!" + cmd})
+					m.store.Append(m.curSessionID(), agent.Message{Role: agent.RoleAssistant, Content: echo})
 				}
 				m.renderAllDirect()
 			})
@@ -2526,7 +2538,7 @@ func (m *tuiModel) Run() error {
 
 	// 诊断日志：记录 TUI 生命周期与初始化参数，定位“启动后莫名退出”类问题
 	diag.Logf("tui", "start: model=%s session=%s logs=%s msgs=%d",
-		m.agent.Model(), m.sessionID, diag.Path(), len(m.lines))
+		m.agent.Model(), m.curSessionID(), diag.Path(), len(m.lines))
 
 	// 接管所有会污染终端的输出通道（见 tui_output.go）：标准 log → 诊断文件、
 	// OSC52 直写禁用、定时提醒改走聊天区。否则任何一次 log.Printf 都会在屏幕上
@@ -3185,8 +3197,11 @@ func toolCallReason(content string) string {
 	return ""
 }
 
-func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *session.TitleCache, mcpStats func() (int, int)) {
-	m := newTuiModel(a, st, sessionID, titleCache)
+// runTUI 接收 main 持有的 *sessionID：TUI 内 /session 切换、/fork 分叉后，
+// 落盘目标经 curSessionID() 立即跟随（此前传值拷贝，切换后仍写旧文件）。
+func runTUI(a *agent.Agent, st *session.Store, sessionID *string, titleCache *session.TitleCache, mcpStats func() (int, int)) {
+	m := newTuiModel(a, st, *sessionID, titleCache)
+	m.sessionIDFn = func() string { return *sessionID }
 	m.mcpStats = mcpStats
 	if err := m.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI 退出: %v，回退经典模式\n", err)
@@ -3195,16 +3210,16 @@ func runTUI(a *agent.Agent, st *session.Store, sessionID string, titleCache *ses
 		return
 	}
 	// TUI 正常退出后输出续接提示（此时框架已释放终端）
-	if sessionID != "" {
-		short := sessionID
+	if *sessionID != "" {
+		short := *sessionID
 		if len(short) > 8 {
 			short = short[:8]
 		}
-		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接（或 mizar -c 续接最后一次退出的会话）\n", short, sessionID)
+		fmt.Printf("\n会话 %s: 用 mizar -session %s 续接（或 mizar -c 续接最后一次退出的会话）\n", short, *sessionID)
 	}
 }
 
-func classicFallback(a *agent.Agent, st *session.Store, sessionID string) {
+func classicFallback(a *agent.Agent, st *session.Store, sessionID *string) {
 	for {
 		var line string
 		fmt.Print("> ")
@@ -3239,9 +3254,9 @@ func classicFallback(a *agent.Agent, st *session.Store, sessionID string) {
 		a.Initial = append(a.Initial,
 			agent.Message{Role: agent.RoleUser, Content: line},
 			agent.Message{Role: agent.RoleAssistant, Content: reply})
-		if st != nil && sessionID != "" {
-			st.Append(sessionID, agent.Message{Role: agent.RoleUser, Content: line})
-			st.Append(sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
+		if st != nil && *sessionID != "" {
+			st.Append(*sessionID, agent.Message{Role: agent.RoleUser, Content: line})
+			st.Append(*sessionID, agent.Message{Role: agent.RoleAssistant, Content: reply})
 		}
 	}
 }

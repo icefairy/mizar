@@ -20,6 +20,7 @@ import (
 const (
 	entryTypeMessage    = "message"    // 普通消息（旧文件缺省即此类型）
 	entryTypeCompaction = "compaction" // 压缩记录（追加式，不改写历史）
+	entryTypeFork       = "fork"       // 分叉血缘记录（P-2 /fork，记来源，不参与消息装载）
 )
 
 // envelope 仅用于取出一行的 type 字段，决定后续按哪种结构解析。
@@ -179,14 +180,37 @@ func (s *Store) appendCompactionRecord(id string, rec Compaction) error {
 	return s.appendLine(id, b)
 }
 
-// readEntries 读取文件并按类型拆分消息与压缩记录（保持消息的原始顺序）。
-func (s *Store) readEntries(id string) (msgs []agent.Message, comps []Compaction, err error) {
+// ForkRecord 会话分叉记录：新会话由哪个父会话派生（P-2 /fork）。
+// 元数据行，Load/LoadRaw 不当作消息返回。
+type ForkRecord struct {
+	Parent string `json:"parent"`
+}
+
+// AppendFork 追加分叉血缘记录（一条 {"type":"fork","parent":...} 元数据行）。
+func (s *Store) AppendFork(id, parent string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := validateID(id); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.sessionDir(), 0o755); err != nil {
+		return err
+	}
+	b, err := json.Marshal(map[string]string{"type": entryTypeFork, "parent": parent})
+	if err != nil {
+		return err
+	}
+	return s.appendLine(id, b)
+}
+
+// readEntries 读取文件并按类型拆分消息、压缩记录与分叉记录（保持消息的原始顺序）。
+func (s *Store) readEntries(id string) (msgs []agent.Message, comps []Compaction, fork *ForkRecord, err error) {
 	f, err := os.Open(s.sessionFile(id))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil, fmt.Errorf("session %q not found", id)
+			return nil, nil, nil, fmt.Errorf("session %q not found", id)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -207,6 +231,11 @@ func (s *Store) readEntries(id string) (msgs []agent.Message, comps []Compaction
 			if err := json.Unmarshal([]byte(line), &c); err == nil {
 				comps = append(comps, c)
 			}
+		case entryTypeFork:
+			var fr ForkRecord
+			if err := json.Unmarshal([]byte(line), &fr); err == nil && fork == nil {
+				fork = &fr // 只认第一条（分叉记录本就至多一条）
+			}
 		default: // 空 type、message 或未知类型（容错当作消息）
 			var m agent.Message
 			if err := json.Unmarshal([]byte(line), &m); err == nil {
@@ -214,14 +243,14 @@ func (s *Store) readEntries(id string) (msgs []agent.Message, comps []Compaction
 			}
 		}
 	}
-	return msgs, comps, sc.Err()
+	return msgs, comps, fork, sc.Err()
 }
 
 // Load 读取会话（应用压缩：返回 summary + 保留范围 + 压缩后新增的消息）。
 func (s *Store) Load(id string) ([]agent.Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	msgs, comps, err := s.readEntries(id)
+	msgs, comps, _, err := s.readEntries(id)
 	if err != nil {
 		return nil, err
 	}
@@ -253,8 +282,22 @@ func (s *Store) Load(id string) ([]agent.Message, error) {
 func (s *Store) LoadRaw(id string) ([]agent.Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	msgs, _, err := s.readEntries(id)
+	msgs, _, _, err := s.readEntries(id)
 	return msgs, err
+}
+
+// ForkParent 返回会话的分叉来源（P-2 /fork 血缘）；非分叉会话返回空串。
+func (s *Store) ForkParent(id string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _, fork, err := s.readEntries(id)
+	if err != nil {
+		return "", err
+	}
+	if fork == nil {
+		return "", nil
+	}
+	return fork.Parent, nil
 }
 
 // List 列出当前作用域（路径）下的会话 ID。

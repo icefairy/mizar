@@ -2193,6 +2193,15 @@ func main() {
 		},
 	})
 
+	// 内置 /fork 命令：从当前历史派生新会话分支（P-2，核心逻辑在 forkcmd.go）
+	a.Commands.Register(agent.Command{
+		Name:        "fork",
+		Description: "从当前会话历史分叉出新会话（/fork 全量 ｜ /fork <n> 只保留前 n 条消息），源会话保持不变",
+		Run: func(args string) (string, error) {
+			return forkSession(a, st, titleCache, sessionID, args)
+		},
+	})
+
 	// 交互模式
 	// 未配置供应商时给出引导（banner 末尾追加提示）
 	if cfg, err := config.Load(config.DefaultPath()); err != nil || cfg.BaseURL == "" {
@@ -2211,10 +2220,13 @@ func main() {
 	}
 	if *tui {
 		diag.Logf("tui", "runTUI 会话=%s logs=%s", *sessionID, diag.Path())
-		runTUI(a, st, *sessionID, titleCache, mcpReg.Stats)
+		// 传指针：/session 切换、/fork 分叉在 TUI 内执行后，落盘目标立即跟随
+		// （此前传值拷贝，TUI 内切换会话后仍写旧文件——既有错位缺陷）
+		runTUI(a, st, sessionID, titleCache, mcpReg.Stats)
 		diag.Logf("tui", "runTUI 返回，进程结束")
 	} else {
-		interactive(a, st, *sessionID)
+		// 与 runTUI 同理：传指针，交互模式内 /session //fork 切换后落盘跟随
+		interactive(a, st, sessionID)
 	}
 
 	// 退出时记录当前会话 ID，供下次 `mizar -c` 直接续接最后一次（已退出的）会话。
