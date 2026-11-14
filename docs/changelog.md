@@ -1,3 +1,59 @@
+## [v0.8.4] — 2026-11-14
+
+> 主题：**自定义前端 + 路由注册表** —— 改前端不用重编译；端点清单有了单一事实源。
+
+### ✨ 新增
+
+- **Web UI 前端外部化**（`internal/server/webui.go`、`internal/config/config.go`）
+  - 前端来源按优先级解析：`config.json` 的 `web.frontend_dir` > `~/.mizar/webui/` >
+    内嵌 embed（fallback）。外部目录**必须存在且含 `index.html`** 才采纳，否则自动回退
+    embed，行为与旧版完全一致。
+  - 外部目录用 `os.DirFS` 每次请求现读——**改 HTML/JS/CSS 即时生效，不必重启服务、
+    不必重编译二进制**。
+  - 新增 `mizar -webui-out [dir]`：把内嵌前端释放到外部目录（`-` = `~/.mizar/webui/`），
+    用户拿到文件即可改。
+  - 新增 `GET /web/api/frontend`：返回当前前端来源 `{"source":"dir|embed","dir":"...","version":"..."}`。
+  - 启动日志标明来源：`webui: 使用外部前端目录 /path（改动文件即时生效，无需重编译）`。
+
+- **路由注册表**（`internal/server/routemeta.go`）
+  - 全部静态端点收进一张 `routeTable`（分组/方法/路径/鉴权/开关/说明），
+    `mux.HandleFunc` 与之一一对应；新增端点必须同步登记。
+  - 新增 `GET /admin/routes`（Bearer）：机器可读全量清单，**含插件 `rpc_*` 动态端点**
+    （每个方法出 `/rpc (method=rpc_x)` + `/ext/x` 两条）。
+  - 新增 `mizar -gen-openapi [-gen-openapi-out path]`：从注册表生成 `docs/openapi.json`
+    （OpenAPI 3.0.3），与 `docs/api.md`、`/admin/routes` 同源，不再手写漂移。
+  - 生成物只含静态端点；插件动态端点随运行环境变化，走 `/admin/routes` 取。
+
+- **插件 REST 直达 `/ext/<name>`**（`internal/server/rpc.go`）
+  - `GET /ext/` 列方法；`GET /ext/<name>` 无参调用；`POST /ext/<name>` body 原样作 params。
+  - 复用 `plugins.CallRPC` 的超时与 panic 兜底（与 `/rpc` 同一执行通道）。
+  - 输出是合法 JSON 则原样透传，否则包 `{"result": "..."}`。
+  - **安全边界**：只暴露插件已导出的 `rpc_*`，绝不接受运行时注册任意 Go handler
+    （RCE 红线）。
+
+### 🧪 测试
+
+- `internal/server/routemeta_ext_test.go` 新增 3 项：
+  - `TestRoutesAdmin`：路由表覆盖全静态端点 + 插件动态条目数正确（4 条：2 方法 × 2 形态）
+    + 无 token 401。
+  - `TestExtRPCRoot`：`/ext/` 列出可用方法。
+  - `TestExtRPCCall`：POST 带参 / GET 无参 / 未知方法 404。
+- `go test ./internal/server/ ./internal/config/` → **65 passed**。
+- 端到端实测（隔离 HOME 起的临时实例）：
+  - `-webui-out` 释放 3 文件，`index.html` 与 embed 源 `cmp` 一致。
+  - 配置 `web.frontend_dir` 后 `/web/api/frontend` 返回 `source=dir`，
+    页面含外部目录标记；**改文件不重启**两次改动立刻反映到 `/web/`。
+  - `/admin/routes` 带 token 返回 29 路由、无 token 401；`/ext/` 同样 401 边界正确。
+  - `-gen-openapi` 生成 29 条 path。
+
+### 📄 文档
+
+- `docs/api.md`：新增 `/admin/routes`、`-gen-openapi`（6.0）、`/ext/` REST 直达（6.2）、
+  前端外部化（6.4）；端点总表补全并标注 v0.8.4+。
+- `docs/openapi.json`：新增生成物（29 paths）。
+
+---
+
 ## [v0.8.3] — 2026-11-13
 
 > 主题：**多会话真并发** —— B 会话不再等 A 跑完。参照 Hermes gateway 的

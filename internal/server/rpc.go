@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 
 	"mizar/internal/agent"
 )
@@ -160,6 +162,65 @@ func (s *Server) rpcTools(req *rpcRequest) rpcResponse {
 
 func (s *Server) rpcPing(req *rpcRequest) rpcResponse {
 	return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"pong": true, "model": s.agent.Model()}}
+}
+
+// handleExtRPC /ext/<name>：插件 rpc_<name> 的 REST 直达（P2）。
+// 与 /rpc method=rpc_<name> 同一执行通道：复用 plugins.CallRPC 的超时 /
+// panic 兜底。只暴露插件已导出的方法——运行时绝不注册任意 Go handler
+// （那是开 RCE 入口的红线，用户拍板过）。
+//
+//   GET  /ext/            → 列出可用方法
+//   GET  /ext/<name>      → CallRPC(name, "{}")（无参调用）
+//   POST /ext/<name>      → body 原样作为插件函数的 params JSON 串
+//
+// 返回：插件输出是 JSON 则原样透传；否则包成 {"result": "..."}。
+func (s *Server) handleExtRPC(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Services.JSONRPC.Load() {
+		errJSON(w, http.StatusServiceUnavailable, "rpc service disabled")
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/ext/")
+	if name == "" {
+		// /ext/ 根：方法清单
+		var list []string
+		if s.agent != nil && s.agent.Plugins != nil {
+			for _, m := range s.agent.Plugins.RPCMethods() {
+				list = append(list, "ext/"+m.Name)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"methods": list})
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		errJSON(w, http.StatusMethodNotAllowed, "use GET or POST")
+		return
+	}
+	if s.agent == nil || s.agent.Plugins == nil {
+		errJSON(w, http.StatusServiceUnavailable, "plugins not loaded")
+		return
+	}
+	params := "{}"
+	if r.Method == http.MethodPost {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			errJSON(w, http.StatusBadRequest, "read body: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(string(body)) != "" {
+			params = string(body)
+		}
+	}
+	out, err := s.agent.Plugins.CallRPC(name, params)
+	if err != nil {
+		errJSON(w, http.StatusNotFound, err.Error())
+		return
+	}
+	var decoded any
+	if json.Unmarshal([]byte(out), &decoded) == nil {
+		writeJSON(w, http.StatusOK, decoded)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": out})
 }
 
 func truncateStr(s string, n int) string {

@@ -309,9 +309,39 @@ curl -X POST http://127.0.0.1:3003/admin/switch -H "Authorization: Bearer $TOKEN
 
 `service` 取值：`http` | `jsonrpc` | `ws`。未知值返回 `400`。
 
+### `GET /admin/routes`（v0.8.4+）
+
+返回**路由注册表**（机器可读）——所有端点的权威清单，含运行时插件 `rpc_*` 动态端点。新增/改动端点必须在此表登记，故它是「当前实际暴露了哪些接口」的单一事实源。
+
+```bash
+curl http://127.0.0.1:3003/admin/routes -H "Authorization: Bearer ***"
+```
+```json
+{
+  "version": "v0.8.4",
+  "routes": [
+    {"group":"openai","method":"GET","path":"/v1/models","auth":"bearer","enabled_by_service":"http","summary":"模型清单（OpenAI 兼容）"},
+    {"group":"plugin","method":"GET,POST","path":"/ext/hello","auth":"bearer","summary":"插件 RPC REST 直达（来自 xxx.ts）"}
+  ]
+}
+```
+
+`group` 取值：`openai` / `rpc` / `ws` / `admin` / `web` / `plugin`。`plugin` 组条目随已加载插件的 `rpc_*` 导出动态增删。
+
 ---
 
 ## 6. 其他接口
+
+### 6.0 OpenAPI 3.0 生成（v0.8.4+）
+
+`mizar -gen-openapi` 从路由注册表生成 `docs/openapi.json`（默认输出，`-gen-openapi-out` 改路径），**非手写**——与 `/admin/routes`、本文档同源，不会漂移。
+
+```bash
+mizar -gen-openapi -gen-openapi-out docs/openapi.json
+# OpenAPI 已生成: docs/openapi.json（路由数 29）
+```
+
+> 生成物只含**静态**端点；插件 `rpc_*` 动态端点不进 OpenAPI paths（它们随运行环境变化），完整清单走 `GET /admin/routes`。
 
 ### 6.1 LSP Server 模式（stdio，非 HTTP）
 
@@ -319,23 +349,62 @@ curl -X POST http://127.0.0.1:3003/admin/switch -H "Authorization: Bearer $TOKEN
 
 ### 6.2 插件自定义 RPC
 
-插件导出 `rpc_<name>` 函数即自动注册为 `/rpc` 与 `/ws` 上的 `<name>` 方法：
+插件导出 `rpc_<name>` 函数即自动注册为 `/rpc` 与 `/ws` 上的 `<name>` 方法，以及 `/ext/<name>` 的 REST 直达（v0.8.4+）：
 
 ```js
-// 插件文件（~/.mizar/extensions/xxx.js）
+// 插件文件（~/.mizar/extensions/xxx.ts）
 export function rpc_hello(params) { return { greeting: "hi" }; }
 ```
 
+JSON-RPC 方式（`/rpc`，方法名去掉 `rpc_` 前缀，带或不带 `rpc_` 都认）：
 ```bash
-curl -X POST http://127.0.0.1:3003/rpc -H "Authorization: Bearer $TOKEN" \
+curl -X POST http://127.0.0.1:3003/rpc -H "Authorization: Bearer ***" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"hello","params":{}}'
 # → {"jsonrpc":"2.0","id":1,"result":{"greeting":"hi"}}
 ```
 
+REST 直达方式（`/ext/<name>`，Bearer 鉴权，复用 `plugins.CallRPC` 的超时/panic 兜底）：
+
+| 请求 | 行为 |
+|---|---|
+| `GET /ext/` | 列出可用方法：`{"methods":["ext/hello","ext/add"]}` |
+| `GET /ext/<name>` | 无参调用（`params="{}"`） |
+| `POST /ext/<name>` | body 原样作为插件函数的 `params` JSON 串 |
+
+插件函数输出是合法 JSON 则原样透传，否则包一层 `{"result":"..."}`。
+
+```bash
+curl -X POST http://127.0.0.1:3003/ext/hello -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" -d '{"name":"mizar"}'
+# → {"greeting":"hi"}（或包 result，取决于插件返回类型）
+```
+
+> **安全边界**：`/ext/` 只暴露**插件已导出的方法**，绝不接受运行时注册任意 Go handler——那是开 RCE 入口的红线。
+
 ### 6.3 插件宿主函数
 
 插件内可调用的宿主函数（`fs_read`/`http_get`/`shell_exec`/`llm_chat`/`db_query`/`ws_emit` 等约 40 个）见 [`host-funcs.md`](host-funcs.md)。
+
+### 6.4 Web UI 前端外部化（v0.8.4+）
+
+前端（`index.html`/`app.js`/`style.css`）默认内嵌二进制（`//go:embed`，零外部依赖）。要**自定义/热改前端而不重编译二进制**：
+
+1. 释放内嵌前端到外部目录（拿到可编辑的文件）：
+   ```bash
+   mizar -webui-out -          # 释放到 ~/.mizar/webui/（3 文件）
+   mizar -webui-out /opt/mizar-frontend   # 或指定目录
+   ```
+2. 编辑该目录下的 `index.html`/`app.js`/`style.css`。
+3. 启动 `-serve` 时前端来源按 **优先级** 解析：`config.json` 的 `web.frontend_dir`（显式）> `~/.mizar/webui/` > 内嵌 embed。目录**存在且含 index.html** 才采纳，否则自动回退 embed（与旧版完全一致）。
+
+改文件**即时生效，无需重启服务**（每次请求走 `os.DirFS` 现读）。来源探测端点 `GET /web/api/frontend`（cookie 鉴权）：
+```json
+{"source":"dir","dir":"/opt/mizar-frontend","version":"v0.8.4"}
+```
+`source` 为 `embed` 时 `dir` 为空。
+
+> 外部目录缺 `index.html` 不会被采纳（防止拿错目录去服务）——必须 `mizar -webui-out` 释放一次或直接放全三件套。
 
 ---
 
@@ -348,6 +417,8 @@ POST   /v1/chat/completions            # stream=true 走 SSE
 
 # JSON-RPC 2.0（Bearer）
 POST   /rpc                            # agent.run/steer/abort/running, tools.list, system.ping, 插件自定义
+GET    /ext/                           # v0.8.4+ 插件 rpc_* REST 直达清单
+GET/POST /ext/<name>                   # v0.8.4+ 插件 rpc_<name> 直接调用
 
 # WebSocket（Bearer）
 GET    /ws                             # 事件流 + 异步 run + 实时 steer/abort
@@ -355,11 +426,13 @@ GET    /ws                             # 事件流 + 异步 run + 实时 steer/a
 # 管理（Bearer）
 GET    /admin/status
 POST   /admin/switch                   # {"service":"http|jsonrpc|ws","enabled":bool}
+GET    /admin/routes                   # v0.8.4+ 路由注册表（机器可读，含插件动态端点）
 
 # Web UI（Cookie 会话）
 GET    /                               # 302 → /web/
-GET    /web/                           # 界面（embed 内嵌，零外部依赖）
+GET    /web/                           # 界面（embed 内嵌，或外部目录，见 6.4）
 GET    /web/ws                         # 事件流（cookie 鉴权）
+GET    /web/api/frontend               # v0.8.4+ 前端来源探测（embed / dir）
 POST   /web/api/login
 POST   /web/api/logout
 GET    /web/api/me
@@ -377,4 +450,8 @@ GET    /web/api/models
 
 # stdio（非 HTTP）
 mizar --lsp-server                     # LSP server
+
+# 离线生成（无 HTTP 监听）
+mizar -gen-openapi                     # v0.8.4+ 路由注册表 → docs/openapi.json
+mizar -webui-out [dir]                # v0.8.4+ 释放内嵌前端到外部目录
 ```

@@ -397,10 +397,20 @@ HMEM 连接配置：环境变量 `MIZAR_HMEM_API_URL` / `MIZAR_HMEM_API_KEY` / `
 |---|---|---|
 | OpenAI 兼容 | `POST /v1/chat/completions` | 任意 OpenAI SDK 改 `base_url` 即可 |
 | JSON-RPC 2.0 | `POST /rpc` | `agent.run` / `agent.steer` / `agent.abort` / `tools.list` / `system.ping` |
+| 插件 REST | `GET/POST /ext/<name>` | 插件导出的 `rpc_<name>` 直接当 REST 调（Bearer） |
 | WebSocket | `GET /ws` | 实时事件流 + 中途快速纠正（steer） |
 | Web UI | `GET /web/` | 浏览器界面：多会话 / 模型切换 / 对话参数 / 流式输出 |
+| 路由清单 | `GET /admin/routes` | 机器可读端点总表（含插件动态端点） |
 
 > 📖 **完整 API 文档（所有端点、请求/响应、示例）：[`docs/api.md`](docs/api.md)**
+> 🧾 机器可读 schema：[`docs/openapi.json`](docs/openapi.json)（`mizar -gen-openapi` 生成）
+
+**自定义 Web UI 前端**（v0.8.4+，改前端不用重编译）：
+```bash
+mizar -webui-out -        # 释放前端到 ~/.mizar/webui/（index.html / app.js / style.css）
+# 编辑后直接 mizar -serve，外部目录优先于内嵌版本；改文件即时生效
+```
+详见 [`docs/api.md` 6.4 节](docs/api.md)。
 
 运行期动态开关服务：
 ```bash

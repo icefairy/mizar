@@ -46,6 +46,9 @@ func (a *Agent) Clone() *Agent {
 
 		// ---- 运行态：全新，不继承父实例 ----
 		Initial:        nil,
+		// ConvID 由调用方（server.agentPool）在克隆后立即赋值；
+		// 这里显式清空，避免从模板继承一个错误的会话归属。
+		ConvID:         "",
 		StatsData:      &StatsDataRef{},
 		callParser:     a.callParser,
 		Commands:       a.Commands, // 斜杠命令注册表只读，共享

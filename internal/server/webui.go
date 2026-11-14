@@ -38,6 +38,97 @@ type webUI struct {
 	store    *webStore
 }
 
+// frontendSource 前端资源的运行时来源（/web/api/frontend 探测端点用）。
+type frontendSource struct {
+	fs   fs.FS
+	kind string // "embed" | "dir"
+	dir  string // kind="dir" 时的目录，embed 时为空
+}
+
+// resolveFrontend 解析前端资源来源（P0 外部化）：
+// 显式 FrontendDir > ~/.mizar/webui/ > 内嵌 embed（fallback）。
+// 外部目录必须存在且含 index.html 才被采纳——否则回退 embed，行为与旧版一致。
+func (s *Server) resolveFrontend() frontendSource {
+	var candidates []string
+	if d := strings.TrimSpace(s.cfg.Web.FrontendDir); d != "" {
+		candidates = append(candidates, d)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".mizar", "webui"))
+	}
+	for _, d := range candidates {
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			continue
+		}
+		entries, err := os.ReadDir(abs)
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(abs, "index.html")); err != nil {
+			// 不是合法前端目录（缺 index.html）→ 跳过，不拿错目录去服务。
+			continue
+		}
+		s.logf("webui: 使用外部前端目录 %s（改动文件即时生效，无需重编译）", abs)
+		return frontendSource{fs: os.DirFS(abs), kind: "dir", dir: abs}
+	}
+	sub, err := fs.Sub(webuiFS, "webui")
+	if err != nil {
+		s.logf("webui embed 失败: %v", err)
+		return frontendSource{}
+	}
+	return frontendSource{fs: sub, kind: "embed"}
+}
+
+// handleWebFrontend GET /web/api/frontend → 前端资源来源探测。
+// 自定义前端时独立恢复 URL 用的判断点：source=dir 时改动落盘即生效。
+func (s *Server) handleWebFrontend(w http.ResponseWriter, r *http.Request) {
+	src := s.frontend
+	writeJSON(w, http.StatusOK, map[string]any{
+		"source":  src.kind,
+		"dir":     src.dir,
+		"version": s.cfg.Version,
+	})
+}
+
+// ReleaseFrontend 把内嵌前端（webui/）释放到目标目录，返回写出的文件数。
+// 供 `mizar -webui-out <dir>` 使用：用户拿到 index.html/app.js/style.css 后
+// 就地修改，-serve 启动时 FrontendDir/`~/.mizar/webui/` 命中即外部目录生效，
+// 不必为改一行前端重编译二进制。目标目录已存在的同名文件会被覆盖（幂等）。
+func ReleaseFrontend(dir string) (int, error) {
+	sub, err := fs.Sub(webuiFS, "webui")
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return 0, err
+	}
+	n := 0
+	err = fs.WalkDir(sub, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == "." {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := fs.ReadFile(sub, p)
+		if err != nil {
+			return err
+		}
+		rel := filepath.FromSlash(p)
+		dest := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dest, data, 0o644); err != nil {
+			return err
+		}
+		n++
+		return nil
+	})
+	return n, err
+}
+
 func newWebUI(storePath string) *webUI {
 	return &webUI{
 		sessions: map[string]webSession{},
@@ -111,13 +202,13 @@ func (s *Server) webRoutes() {
 	if !s.cfg.Web.Enabled {
 		return
 	}
-	// 静态资源（登录页本身不需要鉴权；数据接口才需要）
-	sub, err := fs.Sub(webuiFS, "webui")
-	if err != nil {
-		s.logf("webui embed 失败: %v", err)
+	// 静态资源（登录页本身不需要鉴权；数据接口才需要）。
+	// 前端来源在 New() 已解析：显式 FrontendDir > ~/.mizar/webui/ > 内嵌 embed。
+	if s.frontend.fs == nil {
+		s.logf("webui 前端资源不可用（embed 与外部目录均失败）")
 		return
 	}
-	fileServer := http.FileServer(http.FS(sub))
+	fileServer := http.FileServer(http.FS(s.frontend.fs))
 	s.mux.HandleFunc("/web/", func(w http.ResponseWriter, r *http.Request) {
 		// 去掉 "/web" 前缀（保留前导 /），让 FileServer 自己处理目录索引。
 		// 不能改写成 /index.html——那会触发 FileServer 的 canonical redirect 循环。
@@ -164,6 +255,8 @@ func (s *Server) webRoutes() {
 	s.mux.HandleFunc("/web/api/providers", s.webAuth(s.handleWebProviders))
 	// 状态栏统计（对齐 TUI 状态栏：tokens/上下文/缓存/速度）
 	s.mux.HandleFunc("/web/api/status", s.webAuth(s.handleWebStatus))
+	// 前端资源来源探测（embed / 外部目录）
+	s.mux.HandleFunc("/web/api/frontend", s.webAuth(s.handleWebFrontend))
 	// WebSocket（cookie 鉴权，复用广播 hub）
 	s.mux.HandleFunc("/web/ws", s.webAuth(s.handleWS))
 }
@@ -364,6 +457,13 @@ func (s *Server) handleWebChat(w http.ResponseWriter, r *http.Request) {
 	// 普通对话也记录归属会话，使流式事件带上 conversation_id（前端按会话过滤）
 	s.setRunConv(body.ConversationID)
 	defer s.setRunConv("")
+	// 纳入「正在运行的会话」集合：普通对话不开 Agent 循环，但同样有流式输出，
+	// 前端的会话切换/断线补齐判断依赖 runningConvs。不登记的话，A 会话跑普通对话、
+	// 用户切到 B 再切回 A 时会被判成「没在跑」，既不重放缓存也不补齐事件。
+	if body.ConversationID != "" {
+		s.markRunning(body.ConversationID, true)
+		defer s.markRunning(body.ConversationID, false)
+	}
 	if body.ConversationID != "" {
 		s.evt.reset(body.ConversationID)
 	}
@@ -551,10 +651,10 @@ func (s *Server) chatOnce(convID, msg string) (string, error) {
 		}
 		reply, err = sl.AIChatStream(req, func(d agent.StreamDelta) {
 			if d.Thinking != "" {
-				s.broadcastStream(0, d.Thinking, "thinking")
+				s.broadcastStreamFor(convID, 0, d.Thinking, "thinking")
 			}
 			if d.Content != "" {
-				s.broadcastStream(0, d.Content, "reply")
+				s.broadcastStreamFor(convID, 0, d.Content, "reply")
 			}
 		})
 	} else {
@@ -642,14 +742,15 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 			extr.Reset()
 			curStep = step
 		}
+		// 显式传本会话 id：不能用 s.RunConv()（多会话并发时会被别的会话覆盖）。
 		if d.Thinking != "" {
-			s.broadcastStream(step, d.Thinking, "thinking")
+			s.broadcastStreamFor(convID, step, d.Thinking, "thinking")
 		}
 		if d.Content == "" {
 			return
 		}
 		if inc := extr.Feed(d.Content); inc != "" {
-			s.broadcastStream(step, inc, "reply")
+			s.broadcastStreamFor(convID, step, inc, "reply")
 		}
 	}
 	defer func() { ag.OnLLMStream = nil }()

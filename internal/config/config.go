@@ -147,6 +147,9 @@ type WebConfig struct {
 	Enabled  bool   `json:"enabled"`            // 是否启用 Web UI（-serve 下默认启用）
 	Username string `json:"username,omitempty"` // 登录用户名（空=admin）
 	Password string `json:"password,omitempty"` // 登录密码（空=首次启动随机生成并写回配置）
+	// FrontendDir 自定义前端目录（P0 前端外部化）。
+	// 非空时优先服务该目录；目录缺 index.html 则回退 ~/.mizar/webui/，再回退内嵌 embed。
+	FrontendDir string `json:"frontend_dir,omitempty"`
 }
 
 // SkillInjectIsIndex 技能注入是否索引模式（默认 index；full = 全量正文）。

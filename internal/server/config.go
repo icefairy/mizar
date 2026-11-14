@@ -33,11 +33,16 @@ type Config struct {
 	MCPStats func() (configured, connected int)
 }
 
-// WebAuth Web UI 登录鉴权配置。
+// WebAuth Web UI 登录鉴权 + 前端资源配置。
 type WebAuth struct {
 	Enabled  bool   // 是否启用 Web UI（默认 true）
 	Username string // 登录用户名（空=admin）
 	Password string // 登录密码（空=不校验密码，仅本地开发用）
+	// FrontendDir 自定义前端目录（P0 前端外部化）。
+	// 优先级：显式配置 > ~/.mizar/webui/ > 二进制内嵌 embed（fallback）。
+	// 目录存在且非空时服务它——改 HTML/JS/CSS 不必重新编译二进制；
+	// 目录不存在或为空时自动回退 embed，行为与旧版完全一致。
+	FrontendDir string
 }
 
 // NewConfig 默认配置：三服务全开。

@@ -23,6 +23,8 @@ type Server struct {
 	wsUp    *wsUpgrader
 	hub     *hub
 	web     *webUI
+	// frontend 前端资源来源（P0 外部化：显式目录 > ~/.mizar/webui/ > embed）。
+	frontend frontendSource
 	// runMu 串行化 Agent.Run：Agent 实例内的 Initial / OnLLMStream / steer 槽位
 	// 都是共享可变状态，多个入口（/v1/chat/completions、/rpc、/web/api/run）
 	// 并发调用会互相覆盖。用 TryLock 而非 Lock——忙时立即返回 409，
@@ -280,6 +282,7 @@ func New(cfg *Config, a *agent.Agent, st *session.Store) *Server {
 	s.wsUp = newWSUpgrader(cfg.Token)
 	s.pool = newAgentPool(a)
 	s.maxConcurrentRuns = cfg.MaxConcurrentRuns
+	s.frontend = s.resolveFrontend()
 	s.routes()
 	s.attachHooks()
 	return s
@@ -292,11 +295,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/chat/completions", s.auth(s.handleChat))
 	// JSON-RPC 2.0
 	s.mux.HandleFunc("/rpc", s.auth(s.handleJSONRPC))
+	// 插件 RPC 的 REST 直达（/ext/<name>，Bearer 鉴权）
+	s.mux.HandleFunc("/ext/", s.auth(s.handleExtRPC))
 	// WebSocket
 	s.mux.HandleFunc("/ws", s.auth(s.handleWS))
 	// 管理：动态开关
 	s.mux.HandleFunc("/admin/status", s.auth(s.handleStatus))
 	s.mux.HandleFunc("/admin/switch", s.auth(s.handleSwitch))
+	s.mux.HandleFunc("/admin/routes", s.auth(s.handleRoutes))
 	// Web UI（浏览器界面 + cookie 登录）
 	s.webRoutes()
 }
@@ -356,18 +362,27 @@ func (s *Server) EmitToWS(event, dataJSON string) {
 	s.hub.broadcast(map[string]any{"type": "event", "event": event, "data": data})
 }
 
-// broadcastStream 广播流式增量（step + 可显示文本增量 + 是否思考过程）。
-// 事件携带当前运行的会话 id（conversation_id），前端按当前打开的会话过滤，
-// 避免切换会话期间旧运行的增量被渲染到新/别的会话窗口里。
-func (s *Server) broadcastStream(step int, delta, kind string) {
+// broadcastStreamFor 广播流式增量（step + 可显示文本增量 + 是否思考过程）。
+//
+// ⚠ convID 必须由调用方显式传入，**不能用 s.RunConv()**。
+// RunConv 是进程级单值，多会话并发时会被后开始的那一轮覆盖：A 会话正在输出、
+// 用户切到 B 发问，则 A 后续的每个增量都会被贴上 B 的 id —— 表现为
+// 「B 的响应全跑到 A 的对话框里，B 自己反而一直空白」。这是 2026-11-14 用户实测
+// 报告的问题，根因就在于这里读全局态。
+func (s *Server) broadcastStreamFor(convID string, step int, delta, kind string) {
 	// 正文增量同时写草稿：页面被系统杀掉/用户刷新时，重开还能看到已生成的进度。
 	if kind == "reply" {
-		s.draft.append(s.RunConv(), delta)
+		s.draft.append(convID, delta)
 	}
 	s.emit(map[string]any{
 		"type": "event", "event": "stream", "step": step, "delta": delta, "kind": kind,
-		"conversation_id": s.RunConv(),
+		"conversation_id": convID,
 	})
+}
+
+// broadcastStream 兼容旧调用路径（非 Web 入口只有单运行，RunConv 可信）。
+func (s *Server) broadcastStream(step int, delta, kind string) {
+	s.broadcastStreamFor(s.RunConv(), step, delta, kind)
 }
 
 // ============================================================================

@@ -197,17 +197,22 @@ func (s *Server) attachHooks() {
 		s.agent.Hooks = agent.NewHooks()
 	}
 	h := s.agent.Hooks
-	// 事件携带 conversation_id（当前运行的 Web 会话）：前端据此过滤，避免串台。
+	// 事件携带 conversation_id：前端据此过滤，避免串台。
+	//
+	// ⚠ 必须用 ctx.SessionID（每个 Agent 实例自己的归属），不能用 s.RunConv()。
+	// RunConv 是进程级单值，多会话并发时被「最后开始的那一轮」覆盖：A 在输出时
+	// 用户切到 B 发问，则 A 后续的工具事件会被贴上 B 的 id，前端就把 A 的过程
+	// 渲染进 B 的窗口，而 B 自己一片空白。（2026-11-14 用户实测问题）
 	h.OnLLMResponse(func(ctx *agent.HookContext) error {
-		s.emit(map[string]any{"type": "event", "event": "llm_response", "step": ctx.Step, "content": ctx.Reply, "conversation_id": s.RunConv()})
+		s.emit(map[string]any{"type": "event", "event": "llm_response", "step": ctx.Step, "content": ctx.Reply, "conversation_id": s.convOfHook(ctx)})
 		return nil
 	})
 	h.OnToolCall(func(ctx *agent.HookContext) error {
-		s.emit(map[string]any{"type": "event", "event": "tool_call", "step": ctx.Step, "tool": ctx.Tool, "args": ctx.Args, "conversation_id": s.RunConv()})
+		s.emit(map[string]any{"type": "event", "event": "tool_call", "step": ctx.Step, "tool": ctx.Tool, "args": ctx.Args, "conversation_id": s.convOfHook(ctx)})
 		return nil
 	})
 	h.OnToolResult(func(ctx *agent.HookContext) error {
-		s.emit(map[string]any{"type": "event", "event": "tool_result", "step": ctx.Step, "tool": ctx.Tool, "result": ctx.Result, "conversation_id": s.RunConv()})
+		s.emit(map[string]any{"type": "event", "event": "tool_result", "step": ctx.Step, "tool": ctx.Tool, "result": ctx.Result, "conversation_id": s.convOfHook(ctx)})
 		return nil
 	})
 }
@@ -294,4 +299,17 @@ func isPingFrame(data []byte) bool {
 		return false
 	}
 	return m.Type == "ping"
+}
+
+// convOfHook 从钩子上下文取本次事件的会话归属。
+//
+// 优先用 HookContext.SessionID（每个会话的 Agent 实例独立持有）；
+// 为空时退回全局 RunConv()——非 Web 入口（/v1、/rpc、TUI）没有会话概念，
+// 老调用路径也只设 runConv，这条兜底保证它们行为不变。
+func (s *Server) convOfHook(ctx *agent.HookContext) string {
+	if ctx != nil && ctx.SessionID != "" {
+		return ctx.SessionID
+	}
+	// 退回全局：非 Web 入口（/v1、/rpc、TUI）只有单运行，RunConv 可信。
+	return s.RunConv()
 }

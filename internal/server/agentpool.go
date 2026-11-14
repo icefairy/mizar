@@ -47,6 +47,10 @@ func (p *agentPool) forConv(convID string) *agent.Agent {
 		return a
 	}
 	a := p.template.Clone()
+	// 写入会话归属：Hooks 是进程级共享的，钩子只能从 HookContext.SessionID
+	// 得知「这次事件属于哪个会话」。不设这一项，多会话并发时事件会带错 id，
+	// 前端就把 A 的输出渲染进 B 的窗口（2026-11-14 用户实测问题）。
+	a.ConvID = convID
 	p.byConv[convID] = a
 	return a
 }

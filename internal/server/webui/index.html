@@ -55,12 +55,18 @@
     </header>
 
     <main id="log" class="log"></main>
+    <!-- 回到底部：用户上翻看历史时浮出，点它恢复「跟随最新输出」 -->
+    <button id="jumpBottom" class="jump-bottom hidden" type="button">↓ 回到底部</button>
 
     <!-- 排队/已发送纠正的可见队列：等待期间用户发的消息不再「消失」。
          打断模式显示「已注入当前任务」，排队模式显示「等待本轮结束后发送」。 -->
     <div id="queueBar" class="queue-bar hidden"></div>
 
-    <footer class="composer">
+    <footer class="composer" id="composer">
+      <!-- 折叠把手：默认收起（只留一行输入），点一下展开状态栏+快捷参数 -->
+      <button id="composerToggle" class="composer-toggle" type="button" title="展开/收起输入区">
+        <span class="chev">▲</span><span id="composerToggleLabel">展开参数</span>
+      </button>
       <!-- 状态栏（对齐 TUI 状态栏：tokens / 上下文 / 缓存 / 速度 / 模型 / 思考） -->
       <div id="statusbar" class="statusbar"></div>
       <!-- 快捷参数行：模型 + 思考等级 -->
@@ -82,7 +88,7 @@
         <span id="quickMsg" class="quick-msg"></span>
       </div>
       <div class="input-row">
-        <textarea id="input" rows="5" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
+        <textarea id="input" rows="2" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
         <div class="send-col">
           <label id="queueToggle" class="qtoggle" title="默认打断模式：等待期间发送的消息会注入当前循环纠正它。取消勾选→排队模式：消息排队到本轮结束后再发送。">
             <input id="queueMode" type="checkbox" spellcheck="false">

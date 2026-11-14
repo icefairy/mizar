@@ -116,6 +116,11 @@ type Agent struct {
 	PluginDir    string            // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
 	WorkDir      string            // 当前工作目录，注入系统提示供模型锚定搜索范围
 	Initial      []Message         // 会话恢复时的历史消息（置于 task 之前）
+	// ConvID 本实例服务的 Web 会话 id（非 Web 入口为空）。
+	// 为什么要放在 Agent 上：Hooks 是进程级共享的，多个会话并发运行时
+	// 钩子无法从 Server 的全局状态里判断「这次工具调用属于哪个会话」，
+	// 只能由每个 Agent 实例携带自己的归属 id，随 HookContext.SessionID 传下去。
+	ConvID       string
 	MaxSteps     int               // 最大循环步数（默认 maxStepsDefault=60）
 	VerboseLog   func(string)      // 可选日志回调
 	Compactor    *Compactor        // 会话压缩器（nil = 不压缩）
@@ -591,6 +596,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 	q := lifecycle.NewQuery("cli")
 	runCtx := &HookContext{
 		RunID:     string(q.QueryID()),
+		SessionID: a.ConvID,
 		Task:      task,
 		AgentName: "mizar",
 	}
@@ -625,7 +631,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 	for unlimited || step < a.MaxSteps {
 		q.BeginStep()
 		qc = q.Context()
-		stepCtx := &HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}
+		stepCtx := &HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}
 		// StepStart 挂载点（🟡 中等：可读，不建议改 Messages）
 		a.Hooks.fireStepStart(stepCtx, a.logf)
 
@@ -655,7 +661,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 		if a.Aborted() {
 			diag.Logf("agent", "abort 检查点命中（循环头）step=%d", qc.Step)
 			q.Complete(errors.New("aborted by user"))
-			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
 			return "", ErrAborted
 		}
 
@@ -664,7 +670,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			est := EstimateMessages(msgs)
 			if a.Compactor.ShouldCompact(est) {
 				a.log("%s", q.FormatLog("compact", "est=", fmt.Sprintf("%d", est), " step=", fmt.Sprintf("%d", qc.Step)))
-				a.Hooks.fireCompactionBefore(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, EstTokens: est, Messages: msgs}, a.logf)
+				a.Hooks.fireCompactionBefore(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, EstTokens: est, Messages: msgs}, a.logf)
 				// 先算切点（纯函数，与 Compact 内部一致），供落盘记录保留边界。
 				cut := a.Compactor.FindCutPoint(msgs)
 				// 只有切点有效时才算真正压缩；否则 Compact 原样返回，
@@ -696,13 +702,13 @@ func (a *Agent) Run(task string) (reply string, err error) {
 						}
 					}
 				}
-				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Compacted: compacted, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
+				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Compacted: compacted, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
 			}
 		}
 
 		// LLMRequest 挂载点（🔴 严重）
 		q.BeginOperation("llm")
-		llmCtx := &HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}
+		llmCtx := &HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}
 		a.Hooks.fireLLMRequest(llmCtx, a.logf)
 		msgs = llmCtx.Messages
 
@@ -758,7 +764,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			// 不走重试/压缩/弱模型宽容（否则 abort 后可能因重试继续空转）。
 			if a.Aborted() {
 				q.Complete(errors.New("aborted by user"))
-				a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
+				a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
 				return "", ErrAborted
 			}
 			// Context overflow：不走重试，直接强制压缩后继续。
@@ -822,7 +828,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 					a.Tuner.LLMSucceeded() // 重置计数器（不算失败）
 				}
 				q.Complete(llmErr)
-				a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: llmErr}, a.logf)
+				a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Err: llmErr}, a.logf)
 				return "", fmt.Errorf("llm chat: %w", llmErr)
 			}
 			if a.Tuner != nil {
@@ -833,13 +839,13 @@ func (a *Agent) Run(task string) (reply string, err error) {
 				}
 			}
 			q.Complete(llmErr)
-			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: llmErr}, a.logf)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Err: llmErr}, a.logf)
 			return "", fmt.Errorf("llm chat: %w", llmErr)
 		}
 		if a.Tuner != nil {
 			a.Tuner.LLMSucceeded()
 		}
-		a.Hooks.fireLLMResponse(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: reply}, a.logf)
+		a.Hooks.fireLLMResponse(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: reply}, a.logf)
 		a.log("%s", q.FormatLog("model_reply", "step=", fmt.Sprintf("%d", qc.Step), " len=", fmt.Sprintf("%d", len(reply))))
 
 		req, err := a.callParser(reply)
@@ -848,15 +854,15 @@ func (a *Agent) Run(task string) (reply string, err error) {
 				if escalated, msg := a.Tuner.ParseFailed(qc.Step); escalated {
 					msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 					msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 					step++
 					continue
 				}
 			}
-			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: fmt.Errorf("parse: %w", err)}, a.logf)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Err: fmt.Errorf("parse: %w", err)}, a.logf)
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: "解析你的回复失败：" + err.Error() + "。请严格按格式输出 JSON。"})
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			step++
 			continue
 		}
@@ -869,7 +875,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 		if a.Aborted() {
 			diag.Logf("agent", "abort 检查点命中（解析后）step=%d", qc.Step)
 			q.Complete(errors.New("aborted by user"))
-			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
+			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Err: errors.New("aborted by user")}, a.logf)
 			return "", ErrAborted
 		}
 
@@ -883,7 +889,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 					a.log("%s", q.FormatLog("completeness_nudge", "step=", fmt.Sprintf("%d", qc.Step)))
 					msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 					msgs = append(msgs, Message{Role: RoleUser, Content: nudge})
-					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 					step++
 					continue
 				}
@@ -892,8 +898,8 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			// 语气自然但断在中间的回答。必须在收尾前把事实报出去（日志 + 回调）。
 			a.notifyTruncated(qc.Step)
 			q.Complete(nil)
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
-			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: req.Text}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
+			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: req.Text}, a.logf)
 			return req.Text, nil
 		}
 
@@ -926,7 +932,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 		}
 		if terminated {
 			// 终止型工具已给出最终回答，跳过后续 judge/review
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			return lastToolOutput(msgs), nil
 		}
 		if len(calls) == 0 {
@@ -946,7 +952,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 				msgs = append(msgs, Message{Role: RoleUser, Content: continuationPrompt})
 				a.log("%s", q.FormatLog("goal_continue", "step=", fmt.Sprintf("%d", qc.Step)))
 				step++
-				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 				continue
 			}
 		}
@@ -956,7 +962,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			a.BgReview.Advance(reply, msgs)
 		}
 
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		step++
 	}
 	stepExceededErr := fmt.Errorf("%w（已用满 %d 步）。可调大上限: 输入 /config max_steps 60 立即生效并持久化，或在 ~/.mizar/config.json 设置 \"max_steps\" 字段", ErrMaxSteps, a.MaxSteps)
@@ -1003,7 +1009,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 	}
 
 	q.BeginOperation("tool:" + c.Tool)
-	a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}, a.logf)
+	a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}, a.logf)
 
 	// 空工具名兜底（规避 `tool "" not found`）：模型在某些形态下丢了 tool 字段，
 	// 但 args 里带了 bash 的 command 参数——此时猜为 bash 工具。
@@ -1023,7 +1029,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		msg := fmt.Sprintf("⚠️ 第 %d/%d 个工具调用缺少工具名（tool 字段为空）。请重新调用并填入正确的工具名，例如：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{...}\"}。可用工具见系统提示。", idx+1, total)
 		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 	}
 
@@ -1041,7 +1047,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			// 非法序列，上游报 400「tool calls and tool results do not match」（2026-10-16 实测）。
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 		}
 		// 更新 forcedToolCalls 计数器：模型调了 respond 也算调工具（重置计数器）
@@ -1049,8 +1055,8 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			tllm.updateForcedToolCalls(true)
 		}
 		q.Complete(nil)
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text, Messages: msgs}, a.logf)
-		a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Reply: text}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: text, Messages: msgs}, a.logf)
+		a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: text}, a.logf)
 		return callDirective{Msgs: msgs, Reply: text, Control: controlReturn}, false, nil
 	}
 
@@ -1063,7 +1069,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		// 孤儿 tool_calls → 上游 400（详见上方注释）。
 		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 	}
 
@@ -1077,7 +1083,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 	tr := ToolResult{ToolName: c.Tool, Args: c.Args, Output: out}
 	if err != nil {
 		tr.Error = err.Error()
-		a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Err: err}, a.logf)
+		a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Err: err}, a.logf)
 	}
 	b, _ := json.Marshal(tr)
 
@@ -1091,7 +1097,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			})
 			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
 			msgs = append(msgs, Message{Role: RoleUser, Content: reminder + "\n⚠️ 任务因重复工具调用已终止。"})
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			return callDirective{}, false, fmt.Errorf("%w: tool=%s 连续重复 %d 次，任务终止", errors.New("loop guard terminated"), c.Tool, a.Guard.MaxObserved())
 		} else if reminder != "" {
 			// 渐进提醒，注入为追加用户消息（紧接工具结果之后，模型可据此改参数或停手）
@@ -1103,7 +1109,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
 			msgs = append(msgs, Message{Role: RoleUser, Content: reminder})
 			a.log("%s", q.FormatLog("guard_reminder", "step=", fmt.Sprintf("%d", qc.Step), "tool=", c.Tool, "cnt=", fmt.Sprintf("%d", a.Guard.Count())))
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 		}
 	}
@@ -1116,7 +1122,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult,
 		ToolCallID: callID,
 	})
-	a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
+	a.Hooks.fireToolResult(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Result: string(b), Err: err, Messages: msgs}, a.logf)
 
 	// 终止型工具（对齐 pi 0.69.0 `terminate: true`）：执行成功且工具声明 Terminate 时，
 	// 直接以工具输出作为最终回答，省掉一次 follow-up LLM 调用（延迟 + 成本）。

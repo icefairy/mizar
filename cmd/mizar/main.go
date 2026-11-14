@@ -39,7 +39,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.8.3"
+var version = "v0.8.4"
 
 // buildTag 标识 Windows 产物用的是哪条构建链，由 -ldflags -X main.buildTag=... 注入。
 //
@@ -173,7 +173,12 @@ func main() {
 		// 宿主函数文档生成
 		genDoc    = flag.Bool("plugin-doc", false, "生成宿主函数文档（精简清单 + doc_get 指引）")
 		genDocOut = flag.String("plugin-doc-out", "docs/host-funcs.md", "文档输出路径")
-		noAssets  = flag.Bool("no-assets", false, "不释放内置插件/技能（默认首次运行自动释放到 ~/.mizar）")
+		// OpenAPI 生成（路由注册表 → docs/openapi.json + 路由 markdown 表）
+		genOpenAPI = flag.Bool("gen-openapi", false, "从路由注册表生成 OpenAPI JSON（docs/openapi.json）")
+		genOpenOut = flag.String("gen-openapi-out", "docs/openapi.json", "OpenAPI 输出路径")
+		// 前端外部化助手：把内嵌前端释放到目录，改完 -serve 时外部目录生效
+		webuiOut = flag.String("webui-out", "", "把内嵌 Web UI 前端释放到该目录（默认 ~/.mizar/webui/，改完无需重编译）")
+		noAssets   = flag.Bool("no-assets", false, "不释放内置插件/技能（默认首次运行自动释放到 ~/.mizar）")
 	)
 	// 兼容别名：-server → -serve（Go flag 无别名机制，解析前替换）
 	// 避免用户拼写 -server 时直接 flag 报错
@@ -234,6 +239,40 @@ func main() {
 			log.Fatalf("plugin-doc: %v", err)
 		}
 		fmt.Printf("宿主函数文档已生成: %s（%d 函数, %d 字符）\n", out, len(engine.HostDocList()), len(md))
+		return
+	}
+
+	// 从路由注册表生成 OpenAPI JSON（-gen-openapi）。
+	if *genOpenAPI {
+		out := *genOpenOut
+		jsonStr, err := server.OpenAPIFromTable(versionString())
+		if err != nil {
+			log.Fatalf("gen-openapi: %v", err)
+		}
+		if dir := filepath.Dir(out); dir != "." {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+		if err := os.WriteFile(out, []byte(jsonStr+"\n"), 0o644); err != nil {
+			log.Fatalf("gen-openapi: %v", err)
+		}
+		fmt.Printf("OpenAPI 已生成: %s（路由数 %d）\n", out, len(server.PublicRoutes()))
+		return
+	}
+
+	// 释放内嵌前端到外部目录（-webui-out <dir>），改完 -serve 即生效无需重编译。
+	// 传 "-" 等价于默认目录 ~/.mizar/webui/。
+	if *webuiOut != "" {
+		dir := *webuiOut
+		if dir == "-" {
+			if home, err := os.UserHomeDir(); err == nil {
+				dir = filepath.Join(home, ".mizar", "webui")
+			}
+		}
+		n, err := server.ReleaseFrontend(dir)
+		if err != nil {
+			log.Fatalf("webui-out: %v", err)
+		}
+		fmt.Printf("前端已释放到 %s（%d 文件）。-serve 时若该目录含 index.html 即优先服务它。\n", dir, n)
 		return
 	}
 
@@ -1885,7 +1924,7 @@ func main() {
 				log.Printf("Web UI 首次启动：已生成登录密码并写入 %s", config.DefaultPath())
 			}
 		}
-		cfg.Web = server.WebAuth{Enabled: true, Username: webCfg.Username, Password: webCfg.Password}
+		cfg.Web = server.WebAuth{Enabled: true, Username: webCfg.Username, Password: webCfg.Password, FrontendDir: webCfg.FrontendDir}
 		srv := server.New(cfg, a, st)
 		// Web 问答通道：把 ask_user_question / exit_plan_mode 的阻塞回调
 		// 接到 WebUI 弹窗（之前 Server 模式这两个工具只能降级为「请自行决策」）。

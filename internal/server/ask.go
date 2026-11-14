@@ -85,6 +85,26 @@ func (b *askBroker) nextID() string {
 	return fmt.Sprintf("ask-%d-%d", time.Now().UnixNano(), n)
 }
 
+// askConvID 推断「这次提问属于哪个会话」。
+//
+// 工具回调（builtins.agentAskUser）是全局函数，签名里没有会话信息，因此这里
+// 只能保守推断：**恰好一个会话在跑**时归属明确；多个会话并发在跑时无法判断，
+// 返回空串（前端对空串不做会话过滤，哪个窗口当前打开就弹在哪个窗口）。
+//
+// 为什么不直接用 s.RunConv()：它是进程级单值，多会话并发时被最后开始的那轮覆盖，
+// 用它会把这个会话的问题弹到另一个会话的窗口里——而用户可能正在另一个窗口看内容。
+func (s *Server) askConvID() string {
+	ids := s.runningConvsSnapshot()
+	if len(ids) == 1 {
+		return ids[0]
+	}
+	if len(ids) == 0 {
+		// 非 Web 入口 / 老调用路径只设 runConv 不设集合。
+		return s.RunConv()
+	}
+	return ""
+}
+
 // AskUser 由 ask_user_question / exit_plan_mode 工具调用：广播问题、阻塞等待作答。
 //
 // 返回值是 answers JSON（[]builtins.Answer 序列化），与 TUI 的 askViaChat 同格式，
@@ -103,7 +123,7 @@ func (s *Server) AskUser(questionsJSON string) (string, error) {
 	id := s.ask.nextID()
 	p := &pendingAsk{
 		id:        id,
-		convID:    s.RunConv(),
+		convID:    s.askConvID(),
 		questions: q,
 		answerCh:  make(chan string, 1),
 		created:   time.Now(),
@@ -136,7 +156,13 @@ func (s *Server) AskUser(questionsJSON string) (string, error) {
 			s.logf("web ask_user 已作答: id=%s", id)
 			return ans, nil
 		case <-ticker.C:
-			if s.agent.Aborted() {
+			// 按会话取 Agent 判断中止：多会话并发时用户停的可能不是这个会话，
+			// 用全局 s.agent.Aborted() 会把别的会话的停止误当成本题被取消。
+			ag := s.agentFor(p.convID)
+			if ag == nil {
+				ag = s.agent
+			}
+			if ag != nil && ag.Aborted() {
 				s.logf("web ask_user 任务被取消: id=%s", id)
 				return "[]", nil
 			}

@@ -1,0 +1,313 @@
+{
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "cookieAuth": {
+        "in": "cookie",
+        "name": "mizar_web_session",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "生成自路由注册表，非手写；运行时全量清单（含插件 rpc_*）见 GET /admin/routes。",
+    "title": "Mizar (开阳) Server API",
+    "version": "v0.8.3"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "根路径 → 302 到 /web/"
+      }
+    },
+    "/admin/routes": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "本路由表（机器可读，含插件 rpc_* 动态端点）"
+      }
+    },
+    "/admin/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "服务状态 + 开关 + 运行时统计"
+      }
+    },
+    "/admin/switch": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "运行时开关各服务（http/rpc/ws）"
+      }
+    },
+    "/rpc": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "JSON-RPC 2.0：agent.run/steer/abort/running、tools.list、system.ping、插件 rpc_*"
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "对话补全（OpenAI 兼容，流式/非流式）"
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "模型清单（OpenAI 兼容）"
+      }
+    },
+    "/web/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Web UI 前端（embed 或外部目录，见 /web/api/frontend）"
+      }
+    },
+    "/web/api/abort": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "中止当前会话运行，清空待消费 steer"
+      }
+    },
+    "/web/api/answer": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "ask_user_question 作答"
+      }
+    },
+    "/web/api/ask": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "恢复未答问题（刷新页面后重弹）"
+      }
+    },
+    "/web/api/chat": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "普通对话（直连 LLM，无工具循环；斜杠命令在此拦截）"
+      }
+    },
+    "/web/api/conversation": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "单会话详情 / 重命名（?id=）"
+      }
+    },
+    "/web/api/conversations": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "会话列表 / 新建 / 删除"
+      }
+    },
+    "/web/api/draft": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "运行中草稿（页面被杀/刷新后恢复进度）"
+      }
+    },
+    "/web/api/events": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "事件回放（?conversation_id=\u0026after=\u003cseq\u003e，断线补齐）"
+      }
+    },
+    "/web/api/frontend": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "前端资源来源探测（embed / 外部目录 + 路径）"
+      }
+    },
+    "/web/api/login": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "登录，下发会话 cookie"
+      }
+    },
+    "/web/api/logout": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "登出，注销会话 cookie"
+      }
+    },
+    "/web/api/me": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "当前身份 + 模型 + 设置"
+      }
+    },
+    "/web/api/models": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "可用模型清单（拉自当前供应商）"
+      }
+    },
+    "/web/api/providers": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "供应商收藏夹管理"
+      }
+    },
+    "/web/api/run": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Agent 模式（完整工具循环；同会话忙时 409）"
+      }
+    },
+    "/web/api/settings": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "设置读写（模型/温度/top_p/max_tokens/思考等级/系统提示词）"
+      }
+    },
+    "/web/api/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "状态栏统计（tokens/上下文/缓存/速度）"
+      }
+    },
+    "/web/api/steer": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "纠正消息：运行中注入，空闲时排队"
+      }
+    },
+    "/web/api/version": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "版本号（登录页展示用，无需鉴权）"
+      }
+    },
+    "/web/ws": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Web UI WebSocket（cookie 鉴权，复用广播 hub）"
+      }
+    },
+    "/ws": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "WebSocket 实时事件流 + 中途纠正"
+      }
+    }
+  }
+}

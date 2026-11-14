@@ -14,6 +14,8 @@
   const qkModel = $("qkModel"), qkThinking = $("qkThinking"), quickMsg = $("quickMsg");
   const brandVer = $("brandVer"), statusbar = $("statusbar"), queueMode = $("queueMode"), queueLabel = $("queueLabel");
   const queueBar = $("queueBar");
+  const jumpBottom = $("jumpBottom"), composerEl = $("composer"), composerToggle = $("composerToggle"),
+    composerToggleLabel = $("composerToggleLabel");
   const providerSelect = $("providerSelect"), providerUse = $("providerUse"), providerDel = $("providerDel");
   const providerCurrent = $("providerCurrent"), providerHint = $("providerHint"), providerAdd = $("providerAdd");
   const pvName = $("pvName"), pvURL = $("pvURL"), pvKey = $("pvKey"), pvModel = $("pvModel");
@@ -22,6 +24,11 @@
   // busyConv：当前正在跑一轮的会话 id（null=空闲）。用它代替全局 busy，
   // 这样切换到别的会话时不会「假忙碌」，也避免不同会话的流式增量互相串台。
   let busyConv = null;
+  // busyConvs：本标签页发起的运行集合（多会话并发）。
+  // busyConv 是单值，两个会话同时跑时会被后发的覆盖 —— 用它判断「本会话是否在跑」
+  // 会把仍在跑的另一个会话漏掉（表现为切回去一片空白、也看不到输出）。
+  // 服务端 running_convs 是真值，但状态轮询有 0.7~1.5s 延迟，本地集合补这个窗口。
+  const busyConvs = new Set();
   // runningConv：服务端「当前正在运行」的会话 id（来自 /web/api/status）。
   // Agent 是单实例，全局只有一个循环在跑；用它区分「哪个会话占着循环」，
   // 这样在 B 会话发送时能明确提示「A 会话正在运行」，而不是莫名其妙排队。
@@ -32,9 +39,12 @@
   // isConvRunningHere 该会话此刻是否真的在跑。
   // 优先看集合（服务端真值），集合为空时退回 busyConv/runningConv 兼容老服务端。
   function isConvRunningHere(convId) {
+    // 本地集合与服务端集合取并集：任意一侧认为在跑就算在跑。
+    // 取并集而不是"服务端优先"：服务端轮询有延迟，刚发起的这一轮在服务端还没置位，
+    // 此时若只看服务端会判成"没在跑"→ 不重放缓存 → 用户看到的是空白。
+    if (busyConvs.has(convId)) return true;
     if (runningConvs.size > 0) return runningConvs.has(convId);
-    return (runningConv !== null && runningConv === convId) ||
-           (busyConv !== null && busyConv === convId && runningConv === null);
+    return (runningConv !== null && runningConv === convId);
   }
   // evtLog：按会话缓存运行中事件。切走期间 A 会话持续输出，前端仍会收 WS 事件
   // （只是不渲染到 DOM），先缓存起来；切回 A 时重放，避免「切走期间的内容丢失」。
@@ -346,7 +356,40 @@
     return turnEl;
   }
   function turnHost() { return turnEl || log; }
-  function scrollLog() { log.scrollTop = log.scrollHeight; }
+  // ---------- 滚动跟随（用户上翻后必须放弃自动滚底） ----------
+  // 旧实现无条件 scrollTop = scrollHeight：输出期间用户往上翻看历史，
+  // 每一个流式增量都会把他拽回底部——根本没法读之前的内容。
+  // 现在改成「粘底」语义：只有用户本来就贴着底部时，才继续跟随；
+  // 一旦检测到用户主动上翻（离底部超过阈值），立刻放弃跟随，
+  // 直到他自己回到底部或点「↓ 回到底部」按钮。
+  let stickBottom = true;       // 是否跟随最新输出
+  const STICK_THRESHOLD = 48;   // 离底部多少 px 以内算「贴着底部」
+
+  function nearBottom() {
+    return (log.scrollHeight - log.scrollTop - log.clientHeight) <= STICK_THRESHOLD;
+  }
+  // 用 scroll 事件（含用户滚动、键盘、程序滚动）同步真实意图。
+  // 只信事件而不是「滚动后再校验一次」：程序滚到底触发的事件也会进来，
+  // 那时 nearBottom() 为真，正好把 stickBottom 重新置真，自洽。
+  log.addEventListener("scroll", () => {
+    stickBottom = nearBottom();
+    updateJumpBtn();
+  }, { passive: true });
+  function updateJumpBtn() {
+    if (!jumpBottom) return;
+    jumpBottom.classList.toggle("hidden", stickBottom);
+  }
+  function scrollLog() {
+    if (!stickBottom) { updateJumpBtn(); return; }
+    log.scrollTop = log.scrollHeight;
+    updateJumpBtn();
+  }
+  // 强制滚到底并恢复跟随（发送新消息、点「回到底部」时用）
+  function scrollLogForce() {
+    stickBottom = true;
+    log.scrollTop = log.scrollHeight;
+    updateJumpBtn();
+  }
   // 消息时间：RFC3339 → HH:MM（跨天带日期），解析失败则原样展示
   function fmtTs(ts) {
     if (!ts) return "";
@@ -556,7 +599,7 @@
     restorePendingAsks();
     // 中止按钮只反映「当前会话是否正在运行」，切到别的会话时隐藏，避免误以为卡住；
     // busyConv（本标签页发起的运行）或 runningConv（服务端正在跑且属于本会话）都算。
-    abortBtn.classList.toggle("hidden", !(busyConv === id || runningConv === id));
+    abortBtn.classList.toggle("hidden", !isConvRunningHere(id));
     try {
       const j = await api("/web/api/conversation?id=" + encodeURIComponent(id));
       const c = j.conversation;
@@ -587,12 +630,16 @@
         }
       });
       finalizeTurn();
+      scrollLogForce();   // 切会话总是从最新处开始看
       setMode(c.mode === "agent" ? "agent" : "chat");
       applyBrowserTitle();
       // 切回本会话：如果该会话仍在后台运行（本标签页发起 busyConv，或服务端正在跑
       // 该会话 runningConv——可能来自别的标签页），把切走期间缓存的事件重放到界面，
       // 否则用户会看到「切回来要等一会才有新内容 / 中间内容缺失」。
-      const liveHere = (busyConv === id || runningConv === id);
+      // 用集合判断（isConvRunningHere）：busyConv/runningConv 都是单值，
+      // 多会话并发时会被最后一个会话覆盖，导致切回另一个仍在跑的会话时
+      // 判定为「没在跑」→ 不重放缓存也不补齐，表现为「切回来一直空白」。
+      const liveHere = isConvRunningHere(id);
       if (liveHere) {
         newTurn();
         replayEvtLog(id);
@@ -978,23 +1025,37 @@
   async function reconcileBusy() {
     try {
       const j = await api("/web/api/status" + (curConv ? "?id=" + encodeURIComponent(curConv) : ""));
-      const srvRunning = !!(j && j.running);
+      const srvList = (j && Array.isArray(j.running_convs)) ? j.running_convs : null;
+      const srvSet = srvList ? new Set(srvList) : new Set(j && j.running ? [(j.running_conv || "")] : []);
       const srvConv = (j && j.running_conv) || "";
-      runningConv = srvRunning ? srvConv : null;
-      if (busyConv && (!srvRunning || (srvConv && srvConv !== busyConv))) {
-        // 本标签页以为在跑，其实服务端早已结束（或已换会话跑）：收尾
-        const was = busyConv;
-        busyConv = null;
+      runningConvs = new Set(srvSet);
+      runningConv = srvSet.size > 0 ? srvConv : null;
+      // 逐会话校正：本标签页以为在跑、服务端却没有 → 收尾那一个会话。
+      // 不能像以前那样用单值 busyConv 一刀切：多会话并发时会把仍在跑的
+      // 另一个会话误清掉（切回去一片空白，且排队消息提前补发）。
+      let fixed = false;
+      busyConvs.forEach((was) => {
+        if (srvSet.has(was)) return;
+        busyConvs.delete(was);
+        if (busyConv === was) busyConv = null;
         evtLog[was] = [];
-        abortBtn.classList.add("hidden");
-        if (was === curConv) await selectConv(curConv);
-        drainPending();
-      } else if (busyConv && srvRunning) {
-        // 服务端仍在跑本会话，只是本页漏了事件：确保有承接容器
-        if (busyConv === curConv && !turnEl) newTurn();
-      }
+        fixed = true;
+        if (was === curConv) {
+          // 该会话服务端已结束：重载历史拿到最终答复
+          loadConvQuietly(was);
+        }
+      });
+      abortBtn.classList.toggle("hidden", !isConvRunningHere(curConv));
+      // 服务端仍在跑本会话、只是本页漏了事件：确保有承接容器
+      if (isConvRunningHere(curConv) && !turnEl) newTurn();
+      if (fixed) drainPending();
       renderQueueBar();
     } catch (e) {}
+  }
+  // loadConvQuietly 重载某会话历史但不强制滚到底（用户可能正在上翻读历史）。
+  async function loadConvQuietly(id) {
+    const keepStick = stickBottom;
+    try { await selectConv(id); } finally { stickBottom = keepStick; updateJumpBtn(); }
   }
   // syncCurrentConv 后台期间会话可能已被跑完（本标签页或其他设备/标签页）：
   // 最终答复只落在服务端历史里，没有对应「事件」可重放。这里比对消息条数，
@@ -1002,7 +1063,7 @@
   let syncing = false;
   async function syncCurrentConv() {
     if (syncing || !curConv) return;
-    if (busyConv === curConv) return;   // 本轮还在本页跑，不打断
+    if (isConvRunningHere(curConv)) return;   // 本轮还在跑，不打断
     syncing = true;
     try {
       const j = await api("/web/api/conversations");
@@ -1414,8 +1475,10 @@
     const myConv = curConv;
     newTurn();
     addUserMsg(text);
+    scrollLogForce();   // 用户刚发消息：无论之前翻到哪儿，都要看到这条与后续回答
     evtLog[myConv] = [];   // 新一轮开始：清掉上一轮缓存的增量事件
     busyConv = myConv;
+    busyConvs.add(myConv);
     // 注意：不禁用发送按钮——等待期间用户可继续发送消息（打断/排队）。
     abortBtn.classList.remove("hidden");
     const item = convs.find((c) => c.id === myConv);
@@ -1466,10 +1529,12 @@
   function finish(myConv) {
     if (curConv === myConv) finalizeTurn();
     // 只清本次自己那一轮的标记：多会话并发时别把别的会话的状态一起清掉
+    busyConvs.delete(myConv);
     if (busyConv === myConv) busyConv = null;
     runningConvs.delete(myConv);
     evtLog[myConv] = [];   // 本轮已结束，增量事件已并入最终答复，清空缓存避免重复渲染
-    abortBtn.classList.add("hidden");
+    // 只有当前会话确实没在跑时才隐藏中止按钮：多会话并发时别的会话可能还在跑
+    abortBtn.classList.toggle("hidden", !isConvRunningHere(curConv));
     // 本轮结束后清理属于本会话的待处理项：
     //   - "steer"（已确认注入当前循环）：服务端已被消费或已落盘，不能再补发（否则重复）；
     //   - "steer-pending"（注入请求还没回话）：状态未确认，按「可能没生效」处理——
@@ -1514,6 +1579,37 @@
     if (quickTimer) clearTimeout(quickTimer);
     quickTimer = setTimeout(() => { quickMsg.textContent = ""; }, 1500);
   }
+  // 回到底部：恢复跟随并滚到最新
+  if (jumpBottom) jumpBottom.addEventListener("click", () => scrollLogForce());
+
+  // ---------- 输入区折叠 ----------
+  // 常驻的状态栏 + 快捷参数 + 5 行输入框会吃掉太多屏幕，导致看回答的区域太小。
+  // 默认收起（只留一行输入），点把手展开。选择持久化，避免每次刷新都要重设。
+  const COMPACT_KEY = "mizar-composer-compact";
+  function applyComposerCompact(compact) {
+    if (!composerEl) return;
+    composerEl.classList.toggle("compact", compact);
+    if (composerToggleLabel) composerToggleLabel.textContent = compact ? "展开参数" : "收起参数";
+    try { localStorage.setItem(COMPACT_KEY, compact ? "1" : "0"); } catch (e) {}
+  }
+  function isComposerCompact() {
+    return !!(composerEl && composerEl.classList.contains("compact"));
+  }
+  if (composerEl) {
+    let compact = true;   // 默认收起：屏幕宝贵，先给内容
+    try {
+      const v = localStorage.getItem(COMPACT_KEY);
+      if (v === "0") compact = false;
+      else if (v === "1") compact = true;
+      else if (isMobile()) compact = true;
+      else compact = false;   // 桌面端屏幕大，默认展开更直观
+    } catch (e) { compact = !isMobile(); }
+    applyComposerCompact(compact);
+  }
+  if (composerToggle) {
+    composerToggle.addEventListener("click", () => applyComposerCompact(!isComposerCompact()));
+  }
+
   sendBtn.addEventListener("click", send);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); return; }

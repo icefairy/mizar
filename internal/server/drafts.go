@@ -131,7 +131,9 @@ func (s *Server) handleWebDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conv := r.URL.Query().Get("conversation_id")
-	running := s.runLive() && (conv == "" || s.RunConv() == conv)
+	// 按会话判断是否在跑：多会话并发时 s.RunConv() 会被别的会话覆盖，
+	// 用它判断会导致「另一个会话在跑 → 本会话的中断/草稿状态判断错」。
+	running := s.runLiveFor(conv)
 	text := ""
 	if running {
 		text = s.draft.get(conv)
@@ -140,6 +142,6 @@ func (s *Server) handleWebDraft(w http.ResponseWriter, r *http.Request) {
 		"conversation_id": conv,
 		"draft":           text,
 		"running":         running,
-		"running_conv":    s.RunConv(),
+		"running_conv":    s.firstRunningConv(),
 	})
 }
