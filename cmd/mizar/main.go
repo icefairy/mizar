@@ -309,6 +309,18 @@ func main() {
 
 	// 宿主函数集
 	host := &engine.HostFuncs{
+		// Sleep：插件 sleep(ms) 原生休眠（time.Sleep，不开进程）。此前从未赋值，
+		// sleep 宿主函数一直没注册，插件只能拿 powershell.exe 模拟——Linux 上
+		// 必然 exit 127。上限 60s 防止插件写错单位把会话挂死。
+		Sleep: func(ms int) {
+			if ms < 0 {
+				ms = 0
+			}
+			if ms > 60000 {
+				ms = 60000
+			}
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		},
 		FSRead: func(p string) (string, error) {
 			fi, err := os.Stat(p)
 			if err != nil {
@@ -1247,6 +1259,17 @@ func main() {
 		Description: "查看当前待办清单（todo 工具创建的待办）",
 		Run: func(args string) (string, error) {
 			return builtins.RenderPiTodos(), nil
+		},
+	})
+	// 内置 /subagents 命令：查看子任务派发记录与状态（delegate_task 派发的子代理）
+	a.Commands.Register(agent.Command{
+		Name:        "subagents",
+		Description: "查看子任务列表与状态（delegate_task 派发的子代理，含运行中/已完成/失败与结果摘要）",
+		Run: func(args string) (string, error) {
+			if a.SubAgents == nil {
+				return "子代理功能未启用", nil
+			}
+			return a.SubAgents.RenderSubagentsForHuman(), nil
 		},
 	})
 	// 内置 /stop 命令：立即停止当前任务（TUI 与 WebUI 通用；WebUI 在前端拦截，不进入这里）
