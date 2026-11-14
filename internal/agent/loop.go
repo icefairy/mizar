@@ -132,6 +132,7 @@ type Agent struct {
 	OnStep      func(step string)
 	Tuner       *WeakModelTuner   // 弱模型宽容策略（nil = 不启用）
 	Guard       *RepeatGuard      // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
+	Permission  *PermissionGate   // 权限门禁（nil = 不启用 = 现行为；对齐 Claude Code PermissionMode，主/子代理共用同一实例）
 	Jobs        *jobs.Registry    // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
 	PlanMode    *PlanMode         // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
 	GrillMode   *GrillMode        // 拷问模式控制器（nil = 不启用；动手前先追问需求）
@@ -1078,6 +1079,32 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
 		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
 		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
+	}
+
+	// 权限门禁（GAP-S2）：执行前判定放行/询问/拒绝。审批在 Plugins.Call 之前，
+	// 不受 30s 插件超时影响；确认弹窗经 gate 内 askMu 串行化（TUI askPending 单槽）。
+	// 拒绝回填复用下方 guard 终止分支的消息形状（真实 tool call 必须配对结果，
+	// 孤儿 tool_calls 会触发上游 400），并 controlNextStep 跳过本批剩余调用——
+	// 模型看到拒绝原因后整批重规划。
+	if a.Permission != nil {
+		if allowed, denyMsg := a.Permission.Authorize(c.Tool, c.Args); !allowed {
+			q.EndOperation("tool:" + c.Tool)
+			tr := ToolResult{ToolName: c.Tool, Args: c.Args, Error: denyMsg}
+			b, _ := json.Marshal(tr)
+			msgs = append(msgs, Message{
+				Role: RoleAssistant, Content: reply, Kind: KindToolCall,
+				ToolName: c.Tool, ToolArgs: c.Args,
+				ToolCalls: []ToolCallRef{{ID: callID, Name: c.Tool, Args: c.Args}},
+			})
+			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
+			// 被拒调用落会话历史：用户在 TUI/CLI 里能看到模型试图执行什么、为何被拒
+			if a.OnToolExchange != nil {
+				a.OnToolExchange(c.Tool, c.Args, c.Reason, "", errors.New(denyMsg))
+			}
+			a.log("%s", q.FormatLog("permission_deny", "mode=", string(a.Permission.Mode()), "tool=", c.Tool))
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
+		}
 	}
 
 	// 先执行工具（dsh 的 repeat-tool-reminder 也是 post-execute 观察语义）
