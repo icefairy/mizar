@@ -65,14 +65,15 @@ func TestRoutesAdmin(t *testing.T) {
 		t.Fatalf("routes=%d < static=%d", len(out.Routes), len(routeTable))
 	}
 	// 插件动态端点：rpc_echo / rpc_add × (/rpc 项 + /ext/ 项) = 4
+	// 插件组：静态 2 条（/ext/ 与 /ext/<name>）+ 插件动态 4 条（2 方法 × 2 形态）= 6
 	var dyn int
 	for _, r := range out.Routes {
 		if r.Group == "plugin" {
 			dyn++
 		}
 	}
-	if dyn != 4 {
-		t.Fatalf("plugin dynamic routes = %d, want 4", dyn)
+	if dyn != 6 {
+		t.Fatalf("plugin routes = %d, want 6 (2 static + 4 dynamic)", dyn)
 	}
 	// 关键端点抽查
 	joined := strings.Join(pathsOf(out.Routes), ",")

@@ -57,6 +57,11 @@ var routeTable = []RouteMeta{
 		Summary: "运行时开关各服务（http/rpc/ws）"},
 	{Group: "admin", Method: "GET", Path: "/admin/routes", Handler: "handleRoutes", Auth: "bearer",
 		Summary: "本路由表（机器可读，含插件 rpc_* 动态端点）"},
+	// 插件 RPC 的 REST 直达（Bearer）
+	{Group: "plugin", Method: "GET", Path: "/ext/", Handler: "handleExtRPC", Auth: "bearer", EnabledByService: "jsonrpc",
+		Summary: "插件 rpc_* 方法清单"},
+	{Group: "plugin", Method: "GET,POST", Path: "/ext/<name>", Handler: "handleExtRPC", Auth: "bearer", EnabledByService: "jsonrpc",
+		Summary: "插件 rpc_<name> REST 直达（GET 无参 / POST body 作 params）"},
 	// Web UI 静态资源（cookie 会话）
 	{Group: "web", Method: "GET", Path: "/web/", Handler: "webuiFileServer", Auth: "cookie",
 		Summary: "Web UI 前端（embed 或外部目录，见 /web/api/frontend）"},

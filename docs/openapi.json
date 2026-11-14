@@ -15,7 +15,7 @@
   "info": {
     "description": "生成自路由注册表，非手写；运行时全量清单（含插件 rpc_*）见 GET /admin/routes。",
     "title": "Mizar (开阳) Server API",
-    "version": "v0.8.3"
+    "version": "v0.8.4"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -57,6 +57,26 @@
           }
         },
         "summary": "运行时开关各服务（http/rpc/ws）"
+      }
+    },
+    "/ext/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "插件 rpc_* 方法清单"
+      }
+    },
+    "/ext/\u003cname\u003e": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "插件 rpc_\u003cname\u003e REST 直达（GET 无参 / POST body 作 params）"
       }
     },
     "/rpc": {
