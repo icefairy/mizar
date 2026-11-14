@@ -87,6 +87,39 @@ type HookContext struct {
 	SessionID string
 }
 
+// Decision 工具调用裁决（P-1 扩展事件拦截，对齐 pi 的 tool_call 拦截语义）。
+//
+// 与旁路观察的 ToolCall 挂载点不同：裁决 hook 在工具执行前**有否决权**——
+// 可以拒绝执行（deny）或改写参数（rewrite），这是外部扩展（审计/沙箱/参数
+// 规范化）介入执行流的正规入口。
+type Decision int
+
+const (
+	// DecisionAllow 放行（默认；无任何裁决 hook 时也是它）。
+	DecisionAllow Decision = iota
+	// DecisionDeny 拒绝执行。拒绝原因以工具结果形式回填给模型，本批剩余
+	// 调用跳过（与权限门禁拒绝同一消息形状：真实 tool call 必须配对结果）。
+	DecisionDeny
+	// DecisionRewrite 改写 ctx.Tool / ctx.Args 后继续。改写立即生效：
+	// 后续裁决 hook、空名兜底、权限门禁、guard 全部在改写后的参数上判定。
+	DecisionRewrite
+)
+
+func (d Decision) String() string {
+	switch d {
+	case DecisionAllow:
+		return "allow"
+	case DecisionDeny:
+		return "deny"
+	case DecisionRewrite:
+		return "rewrite"
+	}
+	return "?"
+}
+
+// ToolCallDecisionFunc 工具调用裁决函数。返回 (裁决, 原因)。
+type ToolCallDecisionFunc func(ctx *HookContext) (Decision, string)
+
 // HookFunc 挂载函数。返回 error 时会被收集（记日志），但默认不中断主循环；
 // 挂载点可通过 HookContext 中的指针字段影响流程（见各挂载点说明）。
 type HookFunc func(ctx *HookContext) error
@@ -115,6 +148,11 @@ type Hooks struct {
 	ToolCall []HookFunc
 	// ToolResult: 工具结果产生后（🟡 中等——结果会进入后续消息）
 	ToolResult []HookFunc
+
+	// ToolCallDecision: 工具执行前裁决（🟡 中等——rewrite 会把改写后的
+	// tool/args 写进历史，但不会改变已发送的前缀）。多个裁决按注册顺序执行，
+	// 见 fireToolCallDecision。pi 生态扩展性的核心挂载点。
+	ToolCallDecision []ToolCallDecisionFunc
 
 	// CompactionBefore: 压缩执行前（🟢 安全）
 	CompactionBefore []HookFunc
@@ -177,6 +215,15 @@ func (h *Hooks) OnToolCall(f HookFunc) *Hooks {
 func (h *Hooks) OnToolResult(f HookFunc) *Hooks {
 	h.mu.Lock()
 	h.ToolResult = append(h.ToolResult, f)
+	h.mu.Unlock()
+	return h
+}
+
+// OnToolCallDecision 注册工具调用裁决（P-1）。多个按注册顺序执行：
+// deny 立即生效；rewrite 原地改写后继续；allow 看下一个。
+func (h *Hooks) OnToolCallDecision(f ToolCallDecisionFunc) *Hooks {
+	h.mu.Lock()
+	h.ToolCallDecision = append(h.ToolCallDecision, f)
 	h.mu.Unlock()
 	return h
 }
@@ -266,6 +313,61 @@ func (h *Hooks) fireLLMResponse(ctx *HookContext, log func(string)) {
 	h.mu.Unlock()
 	h.fire("LLMResponse", hs, ctx, log)
 }
+// fireToolCallDecision 依注册顺序执行全部裁决 hook，返回最终 (裁决, 原因)。
+//
+// 规则：
+//   - allow → 看下一个 hook；全部 allow 时返回 (DecisionAllow, "")。
+//   - rewrite → 改写立即写回 ctx（后续 hook 在改写后的 Tool/Args 上继续裁决）。
+//   - deny → 立即返回，不再执行后续裁决。
+//   - hook panic 按 deny 兜底（fail-closed）：裁决 hook 属于控制面扩展，
+//     出错时宁可拒一次调用并让模型看到原因，也不能静默放行。
+func (h *Hooks) fireToolCallDecision(ctx *HookContext, log func(string)) (Decision, string) {
+	h.mu.Lock()
+	fs := append([]ToolCallDecisionFunc(nil), h.ToolCallDecision...)
+	h.mu.Unlock()
+	rewritten := false
+	for i, f := range fs {
+		if f == nil {
+			continue
+		}
+		d, reason := runDecisionSafely(f, ctx)
+		switch d {
+		case DecisionDeny:
+			return DecisionDeny, reason
+		case DecisionRewrite:
+			rewritten = true
+			if log != nil {
+				log(fmt.Sprintf("hook ToolCallDecision[%d] rewrite: tool=%s args=%s", i, truncateForLog(ctx.Tool), truncateForLog(ctx.Args)))
+			}
+		}
+	}
+	if rewritten {
+		return DecisionRewrite, ""
+	}
+	return DecisionAllow, ""
+}
+
+// runDecisionSafely 执行单个裁决 hook，panic 转 fail-closed deny。
+func runDecisionSafely(f ToolCallDecisionFunc, ctx *HookContext) (d Decision, reason string) {
+	defer func() {
+		if r := recover(); r != nil {
+			d = DecisionDeny
+			reason = fmt.Sprintf("工具调用被裁决 hook 异常终止（fail-closed）: %v", r)
+		}
+	}()
+	return f(ctx)
+}
+
+// truncateForLog 裁决日志用的短截断（与 agent 的 truncate 语义一致，独立实现
+// 避免 hooks.go 依赖 loop.go 的私有符号）。
+func truncateForLog(s string) string {
+	if len(s) <= 80 {
+		return s
+	}
+	return s[:80] + "…"
+}
+
+// fireToolCall 触发 ToolCall 挂载点。
 func (h *Hooks) fireToolCall(ctx *HookContext, log func(string)) {
 	h.mu.Lock()
 	hs := append([]HookFunc(nil), h.ToolCall...)
@@ -316,6 +418,7 @@ func AllHookSpecs() []HookSpec {
 		{"LLMRequest", "LLM 调用前、messages 即将发送", ImpactSevere, "Messages", "请求钩子：注入动态上下文、改写消息（⚠️ 会破坏缓存）"},
 		{"LLMResponse", "LLM 调用后、reply 已返回", ImpactSafe, "-", "响应钩子：日志、流式转发、响应后处理"},
 		{"ToolCall", "工具调用前", ImpactSafe, "Tool/Args", "工具钩子：参数校验、权限检查、审计"},
+		{"ToolCallDecision", "工具执行前裁决", ImpactModerate, "Tool/Args", "工具裁决：deny 拒绝 / rewrite 改写参数 / allow 放行（P-1 扩展事件拦截）"},
 		{"ToolResult", "工具结果产生后", ImpactModerate, "-", "工具钩子：结果过滤、错误上报"},
 		{"CompactionBefore", "压缩执行前", ImpactSafe, "-", "压缩钩子：预检查、手动触发前拦截"},
 		{"CompactionAfter", "压缩执行后", ImpactSafe, "Messages(不建议)", "压缩钩子：摘要后处理、更新外部记忆"},

@@ -75,7 +75,7 @@ reqJSON 字段（均可选，除 messages 外）:
   messages     [{"role":"user","content":"..."}] 数组
   temperature  温度 0-2
   max_tokens   最大输出 token
-  thinking     思考等级: auto/off/low/medium/high
+  thinking     思考等级: auto/off/low/medium/high/xhigh/max
   images       [{"url":"..."}] 或 [{"base64":"...","mime":"image/png"}]（多模态图片）
   video        视频 URL（多模态视频）
 返回 assistant 纯文本。长调用注意插件 30s 执行超时。

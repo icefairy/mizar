@@ -1019,6 +1019,37 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 	a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}, a.logf)
 	a.noteStep("step %d: %s(%s)", qc.Step, c.Tool, truncate(c.Args, 60))
 
+	// 扩展事件拦截（P-1，对齐 pi）：裁决 hook 可在执行前 deny / rewrite。
+	// rewrite 立即写回 c.Tool/c.Args——后续空名兜底、权限门禁、guard、执行
+	// 全部在改写后的参数上判定；deny 与下方权限拒绝同一消息形状（配对结果）。
+	if len(a.Hooks.ToolCallDecision) > 0 {
+		dctx := &HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}
+		decision, denyReason := a.Hooks.fireToolCallDecision(dctx, a.logf)
+		switch decision {
+		case DecisionDeny:
+			q.EndOperation("tool:" + c.Tool)
+			if strings.TrimSpace(denyReason) == "" {
+				denyReason = "被扩展拦截（ToolCallDecision deny）"
+			}
+			tr := ToolResult{ToolName: c.Tool, Args: c.Args, Error: denyReason}
+			b, _ := json.Marshal(tr)
+			msgs = append(msgs, Message{
+				Role: RoleAssistant, Content: reply, Kind: KindToolCall,
+				ToolName: c.Tool, ToolArgs: c.Args,
+				ToolCalls: []ToolCallRef{{ID: callID, Name: c.Tool, Args: c.Args}},
+			})
+			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
+			if a.OnToolExchange != nil {
+				a.OnToolExchange(c.Tool, c.Args, c.Reason, "", errors.New(denyReason))
+			}
+			a.log("%s", q.FormatLog("hook_deny", "tool=", c.Tool))
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
+		case DecisionRewrite:
+			c.Tool, c.Args = dctx.Tool, dctx.Args
+		}
+	}
+
 	// 空工具名兜底（规避 `tool "" not found`）：模型在某些形态下丢了 tool 字段，
 	// 但 args 里带了 bash 的 command 参数——此时猜为 bash 工具。
 	// 判断条件与解析层的 inferableToolFromArgs 共用，避免两处逻辑漂移。

@@ -57,6 +57,7 @@ type SubagentHandle struct {
 	State      SubagentState `json:"state"`
 	CreatedAt  time.Time     `json:"created_at"`
 	Depth      int           `json:"depth"`
+	Role       string        `json:"role,omitempty"` // 行为预设（内置四角色或自定义类型名）
 	Model      string        `json:"model,omitempty"` // 实际使用的模型（req.Model 生效后回显）
 	WorkingDir string        `json:"working_dir,omitempty"`
 	Result     string        `json:"result,omitempty"`
@@ -82,7 +83,7 @@ const maxSubagentProgress = 20
 func (h *SubagentHandle) snapshot() SubagentHandle {
 	return SubagentHandle{
 		ID: h.ID, Goal: h.Goal, State: h.State, CreatedAt: h.CreatedAt,
-		Depth: h.Depth, Model: h.Model, WorkingDir: h.WorkingDir,
+		Depth: h.Depth, Role: h.Role, Model: h.Model, WorkingDir: h.WorkingDir,
 		Result: h.Result, Error: h.Error,
 		StepsUsed: h.StepsUsed, Batch: h.Batch,
 		Progress: append([]string(nil), h.progress...),
@@ -107,18 +108,20 @@ const (
 )
 
 type SubagentManager struct {
-	mu         sync.RWMutex
-	subs       map[string]*SubagentHandle
-	nextID     atomic.Int64
-	maxDepth   int
-	maxSteps   int
-	parentLLM  LLM                   // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
-	parentSys  string                // 主 system（子 agent 个性化指令层）
-	pm         *plugins.Manager      // 共享插件注册表（只读复制工具清单）
-	jobNotify  func(note string)     // 结果回灌：完成通知塞进主循环可见通道
-	onProgress func(id, line string) // 进度推送（GAP-S3 收尾）：每步进度行回调，nil = 关闭
-	permission *PermissionGate       // 权限门禁（GAP-S2）：与主代理共用同一实例，nil = 无门禁
-	sem        chan struct{}         // 并发上限
+	mu          sync.RWMutex
+	subs        map[string]*SubagentHandle
+	nextID      atomic.Int64
+	maxDepth    int
+	maxSteps    int
+	parentLLM   LLM                   // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
+	parentSys   string                // 主 system（子 agent 个性化指令层）
+	pm          *plugins.Manager      // 共享插件注册表（只读复制工具清单）
+	jobNotify   func(note string)     // 结果回灌：完成通知塞进主循环可见通道
+	onProgress  func(id, line string) // 进度推送（GAP-S3 收尾）：每步进度行回调，nil = 关闭
+	persister   func(SubagentHandle)  // 终态落盘（GAP-S4）：快照交调用方持久化，nil = 不落盘
+	permission  *PermissionGate       // 权限门禁（GAP-S2）：与主代理共用同一实例，nil = 无门禁
+	customTypes map[string]AgentType  // 用户自定义子代理类型（GAP-S1 第二层），nil = 无
+	sem         chan struct{}         // 并发上限
 }
 
 // SetOnProgress 注册进度推送回调（GAP-S3 收尾：推送式可见性）。nil = 关闭。
@@ -130,6 +133,33 @@ func (sm *SubagentManager) SetOnProgress(f func(id, line string)) {
 	sm.mu.Lock()
 	sm.onProgress = f
 	sm.mu.Unlock()
+}
+
+// SetPersister 注册终态落盘回调（GAP-S4）。句柄到达 SUCCEEDED/FAILED/CANCELLED
+// 时以快照调用一次（锁外）。回调可能做文件 IO，必须自己兜错误、不能 panic。
+// nil = 不落盘（默认，行为与旧版一致）。
+func (sm *SubagentManager) SetPersister(f func(SubagentHandle)) {
+	sm.mu.Lock()
+	sm.persister = f
+	sm.mu.Unlock()
+}
+
+// persistTerminal 终态落盘：取快照（锁内）→ 回调（锁外）。
+func (sm *SubagentManager) persistTerminal(id string) {
+	sm.mu.RLock()
+	h, ok := sm.subs[id]
+	var snap SubagentHandle
+	if ok {
+		snap = h.snapshot()
+	}
+	f := sm.persister
+	sm.mu.RUnlock()
+	if !ok || f == nil {
+		return
+	}
+	if snap.State == SubagentSucceeded || snap.State == SubagentFailed || snap.State == SubagentCancelled {
+		f(snap)
+	}
 }
 
 // SubagentConfig 构造参数。JobNotify 由 main.go 接入 Jobs 完成通知。
@@ -169,9 +199,9 @@ func (sm *SubagentManager) register(h *SubagentHandle) {
 }
 
 // setState 在锁内安全更新句柄状态（子 goroutine 与主 goroutine 都会写）。
+// 到达终态时触发落盘回调（GAP-S4）。
 func (sm *SubagentManager) setState(id string, st SubagentState, result, errMsg string) {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 	if h, ok := sm.subs[id]; ok {
 		h.State = st
 		if result != "" {
@@ -180,6 +210,10 @@ func (sm *SubagentManager) setState(id string, st SubagentState, result, errMsg 
 		if errMsg != "" {
 			h.Error = errMsg
 		}
+	}
+	sm.mu.Unlock()
+	if st == SubagentSucceeded || st == SubagentFailed || st == SubagentCancelled {
+		sm.persistTerminal(id)
 	}
 }
 
@@ -226,14 +260,17 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 			req.Goal = fmt.Sprintf("(task %d: 缺少 goal)", i+1)
 		}
 		// role 决定子代理的行为预设，注入到它的任务指令里（此前只赋默认值从不使用，
-		// 是个形同虚设的字段）。未知值按 leaf 处理，不静默接受任意字符串。
+		// 是个形同虚设的字段）。未知值按 leaf 处理，不静默接受任意字符串；
+		// 用户自定义类型（GAP-S1 第二层）名同样合法，命中后按类型白名单/模型/系统层执行。
 		if req.Role == "" {
 			req.Role = "leaf"
 		}
 		switch req.Role {
 		case "leaf", "explore", "implement", "review":
 		default:
-			req.Role = "leaf"
+			if _, ok := sm.customType(req.Role); !ok {
+				req.Role = "leaf"
+			}
 		}
 		if req.MaxSteps <= 0 {
 			req.MaxSteps = sm.maxSteps
@@ -247,6 +284,7 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 			State:      SubagentPending,
 			CreatedAt:  time.Now(),
 			Depth:      depth,
+			Role:       req.Role,
 			Model:      req.Model, // 未指定时为空，runSubagent 里回显实际值
 			WorkingDir: req.WorkingDir,
 			Batch:      batchID,
@@ -298,14 +336,31 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 
 	// 子 agent 工具集：共享注册表副本，过滤掉委派类工具（防无限递归）
 	// 和 req.BlockedTools。Tools() 返回新 slice，改动不影响主注册表。
-	// 只读类角色（explore/review）再叠一层工具白名单：写类工具直接摘除，
-	// 「不许改任何文件」从 roleHint 的提示词约定变成工具层强制——模型不守约
-	// 也调不到 edit/write。bash 仍保留：git log/grep 等只读检索依赖它，
-	// 进程级写闸门归权限门禁（PermissionFn）做。
+	// 三层收窄（互斥）：
+	//   1. 自定义类型带 tools 白名单（GAP-S1 第二层）→ 只保留白名单内的共享工具；
+	//   2. 只读类内置角色（explore/review）→ 写类工具直接摘除，「不许改任何文件」
+	//      从 roleHint 的提示词约定变成工具层强制——模型不守约也调不到 edit/write；
+	//   3. 都不命中 → 全量共享工具。
+	// bash 在 2/3 层仍保留：git log/grep 等只读检索依赖它，进程级写闸门归权限门禁做。
+	at, isCustom := sm.customType(req.Role)
 	blockedByRole := roleWriteBlocked(req.Role)
+	var typeWhitelist map[string]bool
+	if isCustom && len(at.Tools) > 0 {
+		typeWhitelist = make(map[string]bool, len(at.Tools))
+		for _, name := range at.Tools {
+			typeWhitelist[name] = true
+		}
+	}
 	childPM := plugins.NewManager("", nil)
 	for _, t := range sm.pm.Tools() {
-		if isDelegationTool(t.Name) || containsStr(req.BlockedTools, t.Name) || containsStr(blockedByRole, t.Name) {
+		if isDelegationTool(t.Name) || containsStr(req.BlockedTools, t.Name) {
+			continue
+		}
+		if typeWhitelist != nil {
+			if !typeWhitelist[t.Name] {
+				continue
+			}
+		} else if containsStr(blockedByRole, t.Name) {
 			continue
 		}
 		childPM.RegisterBuiltin(t)
@@ -343,10 +398,22 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 
 	// 子任务可指定模型：parentLLM 若实现 modelDeriver 就派生一个只换 Model 的
 	// 新实例；否则忽略 req.Model 用主模型（并在句柄标注，避免"以为换了其实没换"）。
+	// 自定义类型可带类型默认 model（GAP-S1 第二层）：req.Model 未指定时生效，
+	// req.Model 显式指定仍优先——per-task 请求比类型默认更具体。
 	subLLM := sm.parentLLM
-	if req.Model != "" {
+	effectiveModel := req.Model
+	if effectiveModel == "" && isCustom {
+		effectiveModel = at.Model
+	}
+	if effectiveModel != "" && effectiveModel != req.Model {
+		// 类型默认模型写回句柄，get_subagent 可见实际生效值
+		sm.mu.Lock()
+		h.Model = effectiveModel
+		sm.mu.Unlock()
+	}
+	if effectiveModel != "" {
 		if d, ok := sm.parentLLM.(modelDeriver); ok {
-			subLLM = d.WithModel(req.Model)
+			subLLM = d.WithModel(effectiveModel)
 		} else {
 			// 不支持派生：用主模型，但在句柄标注，避免"以为换了其实没换"。
 			sm.mu.Lock()
@@ -390,16 +457,25 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 		sm.mu.Unlock()
 	}()
 	// 按 role 给子代理定行为边界（此前 role 从不生效）。
+	// 自定义类型（GAP-S1 第二层）：正文即该类型的 system 附加层，原样注入；
+	// 带白名单时加一句说明，避免模型反复尝试清单外工具。
 	roleHint := ""
-	switch req.Role {
-	case "explore":
-		roleHint = "\n你的角色：**探索者**。只读调研，弄清事实与位置即可；写类工具（edit/write）已对你关闭，结论里写清关键文件:行号与证据。"
-	case "implement":
-		roleHint = "\n你的角色：**实现者**。按 goal 直接动手改代码/写文件，完成后简述改了哪些文件与验证方式。"
-	case "review":
-		roleHint = "\n你的角色：**审查者**。只读审查，指出问题（含文件:行号、严重度、理由与修法）；写类工具（edit/write）已对你关闭，不要在结论里附修改后的完整文件。"
-	default: // leaf
-		roleHint = "\n你的角色：**叶子执行者**。独立完成这一件子任务并交付结果。"
+	if isCustom {
+		roleHint = "\n你的角色类型：**" + at.Name + "**。" + at.System
+		if len(at.Tools) > 0 {
+			roleHint += "\n你的可用工具已按类型白名单收窄，清单外的工具不可调用，请直接在其能力范围内完成任务。"
+		}
+	} else {
+		switch req.Role {
+		case "explore":
+			roleHint = "\n你的角色：**探索者**。只读调研，弄清事实与位置即可；写类工具（edit/write）已对你关闭，结论里写清关键文件:行号与证据。"
+		case "implement":
+			roleHint = "\n你的角色：**实现者**。按 goal 直接动手改代码/写文件，完成后简述改了哪些文件与验证方式。"
+		case "review":
+			roleHint = "\n你的角色：**审查者**。只读审查，指出问题（含文件:行号、严重度、理由与修法）；写类工具（edit/write）已对你关闭，不要在结论里附修改后的完整文件。"
+		default: // leaf
+			roleHint = "\n你的角色：**叶子执行者**。独立完成这一件子任务并交付结果。"
+		}
 	}
 	task := fmt.Sprintf("%s\n\n【子任务背景/上下文】\n%s\n\n你是被委派的子代理，只完成上面这一件子任务，做完用 respond 工具直接交付结果，不要再委派。%s",
 		req.Goal, req.Context, roleHint)
@@ -567,12 +643,13 @@ func (sm *SubagentManager) List() []*SubagentHandle {
 // Cancel 真取消：调 context.CancelFunc 中断在途 LLM，并标记状态。
 func (sm *SubagentManager) Cancel(id string) error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 	h, ok := sm.subs[id]
 	if !ok {
+		sm.mu.Unlock()
 		return fmt.Errorf("subagent: %q not found", id)
 	}
 	if h.State == SubagentSucceeded || h.State == SubagentFailed || h.State == SubagentCancelled {
+		sm.mu.Unlock()
 		return nil // 已终结，幂等
 	}
 	if h.cancel != nil {
@@ -580,6 +657,8 @@ func (sm *SubagentManager) Cancel(id string) error {
 	}
 	h.State = SubagentCancelled
 	h.Error = "subagent: cancelled by user"
+	sm.mu.Unlock()
+	sm.persistTerminal(id)
 	return nil
 }
 
@@ -652,6 +731,9 @@ func (sm *SubagentManager) RenderSubagentsForHuman() string {
 		if h.Batch != "" {
 			fmt.Fprintf(&sb, "  [%s]", h.Batch)
 		}
+		if h.Role != "" {
+			fmt.Fprintf(&sb, "  角色:%s", h.Role)
+		}
 		if h.Model != "" {
 			fmt.Fprintf(&sb, "  模型:%s", h.Model)
 		}
@@ -720,14 +802,24 @@ func extractAssistantText(reply string) string {
 // 工具工厂
 // ============================================================================
 
-// delegate_task：支持单任务 {goal,...} 与批量 {"tasks":[{goal,...},...]}。
+// DelegateTool：支持单任务 {goal,...} 与批量 {"tasks":[{goal,...},...]}。
+// 自定义类型（GAP-S1 第二层）注册后追加进描述，模型可直接按类型名派发。
 func DelegateTool(sm *SubagentManager) plugins.Tool {
+	desc := "分派子代理并行处理子任务。复杂任务可一次派多个：{\"tasks\":[{\"goal\":\"子任务1\",\"context\":\"背景\"},{\"goal\":\"子任务2\"}]}；" +
+		"单个用 {\"goal\":\"...\",\"context\":\"...\",\"max_steps\":30}。异步返回句柄 id，用 get_subagent 查结果，list_subagents 看全部，运行中可用 steer_subagent 纠偏。" +
+		"role 四选一：leaf(默认，独立执行)、implement(动手实现)、explore(只读调研)、review(只读审查)；explore/review 的写类工具(edit/write)被强制摘除，只出结论。" +
+		"有先后依赖的子任务先记 todo（action=add, blocked_by），完成回灌会自动解锁后继；tasks[] 里只放互相独立的。上下文与主对话隔离。"
+	if types := sm.AgentTypes(); len(types) > 0 {
+		var sb strings.Builder
+		sb.WriteString("\n可用自定义子代理类型（role 直接传类型名，工具集/模型/行为按类型定义执行）：")
+		for _, at := range types {
+			fmt.Fprintf(&sb, "\n- %s: %s", at.Name, at.Description)
+		}
+		desc += sb.String()
+	}
 	return plugins.Tool{
-		Name: "delegate_task",
-		Description: "分派子代理并行处理子任务。复杂任务可一次派多个：{\"tasks\":[{\"goal\":\"子任务1\",\"context\":\"背景\"},{\"goal\":\"子任务2\"}]}；" +
-			"单个用 {\"goal\":\"...\",\"context\":\"...\",\"max_steps\":30}。异步返回句柄 id，用 get_subagent 查结果，list_subagents 看全部，运行中可用 steer_subagent 纠偏。" +
-			"role 四选一：leaf(默认，独立执行)、implement(动手实现)、explore(只读调研)、review(只读审查)；explore/review 的写类工具(edit/write)被强制摘除，只出结论。" +
-			"有先后依赖的子任务先记 todo（action=add, blocked_by），完成回灌会自动解锁后继；tasks[] 里只放互相独立的。上下文与主对话隔离。",
+		Name:        "delegate_task",
+		Description: desc,
 		Run: func(args string) (string, error) {
 			args = unwrapArgsJSON(args)
 			var batch struct {

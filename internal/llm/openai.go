@@ -357,7 +357,7 @@ func (c *OpenAI) hasThinking(level string) (bool, string) {
 		return false, ""
 	case thinkingOff:
 		return true, "disabled"
-	case thinkingLow, thinkingMedium, thinkingHigh:
+	case thinkingLow, thinkingMedium, thinkingHigh, thinkingXHigh, thinkingMax:
 		return true, "enabled"
 	}
 	return false, ""
@@ -372,6 +372,10 @@ func (c *OpenAI) reasoningEffort(level string) string {
 		return "medium"
 	case thinkingHigh:
 		return "high"
+	case thinkingXHigh:
+		return "xhigh"
+	case thinkingMax:
+		return "max"
 	}
 	return ""
 }
@@ -1315,9 +1319,11 @@ const (
 	thinkingLow    = "low"
 	thinkingMedium = "medium"
 	thinkingHigh   = "high"
+	thinkingXHigh  = "xhigh"
+	thinkingMax    = "max"
 )
 
-var thinkingOrder = []string{thinkingOff, thinkingLow, thinkingMedium, thinkingHigh, thinkingAuto}
+var thinkingOrder = []string{thinkingOff, thinkingLow, thinkingMedium, thinkingHigh, thinkingXHigh, thinkingMax, thinkingAuto}
 
 func (o *OpenAI) ThinkingEnabled() string {
 	if o.ThinkingLevel == "" {
@@ -1352,7 +1358,7 @@ func (o *OpenAI) HasThinkingHeader() (bool, string) {
 		return false, ""
 	case thinkingOff:
 		return true, "disabled"
-	case thinkingLow, thinkingMedium, thinkingHigh:
+	case thinkingLow, thinkingMedium, thinkingHigh, thinkingXHigh, thinkingMax:
 		return true, "enabled"
 	case thinkingAuto:
 		return false, ""
@@ -1370,6 +1376,10 @@ func (o *OpenAI) ReasoningEffort() string {
 			return "medium"
 		case thinkingHigh:
 			return "high"
+		case thinkingXHigh:
+			return "xhigh"
+		case thinkingMax:
+			return "max"
 		}
 	}
 	return ""

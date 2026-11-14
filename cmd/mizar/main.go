@@ -699,6 +699,15 @@ func main() {
 			a.Jobs.Start("subagent", note, func() (string, error) { return note, nil })
 		},
 	})
+	// 子任务句柄终态落盘（GAP-S4）：快照以 <!--subagent-state:--> 标记消息随会话
+	// JSONL 持久化，恢复会话时回放重建（RestoreFromMessages），get_subagent /
+	// list_subagents / /subagents 跨进程重启仍可查历史子任务与结论。
+	a.SubAgents.SetPersister(func(snap agent.SubagentHandle) {
+		if *sessionID == "" {
+			return
+		}
+		_ = st.Append(*sessionID, agent.SubagentStateMessage(snap))
+	})
 	// BackgroundReview：后台自学习
 	homeDir, _ := os.UserHomeDir()
 	skillsDir := filepath.Join(homeDir, ".mizar", "skills")
@@ -707,6 +716,18 @@ func main() {
 		AuxLLM:                 auxLLM,
 		SkillsDir:              skillsDir,
 	})
+	// 用户自定义子代理类型（GAP-S1 第二层）：~/.mizar/agents/*.md，
+	// frontmatter(name/description/tools/model) + 正文 = system 附加层。
+	// 加载须在 delegate_task 注册（下方 DelegateTool）之前——类型清单要写进工具描述。
+	agentTypesDir := filepath.Join(homeDir, ".mizar", "agents")
+	if agentTypes, errs := agent.LoadAgentTypeFiles(agentTypesDir); len(agentTypes) > 0 {
+		a.SubAgents.SetAgentTypes(agentTypes)
+		log.Printf("已加载 %d 个自定义子代理类型（%s/*.md）", len(agentTypes), agentTypesDir)
+	} else if len(errs) > 0 {
+		for _, e := range errs {
+			log.Printf("%v", e)
+		}
+	}
 	// StatsData
 	a.StatsData = &agent.StatsDataRef{}
 	// 注册后台任务工具（与 a.Jobs 同一 registry 实例，保证跨工具一致性）
@@ -1413,9 +1434,9 @@ func main() {
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
 			if args == "" {
-				return fmt.Sprintf("当前思考等级: %s\n等级说明:\n  auto   — 不传 thinking 参数，由模型自行决定\n  off    — 关闭思考\n  low    — 低强度思考（最快，推理 effort=low）\n  medium — 中等强度思考（默认推荐）\n  high   — 高强度思考（最彻底，推理 effort=high）", client.ThinkingEnabled()), nil
+				return fmt.Sprintf("当前思考等级: %s\n等级说明:\n  auto   — 不传 thinking 参数，由模型自行决定\n  off    — 关闭思考\n  low    — 低强度思考（最快，推理 effort=low）\n  medium — 中等强度思考（默认推荐）\n  high   — 高强度思考（推理 effort=high）\n  xhigh  — 超高强度思考（推理 effort=xhigh，需网关支持）\n  max    — 最大强度思考（推理 effort=max，需网关支持）", client.ThinkingEnabled()), nil
 			}
-			supported := []string{"auto", "off", "low", "medium", "high", "cycle"}
+			supported := []string{"auto", "off", "low", "medium", "high", "xhigh", "max", "cycle"}
 			for _, s := range supported {
 				if args == s {
 					switch s {
@@ -1439,7 +1460,7 @@ func main() {
 					}
 				}
 			}
-			return "", fmt.Errorf("未知参数 %q，支持: auto/off/low/medium/high/cycle", args)
+			return "", fmt.Errorf("未知参数 %q，支持: auto/off/low/medium/high/xhigh/max/cycle", args)
 		},
 	})
 	// 内置 /help 命令：列出所有可用命令（纯文本格式，TUI/readline 通用）
@@ -1866,6 +1887,12 @@ func main() {
 	if *sessionID != "" {
 		msgs, err := st.Load(*sessionID)
 		if err == nil && len(msgs) > 0 {
+			// 恢复子任务句柄（GAP-S4）：从全量历史回放终态快照（LoadRaw 穿透压缩
+			// 裁剪，快照不丢），再把标记消息从上下文剔除——只服务于状态重建，不进模型视野。
+			if raw, rerr := st.LoadRaw(*sessionID); rerr == nil {
+				a.SubAgents.RestoreFromMessages(raw)
+			}
+			msgs = agent.StripSubagentStateMessages(msgs)
 			if len(msgs) > *history {
 				msgs = msgs[len(msgs)-*history:]
 			}
@@ -2146,10 +2173,16 @@ func main() {
 				}
 			}
 			if err == nil && len(msgs) > 0 {
+				// 恢复子任务句柄（GAP-S4）+ 剔除标记消息（与启动恢复同款）
+				if raw, rerr := st.LoadRaw(*sessionID); rerr == nil {
+					a.SubAgents.RestoreFromMessages(raw)
+				}
+				msgs = agent.StripSubagentStateMessages(msgs)
 				if len(msgs) > *history {
 					msgs = msgs[len(msgs)-*history:]
 				}
 				a.Initial = msgs
+				builtins.SetTodosFromHistory(msgs)
 				log.Printf("切换到会话 %s: %d 条历史", *sessionID, len(msgs))
 			}
 			short := *sessionID
