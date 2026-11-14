@@ -1,6 +1,7 @@
 # Mizar 能力差距分析：vs Pi Agent / CodeBuddy
 
 > 撰写日期：2026-11-14（同日更新：并入 v0.8.7/v0.8.8 子任务机制改动后的现状核对）
+> 2026-11-15 更新：交付 P-1 扩展事件拦截（ToolCallDecision）、GAP-S4 子任务句柄随会话落盘回放、P-3 thinking level xhigh/max、GAP-S1 第二层用户自定义子代理类型（~/.mizar/agents/*.md）——四项已移出缺口清单，见路线图尾部
 > 对比对象：Pi Agent（`@earendil-works/pi-coding-agent`，对照 `docs/pi-comparison.md` 快照 + CHANGELOG 0.85→1.4.x 已移植项）、CodeBuddy Code（Claude Code 系 CLI）
 > 方法：逐文件核对 Mizar 当前源码（`internal/agent/subagent.go` 等以实际代码为准），与两者公开能力清单逐项比对
 > 关联文档：`docs/pi-comparison.md`（2026-08 快照，部分项已修复，以本文档为准）、`docs/todo.md`（openclaude 14 项已全部完成）
@@ -14,8 +15,8 @@ Mizar 的子任务机制骨架完整、架构选择正确（子 agent = 独立 `
 
 当前欠缺集中在三个层面：
 
-1. **子任务治理层**：用户自定义子代理类型（role 行为预设+工具白名单已有）、权限门禁延伸、运行中进度流式上报、结果落盘——CodeBuddy 成熟、Mizar 空白
-2. **对 Pi**：扩展事件拦截（deny/rewrite/intercept）、分支树会话两项核心未移植
+1. **子任务治理层**：运行中进度流式上报与权限门禁已补齐；剩 per-subagent token/成本计量与 WebUI 前端渲染收尾——CodeBuddy 成熟、Mizar 接近补完
+2. **对 Pi**：分支树会话未移植（扩展事件拦截已补）
 3. **零碎**：per-subagent token/成本计量缺失
 
 > 2026-11-14 晚补充：并发实测暴露并已修复两类问题——模型把工具参数包一层 `{"args":...}` 导致 `get_subagent: id required`（四个委派工具已加宽容剥壳，`unwrapArgsJSON`）；win32api 插件 sleep 走 powershell.exe 在 Linux 上 exit 127（根因是 `host.Sleep` 从未赋值，原生 `sleep(ms)` 宿主函数一直没注册，已补上）。同日交付：todo 依赖（blocked_by + 自动解锁，C-2）、`/subagents` 内部命令。
@@ -46,11 +47,15 @@ Mizar 的子任务机制骨架完整、架构选择正确（子 agent = 独立 `
 
 ### 1.2 子任务机制差距清单
 
-#### 🟡 GAP-S1：无用户自定义子代理类型（~150 行）
+#### ✅ GAP-S1：用户自定义子代理类型（已实现，2026-11-15）
 
-v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层工具白名单也已落地——explore/review 的写类工具（edit/write）从子 agent 工具清单**强制摘除**（`roleWriteBlocked` subagent.go:404，接入 childPM 组装 subagent.go:269-283），「不许改任何文件」从提示词约定升级为工具层强制，内置四角色闭环。剩余差距是**用户自定义类型**：无法按项目定义"测试运行型"（bash 但禁 edit/write）等预设，也无法给类型配独立 system 附加层与默认模型——CodeBuddy 支持项目目录自定义 agent 定义文件。
+v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；只读角色工具白名单（第一层）与用户自定义类型（第二层）均已落地：
 
-**引入方案**：`~/.mizar/agents/*.md`（frontmatter: name/description/tools/model，正文为该类型 system 附加层），`SubagentManager` 启动时加载，`delegate_task` 描述列出可用类型。与 SKILL.md 生态同构；per-type model 直接复用已生效的 `Model` 派生路径。
+- **定义文件**：`~/.mizar/agents/*.md`，frontmatter（name/description/tools/model）+ 正文 = 该类型 system 附加层（`internal/agent/subagent_types.go`，与 SKILL.md 生态同构；解析失败的文件跳过并记日志，不阻断其余类型）
+- **三层工具收窄**（runSubagent，互斥）：自定义类型 tools 白名单 > 只读内置角色摘写类 > 全量共享工具；白名单不约束嵌套 delegate_task（深度闸门另行控制）
+- **per-type model**：req.Model 未指定时用类型默认 model，复用已生效的 modelDeriver 派生路径；req.Model 显式指定仍优先；实际生效值写回句柄
+- **派发入口**：delegate_task 描述自动追加「可用自定义子代理类型」清单（启动加载后构建）；未知 role 仍归 leaf
+- 句柄新增 `Role` 字段（get_subagent / /subagents「角色:」行可见）
 
 #### 🟡 GAP-S2：权限门禁不延伸到子任务（~80 行）
 
@@ -78,11 +83,14 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 
 剩余差距：WebUI **前端**未渲染 `subagent_progress` 事件（前端在 dist/，独立工程）；后端契约已就绪。
 
-#### 🟡 GAP-S4：子任务记录纯内存（~60 行）
+#### ✅ GAP-S4：子任务记录落盘回放（已实现，2026-11-15）
 
-`subs` map 不落盘，进程重启后 `get_subagent`/`list_subagents` 全部丢失，长任务的中间产物（子 agent 跑过的结论）无法跨会话引用。
+照抄 todo 的「状态内嵌回放」模式（internal/agent/subagent_persist.go）：
 
-**引入方案**：句柄快照随会话 JSONL 追加落盘（照抄 todo 的 `<!--todo-state:-->` 内嵌回放模式，`RebuildTodos` 同款）；或独立 `subagents.jsonl`。推荐前者，与现有回放机制一致。
+- **落盘**：句柄到达终态（SUCCEEDED/FAILED/CANCELLED，含 Cancel 路径）时快照编码成 `<!--subagent-state:{json}-->` 标记消息，main.go 经 session.Store.Append 随会话 JSONL 追加持久化（`SubagentManager.SetPersister`）
+- **回放**：会话恢复（启动 / `/session` 切换）时从 LoadRaw 全量历史提取每个 id 最后一次出现的快照（穿透压缩裁剪）合并进 subs map；崩溃时仍处 PENDING/RUNNING 的标记为 CANCELLED「进程重启中断」；只补缺不覆盖活句柄，id 计数器推到快照之后防撞
+- **不进模型视野**：标记消息恢复时从 LLM 上下文与渲染中剔除（`StripSubagentStateMessages`），只服务于状态重建；会话文件保留原样（append-only）
+- 长任务的子 agent 结论跨会话可引用（get_subagent / list_subagents / /subagents）
 
 #### 🔵 GAP-S5：token/成本计量缺失（~50 行）
 
@@ -100,9 +108,9 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 
 | # | 功能 | Pi 实现要点 | Mizar 现状 | 建议 |
 |---|---|---|---|---|
-| P-1 | **扩展事件拦截** | tool_call 事件可 `deny/rewrite/intercept/allow`，32+ 事件类型 | Hooks 有 10 挂载点但无 Decision 枚举，工具调用前后不能改写/否决 | 🟢 ~30 行：`Hooks` 加 `OnToolCallDecision(ctx) Decision` 回调，Agent 循环响应。这是 Pi 生态扩展性的核心，也顺带为 C-6（用户级 hooks）打地基 |
-| P-2 | **分支树会话** | `/tree` `/fork` `/clone`，JSONL + 分支摘要，交互回溯 | 线性 JSONL + `--session` 续接；`agent.Clone()` 只用于子代理克隆（clone.go） | 🟡 简化版：`/fork` 从指定消息位置派生新 session ID 重放前缀。todo 已有按历史回放重建的机制（todo_pi.go），可直接复用 |
-| P-3 | **thinking level 完整档位** | off/minimal/low/medium/high/xhigh/max | auto/off/low/medium/high，缺 xhigh/max | 🟢 ~10 行枚举扩展 |
+| P-1 | ~~扩展事件拦截~~ | tool_call 事件可 `deny/rewrite/intercept/allow` | ✅ 已实现（2026-11-15）：`Hooks.ToolCallDecision`（deny 立即生效 / rewrite 原地改写后继续 / allow 放行；panic fail-closed deny），接入 runOneToolCall 执行前，拒绝复用权限拒绝的消息形状 | 已补齐 |
+| P-2 | **分支树会话** | `/tree` `/fork` `/clone`，JSONL + 分支摘要，交互回溯 | 线性 JSONL + `--session` 续接；`agent.Clone()` 只用于子代理克隆（clone.go） | 🟡 简化版：`/fork` 从指定消息位置派生新 session ID 重放前缀。todo 与 subagent-state 已有按历史回放重建的机制，可直接复用 |
+| P-3 | ~~thinking level 完整档位~~ | off/minimal/low/medium/high/xhigh/max | ✅ 已实现（2026-11-15）：auto/off/low/medium/high/xhigh/max，xhigh/max 透传 reasoning_effort（需网关支持） | 已补齐 |
 | P-4 | **模型轮换/多 provider** | Ctrl+P / `/scoped-models` / models.json 多模型切换 | `/model` 单切换；子任务已可按任务指定模型（Model 字段生效），但主对话仍单模型 | 🟡 结合 GAP-S1 自定义类型（per-type model），价值大于 UI 级轮换 |
 | P-5 | **Project Trust** | 项目级资源加载确认 + trust.json | 无 | 🔵 简化版：首次加载项目级 config/技能时 TUI 确认一次 |
 | P-6 | **export HTML** | `--export` + highlight.js 归档 | 无 | 🔵 Server 模式已有 `/rpc` 数据出口，HTML 导出优先级低 |
@@ -118,7 +126,7 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 
 | # | 维度 | CodeBuddy | Mizar 现状 | 等级 |
 |---|---|---|---|---|
-| C-1 | 子代理类型系统 | 具名类型（Explore/Plan/自定义），每类独立工具集+描述，定义在 `.codebuddy/agents/` | role 行为预设 + 只读角色工具白名单已有；无用户自定义类型 | 🟡 |
+| C-1 | 子代理类型系统 | 具名类型（Explore/Plan/自定义），每类独立工具集+描述，定义在 `.codebuddy/agents/` | role 行为预设 + 只读角色工具白名单 + 用户自定义类型（~/.mizar/agents/*.md，含 per-type model 与工具白名单）均已实现 | ✅ 基本持平（缺项目级目录） |
 | C-2 | 结构化任务清单 | TaskCreate/List/Get/Update：依赖（blockedBy）、owner、状态机、activeForm，多代理共享 | `todo` 已有 blocked_by 依赖 + 自动解锁 + 会话回放；无 owner/认领语义 | 🟢 基本持平 |
 | C-3 | 多代理团队 | TeamCreate + 共享任务列表 + 代理间消息协议（SendMessage），互相认领/阻塞 | 无 | 🟡 |
 | C-4 | 后台代理 | 代理级后台运行 + 完成通知协议，主代理可继续其他工作 | delegate_task 异步 + DrainDone 回灌 + OnProgress 推送已对齐 | 🟢 基本持平 |
@@ -132,9 +140,9 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 
 ### 3.2 重点展开
 
-#### C-1 子代理类型系统（GAP-S1 的完整形态）
+#### C-1 子代理类型系统（✅ 已实现）
 
-CodeBuddy 视角的完整形态 = 行为预设（**已有**）+ 工具白名单（**已有**，explore/review 强制摘除 edit/write）+ 用户自定义类型（缺）：
+CodeBuddy 视角的完整形态 = 行为预设（已有）+ 工具白名单（已有）+ 用户自定义类型（已有，2026-11-15）：
 
 ```
 ~/.mizar/agents/explorer.md
@@ -147,7 +155,7 @@ model: 主模型    # 可省略，继承父级
 你是探查型子代理，只做检索与阅读，禁止修改任何文件。
 ```
 
-`delegate_task` 描述追加"可用类型：explorer(只读)、tester(跑测试)、…；不传 role 则通用"。内置 role → 工具白名单映射已落地（见 GAP-S1），剩余工作就是自定义类型文件本身。
+`delegate_task` 描述自动追加"可用自定义子代理类型：explorer(只读)、tester(跑测试)、…；role 直接传类型名"。三层工具收窄互斥：类型白名单 > 只读角色摘写类 > 全量；per-type model 复用 modelDeriver 派生路径。与 CodeBuddy 的差异：CodeBuddy 支持项目级目录（.codebuddy/agents/），Mizar 目前只有用户级（~/.mizar/agents/），需要时加一个项目级加载点即可。
 
 #### C-2 任务清单带依赖（✅ 已实现）
 
@@ -174,11 +182,7 @@ model: 主模型    # 可省略，继承父级
 
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
-| 🟡 P1 | 扩展事件拦截 Decision（对齐 Pi） | ~30 行 | P-1 |
-| 🟡 P1 | 子任务句柄随会话落盘回放 | ~60 行 | GAP-S4 |
-| 🔵 P2 | 用户自定义子代理类型（agents/*.md，含 per-type model） | ~150 行 | GAP-S1 第二层、C-1、P-4 |
-| 🔵 P2 | `/fork` 会话分支派生（复用 todo 回放机制） | ~100 行 | P-2 |
-| 🔵 P2 | thinking level xhigh/max | ~10 行 | P-3 |
+| 🔵 P2 | `/fork` 会话分支派生（复用 todo/subagent-state 回放机制） | ~100 行 | P-2 |
 | 🔵 P2 | 用户级 hooks（shell 命令响应工具事件） | ~150 行 | C-6 |
 | 🔵 P2 | 结构化记忆四分类 + 自动加载索引 | ~200 行 | C-7 |
 | 🔵 P3 | per-subagent token/cost 计量 | ~50 行 | GAP-S5 |
@@ -186,7 +190,7 @@ model: 主模型    # 可省略，继承父级
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、**权限门禁 PermissionMode 四模式 + 子代理继承**（GAP-S2/C-5，2026-11-14 晚交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）。
 
 ---
 
@@ -195,10 +199,12 @@ model: 主模型    # 可省略，继承父级
 | 文件 | 内容 |
 |---|---|
 | `internal/agent/subagent.go` | 子代理管理器（本文档第一节全部引用） |
+| `internal/agent/subagent_types.go` | 用户自定义子代理类型（GAP-S1 第二层：加载/解析/SetAgentTypes） |
+| `internal/agent/subagent_persist.go` | 子任务句柄落盘回放（GAP-S4：标记消息/回放/Restore） |
 | `cmd/mizar/main.go:716-723` | 五个委派工具注册 + DelegationGuide 注入 |
-| `internal/llm/openai.go` | `WithModel`（modelDeriver 的实现侧） |
+| `internal/llm/openai.go` | `WithModel`（modelDeriver 的实现侧）+ thinking 档位（P-3 xhigh/max） |
 | `internal/builtins/todo_pi.go` | 平铺 todo（C-2 升级对象，回放机制复用点） |
-| `internal/agent/hooks.go` | Hooks 挂载点（P-1 Decision 扩展点） |
+| `internal/agent/hooks.go` | Hooks 挂载点（P-1 ToolCallDecision 已接入） |
 | `internal/agent/clone.go` | Agent 克隆（子代理复用） |
 | `internal/agent/steer.go` | 主循环 steer（子代理 Steer 对齐参考） |
 | `internal/agent/loop.go:655` | Jobs.DrainDone 回灌通道挂载点 |
