@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -268,9 +269,14 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 
 	// 子 agent 工具集：共享注册表副本，过滤掉委派类工具（防无限递归）
 	// 和 req.BlockedTools。Tools() 返回新 slice，改动不影响主注册表。
+	// 只读类角色（explore/review）再叠一层工具白名单：写类工具直接摘除，
+	// 「不许改任何文件」从 roleHint 的提示词约定变成工具层强制——模型不守约
+	// 也调不到 edit/write。bash 仍保留：git log/grep 等只读检索依赖它，
+	// 进程级写闸门归权限门禁（PermissionFn）做。
+	blockedByRole := roleWriteBlocked(req.Role)
 	childPM := plugins.NewManager("", nil)
 	for _, t := range sm.pm.Tools() {
-		if isDelegationTool(t.Name) || containsStr(req.BlockedTools, t.Name) {
+		if isDelegationTool(t.Name) || containsStr(req.BlockedTools, t.Name) || containsStr(blockedByRole, t.Name) {
 			continue
 		}
 		childPM.RegisterBuiltin(t)
@@ -338,11 +344,11 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 	roleHint := ""
 	switch req.Role {
 	case "explore":
-		roleHint = "\n你的角色：**探索者**。只读调研，弄清事实与位置即可，不要修改任何文件；结论里写清关键文件:行号与证据。"
+		roleHint = "\n你的角色：**探索者**。只读调研，弄清事实与位置即可；写类工具（edit/write）已对你关闭，结论里写清关键文件:行号与证据。"
 	case "implement":
 		roleHint = "\n你的角色：**实现者**。按 goal 直接动手改代码/写文件，完成后简述改了哪些文件与验证方式。"
 	case "review":
-		roleHint = "\n你的角色：**审查者**。只读审查，指出问题（含文件:行号、严重度、理由与修法），不要自行修改。"
+		roleHint = "\n你的角色：**审查者**。只读审查，指出问题（含文件:行号、严重度、理由与修法）；写类工具（edit/write）已对你关闭，不要在结论里附修改后的完整文件。"
 	default: // leaf
 		roleHint = "\n你的角色：**叶子执行者**。独立完成这一件子任务并交付结果。"
 	}
@@ -407,6 +413,18 @@ func isDelegationTool(name string) bool {
 	return false
 }
 
+// roleWriteBlocked 返回只读类角色必须从工具清单摘除的写类工具名。
+// explore/review 承诺「只读」，若清单里留着 edit/write，约束就只是提示词级的，
+// 模型不守约照样能改文件（GAP-S1 第一层：提示词 → 工具层强制）。
+// 其余角色（leaf/implement）返回 nil 不摘除。skill_manage 等其他写入口可按需追加。
+func roleWriteBlocked(role string) []string {
+	switch role {
+	case "explore", "review":
+		return []string{"edit", "write"}
+	}
+	return nil
+}
+
 func containsStr(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {
@@ -414,6 +432,58 @@ func containsStr(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// unwrapArgsJSON 宽容解析模型传入的工具参数：剥掉 {"args":"<json 字符串>"}
+// / {"args":{...}} 这类包装壳，返回可直接 json.Unmarshal 到目标结构的扁平
+// JSON 对象文本；剥不出包装就原样返回。
+//
+// 为什么需要：Description 里写的 Args 形状只是示例，实测模型会按自己的习惯
+// 多包一层（会话日志里出现过 get_subagent 收到 {"args":"{\"id\":\"sub-2-1\"}"}），
+// 顶层解析不到 id 就整轮报错，而模型往往原样重试、越错越死循环。
+// 与 builtins.ask.go 的 parseQuestions 同思路（最多剥 3 层）。
+// 只认 args/arguments/params 三个壳键——delegate_task 等四个工具的合法参数
+// 里没有这些键名，不会误伤。
+func unwrapArgsJSON(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "{") {
+		return raw
+	}
+	var v any
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+		return raw
+	}
+	for depth := 0; depth < 3; depth++ {
+		m, ok := v.(map[string]any)
+		if !ok {
+			break
+		}
+		var next any
+		found := false
+		for _, key := range []string{"args", "arguments", "params"} {
+			if x, ok := m[key]; ok {
+				next, found = x, true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+		if s, ok := next.(string); ok {
+			var inner any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &inner); err != nil {
+				break
+			}
+			next = inner
+		}
+		v = next
+	}
+	if _, ok := v.(map[string]any); ok {
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
+	}
+	return raw
 }
 
 // ============================================================================
@@ -487,6 +557,63 @@ func (sm *SubagentManager) Steer(id, content string) error {
 	return nil
 }
 
+// RenderSubagentsForHuman 渲染子代理清单给人看（/subagents 内部命令用）：
+// 按创建时间排序，含状态图标、批次、模型、步数与结果/错误摘要。
+// 与 RenderResults（给模型的紧凑版）区分。
+func (sm *SubagentManager) RenderSubagentsForHuman() string {
+	sm.mu.RLock()
+	subs := make([]*SubagentHandle, 0, len(sm.subs))
+	for _, h := range sm.subs {
+		subs = append(subs, h)
+	}
+	sm.mu.RUnlock()
+	if len(subs) == 0 {
+		return "（还没有派发过子任务。用 delegate_task 派发后这里会显示状态）"
+	}
+	sort.Slice(subs, func(i, j int) bool { return subs[i].CreatedAt.Before(subs[j].CreatedAt) })
+	icon := map[SubagentState]string{
+		SubagentPending:   "⏳",
+		SubagentRunning:   "🏃",
+		SubagentSucceeded: "✅",
+		SubagentFailed:    "❌",
+		SubagentCancelled: "⏹",
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "子任务 %d 个：\n", len(subs))
+	for _, h := range subs {
+		state := string(h.State)
+		if h.State == SubagentRunning {
+			state = "运行中"
+		} else if h.State == SubagentPending {
+			state = "排队中"
+		} else if h.State == SubagentSucceeded {
+			state = "已完成"
+		} else if h.State == SubagentFailed {
+			state = "失败"
+		} else if h.State == SubagentCancelled {
+			state = "已取消"
+		}
+		fmt.Fprintf(&sb, " %s %s  %s", icon[h.State], h.ID, state)
+		if h.Batch != "" {
+			fmt.Fprintf(&sb, "  [%s]", h.Batch)
+		}
+		if h.Model != "" {
+			fmt.Fprintf(&sb, "  模型:%s", h.Model)
+		}
+		if h.StepsUsed > 0 {
+			fmt.Fprintf(&sb, "  %d步", h.StepsUsed)
+		}
+		fmt.Fprintf(&sb, "\n     任务：%s\n", truncate(h.Goal, 80))
+		if h.Result != "" {
+			fmt.Fprintf(&sb, "     结果：%s\n", truncate(firstNonEmpty(h.Result, h.Error), 160))
+		}
+		if h.Error != "" && h.Result == "" {
+			fmt.Fprintf(&sb, "     错误：%s\n", truncate(h.Error, 160))
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
 // RenderResults 汇总所有句柄（含结果与错误），供 list_subagents / 结果总览用。
 func (sm *SubagentManager) RenderResults() string {
 	sm.mu.RLock()
@@ -539,9 +666,11 @@ func DelegateTool(sm *SubagentManager) plugins.Tool {
 	return plugins.Tool{
 		Name: "delegate_task",
 		Description: "分派子代理并行处理子任务。复杂任务可一次派多个：{\"tasks\":[{\"goal\":\"子任务1\",\"context\":\"背景\"},{\"goal\":\"子任务2\"}]}；" +
-			"单个用 {\"goal\":\"...\",\"context\":\"...\",\"max_steps\":30}。异步返回句柄 id，用 get_subagent 查结果，list_subagents 看全部。" +
-			"子代理有完整工具能力(read/bash/edit/grep)，上下文与主对话隔离。",
+			"单个用 {\"goal\":\"...\",\"context\":\"...\",\"max_steps\":30}。异步返回句柄 id，用 get_subagent 查结果，list_subagents 看全部，运行中可用 steer_subagent 纠偏。" +
+			"role 四选一：leaf(默认，独立执行)、implement(动手实现)、explore(只读调研)、review(只读审查)；explore/review 的写类工具(edit/write)被强制摘除，只出结论。" +
+			"有先后依赖的子任务先记 todo（action=add, blocked_by），完成回灌会自动解锁后继；tasks[] 里只放互相独立的。上下文与主对话隔离。",
 		Run: func(args string) (string, error) {
+			args = unwrapArgsJSON(args)
 			var batch struct {
 				Tasks []SubagentLaunchRequest `json:"tasks"`
 			}
@@ -586,6 +715,7 @@ func GetSubagentTool(sm *SubagentManager) plugins.Tool {
 		Name:        "get_subagent",
 		Description: "查询某个子代理的状态与结果。Args: {id}。返回含 state/result/error。",
 		Run: func(args string) (string, error) {
+			args = unwrapArgsJSON(args)
 			var p struct {
 				ID string `json:"id"`
 			}
@@ -619,6 +749,7 @@ func CancelSubagentTool(sm *SubagentManager) plugins.Tool {
 		Name:        "cancel_subagent",
 		Description: "取消一个运行中的子代理。Args: {id}。",
 		Run: func(args string) (string, error) {
+			args = unwrapArgsJSON(args)
 			var p struct {
 				ID string `json:"id"`
 			}
@@ -656,6 +787,7 @@ func DelegationGuide() string {
 
 拆的时候：
 - 用 {"tasks":[{goal,context},{goal,context}]} 一次派多个，让它们真并行；
+- 子任务间若有先后依赖，先 todo add（blocked_by）落依赖，完成回灌会自动解锁后继；tasks[] 里只放互相独立的；
 - 每个 goal 写清"交付什么"，context 补足子代理看不到的背景（它只有你的 messages，没有主对话）；
 - 派完先用 list_subagents 看状态，用 get_subagent 取结果，**汇总后自己写最终答复**——不要把子代理的原始输出直接甩给用户；
 - 发现某个子代理跑偏，用 steer_subagent 发纠正（不终止），确实没救了再 cancel_subagent。
@@ -669,6 +801,7 @@ func SteerSubagentTool(sm *SubagentManager) plugins.Tool {
 		Name:        "steer_subagent",
 		Description: "给运行中的子代理发一条纠正指令，它会在此后各步优先遵守。Args: {id, message}。任务不终止。",
 		Run: func(args string) (string, error) {
+			args = unwrapArgsJSON(args)
 			var p struct {
 				ID      string `json:"id"`
 				Message string `json:"message"`

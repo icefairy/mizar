@@ -586,3 +586,139 @@ func TestSubagent_UnknownRoleNormalized(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// GAP-S1 第一层：只读角色（explore/review）的工具白名单强制
+// ============================================================================
+
+// explore/review 的写类工具（edit/write）必须从子 agent 工具清单里摘除——
+// 只靠 roleHint 提示词约束的话，模型不守约照样能改文件。
+// leaf/implement 不受影响，edit/write 仍然在场。
+func TestSubagent_RoleWhitelistBlocksWriteTools(t *testing.T) {
+	newMgr := func(script []string) (*SubagentManager, *scriptedLLM) {
+		llm := &scriptedLLM{script: script}
+		pm := plugins.NewManager("", nil)
+		pm.RegisterBuiltin(plugins.Tool{Name: "read", Description: "t", Run: func(string) (string, error) { return "", nil }})
+		pm.RegisterBuiltin(plugins.Tool{Name: "edit", Description: "t", Run: func(string) (string, error) { return "", nil }})
+		pm.RegisterBuiltin(plugins.Tool{Name: "write", Description: "t", Run: func(string) (string, error) { return "", nil }})
+		return NewSubagentManager(SubagentConfig{ParentLLM: llm, ParentSys: "sys", Plugins: pm}), llm
+	}
+	waitCall := func(llm *scriptedLLM) {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && llm.callCount() == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	toolSeen := func(llm *scriptedLLM, name string) bool {
+		llm.mu.Lock()
+		defer llm.mu.Unlock()
+		for _, tl := range llm.gotTool {
+			for _, tt := range tl {
+				if tt.Name == name {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// explore：edit/write 必须被摘除，read 必须保留。
+	smExp, llmExp := newMgr([]string{`{"action":"reply","text":"ok"}`})
+	smExp.Launch(SubagentLaunchRequest{Goal: "只读调研", Role: "explore"})
+	waitCall(llmExp)
+	if toolSeen(llmExp, "edit") || toolSeen(llmExp, "write") {
+		t.Fatal("explore 角色的子 agent 工具清单里不应出现 edit/write（工具层强制）")
+	}
+	if !toolSeen(llmExp, "read") {
+		t.Fatal("explore 角色的子 agent 工具清单应保留 read")
+	}
+
+	// review：同 explore。
+	smRev, llmRev := newMgr([]string{`{"action":"reply","text":"ok"}`})
+	smRev.Launch(SubagentLaunchRequest{Goal: "只读审查", Role: "review"})
+	waitCall(llmRev)
+	if toolSeen(llmRev, "edit") || toolSeen(llmRev, "write") {
+		t.Fatal("review 角色的子 agent 工具清单里不应出现 edit/write")
+	}
+
+	// implement：写类工具保留，不受白名单影响。
+	smImp, llmImp := newMgr([]string{`{"action":"reply","text":"ok"}`})
+	smImp.Launch(SubagentLaunchRequest{Goal: "动手实现", Role: "implement"})
+	waitCall(llmImp)
+	if !toolSeen(llmImp, "edit") || !toolSeen(llmImp, "write") {
+		t.Fatal("implement 角色的子 agent 工具清单应保留 edit/write")
+	}
+
+	// leaf（默认）：同 implement。
+	smLeaf, llmLeaf := newMgr([]string{`{"action":"reply","text":"ok"}`})
+	smLeaf.Launch(SubagentLaunchRequest{Goal: "独立执行"})
+	waitCall(llmLeaf)
+	if !toolSeen(llmLeaf, "edit") || !toolSeen(llmLeaf, "write") {
+		t.Fatal("leaf（默认）角色的子 agent 工具清单应保留 edit/write")
+	}
+}
+
+// roleWriteBlocked 只对只读角色返回写类工具名，其余角色返回 nil。
+func TestRoleWriteBlocked(t *testing.T) {
+	for _, role := range []string{"explore", "review"} {
+		blocked := roleWriteBlocked(role)
+		if !containsStr(blocked, "edit") || !containsStr(blocked, "write") {
+			t.Fatalf("role=%s 应屏蔽 edit/write，实际 %v", role, blocked)
+		}
+	}
+	for _, role := range []string{"leaf", "implement", "未知角色"} {
+		if got := roleWriteBlocked(role); got != nil {
+			t.Fatalf("role=%s 不应屏蔽任何工具，实际 %v", role, got)
+		}
+	}
+}
+
+// ============================================================================
+// 并发实测回归：模型把参数包一层 {"args": ...} 导致 "id required" 死循环
+// ============================================================================
+
+// get_subagent 收到 {"args":"{\"id\":\"...\"}"} 包装时应剥壳解析，而不是报 id required。
+func TestSubagentTools_UnwrapArgsShell(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "被查询的任务"})
+	waitState(sm, h.ID, 2*time.Second)
+
+	get := GetSubagentTool(sm)
+	// 字符串化包装（实测形态）
+	out, err := get.Run(`{"args":"{\"id\":\"` + h.ID + `\"}"}`)
+	if err != nil || !strings.Contains(out, h.ID) {
+		t.Fatalf("字符串化包装应剥壳成功：out=%q err=%v", out, err)
+	}
+	// 对象包装 {"args":{"id":...}}
+	if out, err = get.Run(`{"args":{"id":"` + h.ID + `"}}`); err != nil || !strings.Contains(out, h.ID) {
+		t.Fatalf("对象包装应剥壳成功：out=%q err=%v", out, err)
+	}
+	// 裸参数不受影响
+	if out, err = get.Run(`{"id":"` + h.ID + `"}`); err != nil || !strings.Contains(out, h.ID) {
+		t.Fatalf("裸参数应原样解析：out=%q err=%v", out, err)
+	}
+	// cancel / steer 同样剥壳
+	cancel := CancelSubagentTool(sm)
+	if out, err = cancel.Run(`{"args":"{\"id\":\"` + h.ID + `\"}"}`); err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("cancel 包装参数应剥壳成功：out=%q err=%v", out, err)
+	}
+	steer := SteerSubagentTool(sm)
+	if _, err = steer.Run(`{"args":"{\"id\":\"` + h.ID + `\",\"message\":\"改方向\"}"}`); err != nil {
+		if strings.Contains(err.Error(), "id and message required") {
+			t.Fatalf("steer 包装参数没剥壳（误报缺参）：%v", err)
+		}
+		// 已终结任务报「不在运行中」= 剥壳生效、参数已送达
+	}
+}
+
+// delegate_task 收到包装壳时也应剥壳（单任务 {"args":"{\"goal\":...}"} 形态）。
+func TestDelegateTool_UnwrapArgsShell(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	tool := DelegateTool(sm)
+	out, err := tool.Run(`{"args":"{\"goal\":\"包装壳里的任务\"}"}`)
+	if err != nil || !strings.Contains(out, "包装壳里的任务") {
+		t.Fatalf("delegate 包装参数应剥壳成功：out=%q err=%v", out, err)
+	}
+}
+
