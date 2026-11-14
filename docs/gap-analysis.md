@@ -109,7 +109,7 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；只读角色工�
 | # | 功能 | Pi 实现要点 | Mizar 现状 | 建议 |
 |---|---|---|---|---|
 | P-1 | ~~扩展事件拦截~~ | tool_call 事件可 `deny/rewrite/intercept/allow` | ✅ 已实现（2026-11-15）：`Hooks.ToolCallDecision`（deny 立即生效 / rewrite 原地改写后继续 / allow 放行；panic fail-closed deny），接入 runOneToolCall 执行前，拒绝复用权限拒绝的消息形状 | 已补齐 |
-| P-2 | **分支树会话** | `/tree` `/fork` `/clone`，JSONL + 分支摘要，交互回溯 | 线性 JSONL + `--session` 续接；`agent.Clone()` 只用于子代理克隆（clone.go） | 🟡 简化版：`/fork` 从指定消息位置派生新 session ID 重放前缀。todo 与 subagent-state 已有按历史回放重建的机制，可直接复用 |
+| P-2 | ~~分支树会话~~ | `/tree` `/fork` `/clone`，JSONL + 分支摘要，交互回溯 | ✅ 简化版已实现（2026-11-15）：`/fork`（全量）/ `/fork <n>`（保留前 n 条）从当前上下文派生新 session ID 重放前缀，血缘记 `{"type":"fork"}` 元数据行（`ForkParent` 可查），标题带 "(fork)" 标记；todo 依赖随前缀回放。无 `/tree` 可视化与分支内回溯 | 已补齐简化版，`/tree` 按需再做 |
 | P-3 | ~~thinking level 完整档位~~ | off/minimal/low/medium/high/xhigh/max | ✅ 已实现（2026-11-15）：auto/off/low/medium/high/xhigh/max，xhigh/max 透传 reasoning_effort（需网关支持） | 已补齐 |
 | P-4 | **模型轮换/多 provider** | Ctrl+P / `/scoped-models` / models.json 多模型切换 | `/model` 单切换；子任务已可按任务指定模型（Model 字段生效），但主对话仍单模型 | 🟡 结合 GAP-S1 自定义类型（per-type model），价值大于 UI 级轮换 |
 | P-5 | **Project Trust** | 项目级资源加载确认 + trust.json | 无 | 🔵 简化版：首次加载项目级 config/技能时 TUI 确认一次 |
@@ -182,7 +182,6 @@ model: 主模型    # 可省略，继承父级
 
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
-| 🔵 P2 | `/fork` 会话分支派生（复用 todo/subagent-state 回放机制） | ~100 行 | P-2 |
 | 🔵 P2 | 用户级 hooks（shell 命令响应工具事件） | ~150 行 | C-6 |
 | 🔵 P2 | 结构化记忆四分类 + 自动加载索引 | ~200 行 | C-7 |
 | 🔵 P3 | per-subagent token/cost 计量 | ~50 行 | GAP-S5 |
@@ -190,7 +189,7 @@ model: 主模型    # 可省略，继承父级
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）。
 
 ---
 
@@ -201,6 +200,8 @@ model: 主模型    # 可省略，继承父级
 | `internal/agent/subagent.go` | 子代理管理器（本文档第一节全部引用） |
 | `internal/agent/subagent_types.go` | 用户自定义子代理类型（GAP-S1 第二层：加载/解析/SetAgentTypes） |
 | `internal/agent/subagent_persist.go` | 子任务句柄落盘回放（GAP-S4：标记消息/回放/Restore） |
+| `cmd/mizar/forkcmd.go` | /fork 分支派生核心逻辑（P-2：前缀重放/血缘/标题） |
+| `internal/session/session.go` | 会话存储（fork 血缘记录 AppendFork/ForkParent） |
 | `cmd/mizar/main.go:716-723` | 五个委派工具注册 + DelegationGuide 注入 |
 | `internal/llm/openai.go` | `WithModel`（modelDeriver 的实现侧）+ thinking 档位（P-3 xhigh/max） |
 | `internal/builtins/todo_pi.go` | 平铺 todo（C-2 升级对象，回放机制复用点） |
