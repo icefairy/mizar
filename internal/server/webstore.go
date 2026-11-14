@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,12 +18,34 @@ import (
 // ============================================================================
 
 // convMessage 一条会话消息。
+//
+// Role 只保留 user / assistant 两值——LLM 协议里的 tool 消息不能直接落盘进
+// 上下文（必须紧跟带 tool_calls 的 assistant 消息），所以工具过程用 Kind 标记
+// 存在 role=assistant 的消息流里，注入 LLM 时按 Kind 过滤掉。
 type convMessage struct {
 	Role    string `json:"role"` // user | assistant
 	Content string `json:"content"`
 	// Ts 消息时间（RFC3339）。旧数据为空，加载时继承 createdAt 兼容。
 	Ts string `json:"ts,omitempty"`
+	// Kind 消息种类，空 = text（向前兼容旧数据）。
+	//   text     普通对话正文
+	//   tool     工具调用过程（Tool/Args/Result 有值，Content 为一行摘要）
+	Kind string `json:"kind,omitempty"`
+	// Tool 工具名（Kind=tool 时）。
+	Tool string `json:"tool,omitempty"`
+	// Args 工具入参（截断后的 JSON 文本）。
+	Args string `json:"args,omitempty"`
+	// Reason 模型调用该工具前说的说明文字（如「我先看一下这个文件」）。
+	// 与 Result 分开存：Reason 是模型的意图陈述，Result 是工具的真实输出。
+	Reason string `json:"reason,omitempty"`
+	// Result 工具输出（截断后的文本）。
+	Result string `json:"result,omitempty"`
+	// Err 工具执行错误（有值时 Result 可能为空）。
+	Err string `json:"err,omitempty"`
 }
+
+// isText 该消息是否应计入对话上下文（工具过程只是展示用，不进 LLM）。
+func (m convMessage) isText() bool { return m.Kind == "" || m.Kind == "text" }
 
 // conversation 一个独立会话。
 type conversation struct {
@@ -273,8 +296,84 @@ func (s *webStore) markTitleManual(id string, manual bool) {
 	}
 }
 
-// appendMsg 追加一条消息（首条 user 消息自动作为标题）。
+// appendMsg 追加一条消息（Role 为 user/assistant 的正文；首条 user 消息自动作为标题）。
 func (s *webStore) appendMsg(id string, m convMessage) {
+	s.appendMsgRaw(id, m, true)
+}
+
+// appendToolMsg 追加一条工具过程消息（只用于展示，不进 LLM 上下文）。
+// reason 是模型调用工具前说的说明文字（可为空），单独存字段——它是模型的意图，
+// 与工具真实输出（result）语义不同，界面上要分开显示。
+// 工具输出可能极长（读文件/命令输出），落盘前按上限截断，避免 webui.json 膨胀。
+func (s *webStore) appendToolMsg(id, tool, args, reason, result string, execErr error) {
+	if id == "" {
+		return
+	}
+	m := convMessage{
+		Role:   "assistant",
+		Kind:   "tool",
+		Tool:   tool,
+		Args:   truncateField(args, toolFieldLimit),
+		Reason: truncateField(reason, toolReasonLimit),
+		Result: truncateField(result, toolFieldLimit),
+	}
+	if execErr != nil {
+		m.Err = truncateField(execErr.Error(), 500)
+	}
+	m.Content = toolSummary(m)
+	s.appendMsgRaw(id, m, false)
+}
+
+// 工具过程字段落盘上限。前端只展示摘要，完整值也能看，但不必无上限保存。
+const (
+	toolFieldLimit  = 4000
+	toolReasonLimit = 2000 // 模型说明文字通常较短，留够但不必过大
+)
+
+// toolSummary 生成工具消息的一行摘要（前端兜底展示 + 会话列表预览用）。
+// 优先展示模型自己的说明（reason），没有才退回展示参数/结果。
+func toolSummary(m convMessage) string {
+	status := "✓"
+	if m.Err != "" {
+		status = "✗"
+	}
+	s := status + " " + m.Tool
+	if m.Reason != "" {
+		s += " — " + firstLine(m.Reason, 160)
+	}
+	if m.Args != "" {
+		s += " " + firstLine(m.Args, 120)
+	}
+	if m.Err != "" {
+		s += " → " + firstLine(m.Err, 160)
+	} else if m.Result != "" {
+		s += " → " + firstLine(m.Result, 160)
+	}
+	return s
+}
+
+// truncateField 超长截断并标注原始长度（便于排查「为什么内容不完整」）。
+func truncateField(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + fmt.Sprintf("\n…（已截断，原长 %d 字节）", len(s))
+}
+
+// firstLine 取首行（多行折叠成一行展示），超长再截断。
+func firstLine(s string, limit int) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) > limit {
+		return string(r[:limit]) + "…"
+	}
+	return s
+}
+
+func (s *webStore) appendMsgRaw(id string, m convMessage, touchTitle bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureFreshLocked()
@@ -285,7 +384,7 @@ func (s *webStore) appendMsg(id string, m convMessage) {
 			}
 			c.Messages = append(c.Messages, m)
 			c.UpdatedAt = time.Now()
-			if m.Role == "user" && (c.Title == "新会话" || c.Title == "") {
+			if touchTitle && m.Role == "user" && (c.Title == "新会话" || c.Title == "") {
 				c.Title = titleFrom(m.Content)
 			}
 			s.dirty = true

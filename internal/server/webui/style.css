@@ -170,6 +170,9 @@ button { font-family: inherit; cursor: pointer; }
 /* 正文内一切块级元素都不许超出气泡宽度（图片/长链接/超长单词） */
 .msg .body > * { max-width: 100%; }
 .msg.user .body { background: var(--user-bg); color: var(--user-text); border-bottom-right-radius: 3px; white-space: pre-wrap; }
+/* 插话（steer）：运行中注入当前任务的消息，与正式提问区分开（虚线边框） */
+.msg.user.steer .body { background: transparent; color: var(--text); border: 1px dashed var(--accent); }
+.msg.user.steer .who { color: var(--accent); }
 .msg.assistant .body { background: var(--ai-bg); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
 .msg.sys .body { background: transparent; border: 1px dashed var(--border); color: var(--text-dim); font-size: 13px; white-space: pre-wrap; }
 .msg.tool .body { background: var(--bg-code); border: 1px solid var(--border); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-dim); white-space: pre-wrap; }
@@ -557,3 +560,6 @@ button { font-family: inherit; cursor: pointer; }
   .field .row > input, .field .row > select { flex: 1 1 100%; }
   .field .row > button { flex: 1 1 auto; }
 }
+/* 工具执行失败：整行染红，和成功的 🔧 区分开 */
+.pstep.pstep-err .ptool { color: var(--danger, #d9534f); }
+.pstep.pstep-err .pico { color: var(--danger, #d9534f); }

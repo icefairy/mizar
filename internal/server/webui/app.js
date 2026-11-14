@@ -417,6 +417,21 @@
     scrollLog();
     return wrap;
   }
+  // addSteerMsg 打断/注入成功的消息：已经进入当前循环，直接在本轮里显示成
+  // 一条「我」的插话。它不再是待发消息——待发队列里对应项已被移除，
+  // 本轮结束时也不会被重新补发（服务端已落到会话历史）。
+  function addSteerMsg(conv, text) {
+    if (conv && curConv && conv !== curConv) return;   // 用户已切走，切回时从历史读回
+    const wrap = document.createElement("div");
+    wrap.className = "msg user steer";
+    wrap.__raw = text == null ? "" : String(text);
+    wrap.innerHTML = whoHtml("我（插话）") + '<div class="body"></div>' +
+      '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
+    wrap.querySelector(".body").textContent = wrap.__raw;
+    turnHost().appendChild(wrap);
+    scrollLog();
+    return wrap;
+  }
   // bumpProc 已改为空操作：步骤直接累加进答复框 .steps，不再独立计数展示
   function bumpProc() {}
   // 确保最终答复气泡存在：body 内含 steps（过程步骤）+ text（markdown 正文），两者独立容器避免互相覆盖
@@ -612,6 +627,11 @@
           newTurn();
           addUserMsg(m.content, m.ts);
           curTurn = turnEl;
+        } else if (m.role === "assistant" && m.kind === "tool") {
+          // 工具过程（刷新后从落盘历史恢复）：模型的说明 reason + 参数 + 结果
+          if (!curTurn) { newTurn(); curTurn = turnEl; }
+          const sb = ensureSteps();
+          appendToolStep(sb, m);
         } else if (m.role === "assistant") {
           if (!curTurn) { newTurn(); curTurn = turnEl; }
           const textEl = ensureReply(m.ts);
@@ -619,7 +639,7 @@
           wrap.__raw = m.content;
           textEl.innerHTML = md(m.content);
         } else {
-          // tool / sys / 其他：进答复框步骤容器（累加可见）
+          // sys / 其他：进答复框步骤容器（累加可见）
           if (!curTurn) { newTurn(); curTurn = turnEl; }
           const sb = ensureSteps();
           const step = document.createElement("div");
@@ -1114,6 +1134,32 @@
     bumpProc();
     scrollLog();
   }
+  // 工具过程（历史回放用）：一段工具调用 = 模型说明 + 参数 + 结果。
+  // 与实时 onToolCall/onToolResult 的视觉结构一致（🔧 参数行 + ↳ 结果行），
+  // 差别是历史里把模型那句 reason 也带上，刷新后仍能看到当时的判断依据。
+  function appendToolStep(sb, m) {
+    if (m.reason) {
+      const r = document.createElement("div");
+      r.className = "pstep pstep-text";
+      r.textContent = compact(m.reason, 300);
+      sb.appendChild(r);
+    }
+    const head = document.createElement("div");
+    head.className = "pstep pstep-tool" + (m.err ? " pstep-err" : "");
+    const a = compact(m.args, 160);
+    head.innerHTML = '<span class="pico">' + (m.err ? "✗" : "🔧") + '</span>' +
+      '<span class="ptool">' + esc(m.tool || "") + '</span>' +
+      (a ? '<span class="pargs">' + esc(a) + '</span>' : "");
+    sb.appendChild(head);
+    const body = m.err || m.result;
+    if (body) {
+      const step = document.createElement("div");
+      step.className = "pstep pstep-res";
+      step.innerHTML = '<span class="pico">↳</span><span class="pres">' + esc(compact(body, 200)) + '</span>';
+      sb.appendChild(step);
+    }
+    bumpProc();
+  }
   // 工具结果：追加到步骤容器（可见）
   function onToolResult(tool, result) {
     const r = compact(result, 200);
@@ -1436,8 +1482,11 @@
           setQueueKind(qid, "queue");
           flashQuick("本轮已结束，改为排队，稍后自动发送");
         } else {
-          // 已注入当前循环：模型下一步就能看到，不是「等这一轮结束」。
-          setQueueKind(qid, "steer");
+          // 已注入当前循环：模型下一步就能看到，**不再是待处理消息**。
+          // 立刻从待发队列移除（否则前端一直显示「排队/注入中」，误导用户
+          // 以为还没生效、甚至以为会被重复发送），并在本轮里显示成一条用户插话。
+          dropQueue(qid);
+          addSteerMsg(convId, text);
           flashQuick("已注入当前任务，模型下一步即生效");
         }
       } catch (e) {

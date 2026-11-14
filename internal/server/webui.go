@@ -720,15 +720,28 @@ func (s *Server) handleWebRun(w http.ResponseWriter, r *http.Request) {
 
 	// Agent 模式复用会话历史：把该会话的 user/assistant 消息注入 a.Initial，
 	// 使切换模式时上下文连续（修复"切 Agent 模式后列表无变化"的割裂感）。
+	// 只注入正文消息：Kind=tool 的工具过程是展示用的，塞进 LLM 上下文会破坏
+	// OpenAI 协议（tool 消息必须紧跟带 tool_calls 的 assistant 消息）。
 	if body.ConversationID != "" {
 		if c := s.web.store.get(body.ConversationID); c != nil {
 			var initial []agent.Message
 			for _, m := range c.Messages {
+				if !m.isText() {
+					continue
+				}
 				initial = append(initial, agent.Message{Role: m.Role, Content: m.Content})
 			}
 			ag.Initial = initial
 		}
 	}
+
+	// 工具调用过程落盘：模型说的一句说明（reason）+ 调用参数 + 真实输出。
+	// 页面刷新后 /web/api/conversation 能读回这些过程，不再只剩一问一答。
+	// 注意：回调在工具执行线程同步调用，webStore 内部只 append + 落盘，量小可接受。
+	ag.OnToolExchange = func(tool, args, reason, out string, execErr error) {
+		s.web.store.appendToolMsg(convID, tool, args, reason, out, execErr)
+	}
+	defer func() { ag.OnToolExchange = nil }()
 
 	// 流式输出：把每步 LLM 的 reply 文本增量 + 思考过程通过 WS 广播给前端。
 	// 用 StreamTextExtractor 提取可显示文本（剥掉控制 JSON / 工具调用 JSON）。
