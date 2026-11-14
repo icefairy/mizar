@@ -52,29 +52,40 @@ type SubagentLaunchRequest struct {
 
 // SubagentHandle 一个子代理的运行句柄。register 写进 subs map 后 get/list 才查得到。
 type SubagentHandle struct {
-	ID        string        `json:"id"`
-	Goal      string        `json:"goal"`
-	State     SubagentState `json:"state"`
-	CreatedAt time.Time     `json:"created_at"`
-	Depth     int           `json:"depth"`
-	Model     string        `json:"model,omitempty"`     // 实际使用的模型（req.Model 生效后回显）
-	WorkingDir string       `json:"working_dir,omitempty"`
-	Result    string        `json:"result,omitempty"`
-	Error     string        `json:"error,omitempty"`
-	StepsUsed int           `json:"steps_used,omitempty"`
-	Batch     string        `json:"batch,omitempty"` // 同一次 fan-out 的批次 id
+	ID         string        `json:"id"`
+	Goal       string        `json:"goal"`
+	State      SubagentState `json:"state"`
+	CreatedAt  time.Time     `json:"created_at"`
+	Depth      int           `json:"depth"`
+	Model      string        `json:"model,omitempty"` // 实际使用的模型（req.Model 生效后回显）
+	WorkingDir string        `json:"working_dir,omitempty"`
+	Result     string        `json:"result,omitempty"`
+	Error      string        `json:"error,omitempty"`
+	StepsUsed  int           `json:"steps_used,omitempty"`
+	Batch      string        `json:"batch,omitempty"` // 同一次 fan-out 的批次 id
+
+	// Progress 最近 N 条运行步骤（get_subagent / /subagents 可见；运行中持续更新，
+	// 终态后保留最后一批供事后查看）。快照字段，由 snapshot() 从 progress 复制。
+	Progress []string `json:"progress,omitempty"`
 
 	cancel context.CancelFunc `json:"-"` // 运行态，不序列化
 	child  *Agent             `json:"-"` // 运行中的子 Agent（供 Steer 注入纠正）
+
+	progress []string // 运行中进度（child.OnStep 写入，sm.mu 保护）；快照时截取到 Progress
 }
 
+// maxSubagentProgress 进度缓冲上限：只留最近 N 条，防长任务把句柄撑爆。
+const maxSubagentProgress = 20
+
 // snapshot 返回可安全序列化的副本（去掉 cancel/child 运行态）。
+// 调用方必须已持有 sm.mu（读锁即可）：progress 由子 goroutine 在写锁下追加。
 func (h *SubagentHandle) snapshot() SubagentHandle {
 	return SubagentHandle{
 		ID: h.ID, Goal: h.Goal, State: h.State, CreatedAt: h.CreatedAt,
 		Depth: h.Depth, Model: h.Model, WorkingDir: h.WorkingDir,
 		Result: h.Result, Error: h.Error,
 		StepsUsed: h.StepsUsed, Batch: h.Batch,
+		Progress: append([]string(nil), h.progress...),
 	}
 }
 
@@ -96,16 +107,16 @@ const (
 )
 
 type SubagentManager struct {
-	mu         sync.RWMutex
-	subs       map[string]*SubagentHandle
-	nextID     atomic.Int64
-	maxDepth   int
-	maxSteps   int
-	parentLLM  LLM               // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
-	parentSys  string            // 主 system（子 agent 个性化指令层）
-	pm         *plugins.Manager // 共享插件注册表（只读复制工具清单）
-	jobNotify  func(note string) // 结果回灌：完成通知塞进主循环可见通道
-	sem        chan struct{}     // 并发上限
+	mu        sync.RWMutex
+	subs      map[string]*SubagentHandle
+	nextID    atomic.Int64
+	maxDepth  int
+	maxSteps  int
+	parentLLM LLM               // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
+	parentSys string            // 主 system（子 agent 个性化指令层）
+	pm        *plugins.Manager  // 共享插件注册表（只读复制工具清单）
+	jobNotify func(note string) // 结果回灌：完成通知塞进主循环可见通道
+	sem       chan struct{}     // 并发上限
 }
 
 // SubagentConfig 构造参数。JobNotify 由 main.go 接入 Jobs 完成通知。
@@ -218,7 +229,7 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 			State:      SubagentPending,
 			CreatedAt:  time.Now(),
 			Depth:      depth,
-			Model:      req.Model,       // 未指定时为空，runSubagent 里回显实际值
+			Model:      req.Model, // 未指定时为空，runSubagent 里回显实际值
 			WorkingDir: req.WorkingDir,
 			Batch:      batchID,
 		}
@@ -331,6 +342,17 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 	child.System = sm.parentSys
 	child.MaxSteps = req.MaxSteps
 	child.WorkDir = req.WorkingDir
+	// 进度上报（GAP-S3）：子循环每步/每次工具调用回调一行摘要，写进句柄缓冲
+	//（get_subagent 的 progress 字段与 /subagents 的「进度」行读取）。
+	// 写锁保护；只留最近 maxSubagentProgress 条。
+	child.OnStep = func(step string) {
+		sm.mu.Lock()
+		h.progress = append(h.progress, step)
+		if len(h.progress) > maxSubagentProgress {
+			h.progress = h.progress[len(h.progress)-maxSubagentProgress:]
+		}
+		sm.mu.Unlock()
+	}
 	// 把 child 存进句柄，供 Steer(id, msg) 在任务运行中注入纠正消息。
 	sm.mu.Lock()
 	h.child = child
@@ -390,7 +412,10 @@ func (sm *SubagentManager) notify(h *SubagentHandle, reply string) {
 	if sm.jobNotify == nil {
 		return
 	}
+	// snapshot 现在读 progress（OnStep 在子 goroutine 写），必须带锁。
+	sm.mu.RLock()
 	s := h.snapshot()
+	sm.mu.RUnlock()
 	line := fmt.Sprintf("子代理 %s [%s] %s → %s", s.ID, s.State, truncate(s.Goal, 60),
 		truncate(firstNonEmpty(reply, s.Result, s.Error), 300))
 	sm.jobNotify(line)
@@ -561,10 +586,12 @@ func (sm *SubagentManager) Steer(id, content string) error {
 // 按创建时间排序，含状态图标、批次、模型、步数与结果/错误摘要。
 // 与 RenderResults（给模型的紧凑版）区分。
 func (sm *SubagentManager) RenderSubagentsForHuman() string {
+	// 收集快照而非活句柄：progress 由子 goroutine 在写锁下追加，
+	// 活句柄在 RUnlock 后读取会 data race（race detector 实测命中）。
 	sm.mu.RLock()
-	subs := make([]*SubagentHandle, 0, len(sm.subs))
+	subs := make([]SubagentHandle, 0, len(sm.subs))
 	for _, h := range sm.subs {
-		subs = append(subs, h)
+		subs = append(subs, h.snapshot())
 	}
 	sm.mu.RUnlock()
 	if len(subs) == 0 {
@@ -580,7 +607,8 @@ func (sm *SubagentManager) RenderSubagentsForHuman() string {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "子任务 %d 个：\n", len(subs))
-	for _, h := range subs {
+	for i := range subs {
+		h := &subs[i]
 		state := string(h.State)
 		if h.State == SubagentRunning {
 			state = "运行中"
@@ -604,6 +632,10 @@ func (sm *SubagentManager) RenderSubagentsForHuman() string {
 			fmt.Fprintf(&sb, "  %d步", h.StepsUsed)
 		}
 		fmt.Fprintf(&sb, "\n     任务：%s\n", truncate(h.Goal, 80))
+		// 最近一步（当前在干什么）；终态后 Progress 保留最后一批供事后查看
+		if len(h.Progress) > 0 && h.State != SubagentPending {
+			fmt.Fprintf(&sb, "     进度：%s\n", truncate(h.Progress[len(h.Progress)-1], 100))
+		}
 		if h.Result != "" {
 			fmt.Fprintf(&sb, "     结果：%s\n", truncate(firstNonEmpty(h.Result, h.Error), 160))
 		}
@@ -703,7 +735,9 @@ func marshalHandles(sm *SubagentManager, handles []*SubagentHandle) string {
 		if s, ok := sm.Get(h.ID); ok {
 			out = append(out, *s)
 		} else {
+			sm.mu.RLock()
 			out = append(out, h.snapshot())
+			sm.mu.RUnlock()
 		}
 	}
 	b, _ := json.Marshal(map[string]interface{}{"count": len(out), "handles": out})

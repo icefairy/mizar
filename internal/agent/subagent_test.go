@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -285,7 +286,7 @@ func TestDelegateTool_SingleAndBatch(t *testing.T) {
 		t.Fatalf("单任务 Run: %v", err)
 	}
 	var single struct {
-		Count   int               `json:"count"`
+		Count   int              `json:"count"`
 		Handles []SubagentHandle `json:"handles"`
 	}
 	if json.Unmarshal([]byte(out), &single) != nil || single.Count != 1 {
@@ -722,3 +723,83 @@ func TestDelegateTool_UnwrapArgsShell(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// GAP-S3：运行中进度上报（OnStep → 句柄 Progress → get_subagent //subagents）
+// ============================================================================
+
+// 子 agent 的每步活动要写进句柄 Progress：step 开始行 + 工具调用行（含工具名
+// 与参数摘要）；超 maxSubagentProgress 只留最近 N 条，长任务不撑爆句柄。
+func TestSubagent_ProgressRecorded(t *testing.T) {
+	script := make([]string, 0, 26)
+	for i := 0; i < 25; i++ {
+		script = append(script, `{"action":"tool","tool":"ping","args":"{\"n\":`+strconv.Itoa(i)+`}"}`)
+	}
+	script = append(script, `{"action":"reply","text":"done"}`)
+	llm := &scriptedLLM{script: script}
+	sm := newTestManager(llm, nil)
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "进度测试"})
+	if st := waitState(sm, h.ID, 5*time.Second); st != SubagentSucceeded {
+		t.Fatalf("应成功，实际 %s", st)
+	}
+	got, _ := sm.Get(h.ID)
+	if len(got.Progress) != maxSubagentProgress {
+		t.Fatalf("Progress 应截取到最近 %d 条，实际 %d", maxSubagentProgress, len(got.Progress))
+	}
+	foundTool := false
+	for _, p := range got.Progress {
+		if strings.Contains(p, "ping(") {
+			foundTool = true
+			break
+		}
+	}
+	if !foundTool {
+		t.Fatalf("Progress 应包含工具调用行: %v", got.Progress)
+	}
+	last := got.Progress[len(got.Progress)-1]
+	if !strings.HasPrefix(last, "step ") {
+		t.Fatalf("最后一条应是收尾 step 开始行: %q", last)
+	}
+}
+
+// 运行中的子任务在 RenderSubagentsForHuman（/subagents）里可见「进度：step N」行。
+// 复用 Cancel 测试的 blockingLLM（阻塞在 LLM 调用 = 稳定的运行中状态）；
+// step 开始行在 LLM 调用前写入进度，阻塞期间即可断言。
+func TestSubagent_ProgressVisibleWhileRunning(t *testing.T) {
+	bl := &blockingLLM{entered: make(chan struct{})}
+	pm := plugins.NewManager("", nil)
+	pm.RegisterBuiltin(plugins.Tool{Name: "ping", Description: "t", Run: func(string) (string, error) { return "", nil }})
+	sm := NewSubagentManager(SubagentConfig{ParentLLM: bl, ParentSys: "sys", Plugins: pm})
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "运行中可见", TimeoutSecs: 60})
+
+	// 等子 agent 进入阻塞的 LLM 调用（step 1 进度已在调用前写入）
+	deadline := time.Now().Add(2 * time.Second)
+	entered := false
+	for time.Now().Before(deadline) && !entered {
+		select {
+		case <-bl.entered:
+			entered = true
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if !entered {
+		t.Fatal("子 agent 没进入阻塞的 LLM 调用")
+	}
+
+	shown := ""
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s, ok := sm.Get(h.ID); ok && s.State == SubagentRunning && len(s.Progress) > 0 {
+			shown = sm.RenderSubagentsForHuman()
+			if strings.Contains(shown, "进度：step") {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.Contains(shown, "进度：step") {
+		t.Fatalf("运行中应能看到进度行: %q", shown)
+	}
+	// 收尾：取消阻塞任务（ctx 解除），避免泄漏 goroutine
+	sm.Cancel(h.ID)
+}

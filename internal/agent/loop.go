@@ -110,31 +110,36 @@ const maxStepsWarnRemain = 3
 type Agent struct {
 	LLM          LLM
 	Plugins      *plugins.Manager
-	System       string            // 用户自定义个性化指令（注入 context 层）
-	Soul         string            // SOUL.md 内容（identity 层，跨会话稳定）
-	SkillsPrompt string            // 技能索引/正文（volatile 层，插件热加载时通过 ReloadTools 失效缓存）
-	PluginDir    string            // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
-	WorkDir      string            // 当前工作目录，注入系统提示供模型锚定搜索范围
-	Initial      []Message         // 会话恢复时的历史消息（置于 task 之前）
+	System       string    // 用户自定义个性化指令（注入 context 层）
+	Soul         string    // SOUL.md 内容（identity 层，跨会话稳定）
+	SkillsPrompt string    // 技能索引/正文（volatile 层，插件热加载时通过 ReloadTools 失效缓存）
+	PluginDir    string    // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
+	WorkDir      string    // 当前工作目录，注入系统提示供模型锚定搜索范围
+	Initial      []Message // 会话恢复时的历史消息（置于 task 之前）
 	// ConvID 本实例服务的 Web 会话 id（非 Web 入口为空）。
 	// 为什么要放在 Agent 上：Hooks 是进程级共享的，多个会话并发运行时
 	// 钩子无法从 Server 的全局状态里判断「这次工具调用属于哪个会话」，
 	// 只能由每个 Agent 实例携带自己的归属 id，随 HookContext.SessionID 传下去。
-	ConvID       string
-	MaxSteps     int               // 最大循环步数（默认 maxStepsDefault=60）
-	VerboseLog   func(string)      // 可选日志回调
-	Compactor    *Compactor        // 会话压缩器（nil = 不压缩）
-	Hooks        *Hooks            // 挂载点（nil = 无钩子）
-	Tuner        *WeakModelTuner   // 弱模型宽容策略（nil = 不启用）
-	Guard        *RepeatGuard      // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
-	Jobs         *jobs.Registry    // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
-	PlanMode     *PlanMode         // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
-	GrillMode    *GrillMode        // 拷问模式控制器（nil = 不启用；动手前先追问需求）
-	GoalService  *GoalService      // 会话目标服务（nil = 不启用；复刻 dsh goal）
-	GoalLoop     *GoalLoop         // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
-	SubAgents    *SubagentManager  // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
-	BgReview     *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
-	StatsData    *StatsDataRef     // 会话统计（nil = 不启用）
+	ConvID     string
+	MaxSteps   int          // 最大循环步数（默认 maxStepsDefault=60）
+	VerboseLog func(string) // 可选日志回调
+	Compactor  *Compactor   // 会话压缩器（nil = 不压缩）
+	Hooks      *Hooks       // 挂载点（nil = 无钩子）
+	// OnStep 实例级步骤回调（nil = 不启用）：每步开始与每次工具调用时触发，
+	// 参数是一行人类可读的进度（"step 3: bash(ls -la)"）。
+	// 与 Hooks 的区别：Hooks 进程级共享，多个会话/子代理并发时无法按实例分流；
+	// OnStep 跟随 Agent 实例归属，子代理用它喂自己的进度缓冲（GAP-S3）。
+	OnStep      func(step string)
+	Tuner       *WeakModelTuner   // 弱模型宽容策略（nil = 不启用）
+	Guard       *RepeatGuard      // 循环卫生守卫：重复调用渐进提醒，超阈值终止（nil = 不启用；复刻 dsh repeat-tool-reminder）
+	Jobs        *jobs.Registry    // 后台任务注册表（nil = 无后台任务；bash run_in_background + job_* 工具）
+	PlanMode    *PlanMode         // 计划模式控制器（nil = 不启用；复刻 dsh plan-mode）
+	GrillMode   *GrillMode        // 拷问模式控制器（nil = 不启用；动手前先追问需求）
+	GoalService *GoalService      // 会话目标服务（nil = 不启用；复刻 dsh goal）
+	GoalLoop    *GoalLoop         // Goal 自动 judge 循环（nil = 不启用；复刻 hermes Ralph loop）
+	SubAgents   *SubagentManager  // 子代理委派管理器（nil = 不启用；复刻 hermes delegate_tool）
+	BgReview    *BackgroundReview // 后台自学习 review（nil = 不启用；复刻 hermes background_review）
+	StatsData   *StatsDataRef     // 会话统计（nil = 不启用）
 
 	// Completeness 完成度自检闸门（nil = 不启用）。
 	// 解决的问题：reply 在循环里语义写死为「任务结束」，模型只要说一句话就结束本轮，
@@ -634,6 +639,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 		stepCtx := &HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}
 		// StepStart 挂载点（🟡 中等：可读，不建议改 Messages）
 		a.Hooks.fireStepStart(stepCtx, a.logf)
+		a.noteStep("step %d", qc.Step)
 
 		// 步数预算预警：有限步数下剩余不足时提醒模型收敛（只注入一次，避免刷屏）。无限模式（-1）不提醒。
 		if !unlimited {
@@ -1010,6 +1016,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 
 	q.BeginOperation("tool:" + c.Tool)
 	a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}, a.logf)
+	a.noteStep("step %d: %s(%s)", qc.Step, c.Tool, truncate(c.Args, 60))
 
 	// 空工具名兜底（规避 `tool "" not found`）：模型在某些形态下丢了 tool 字段，
 	// 但 args 里带了 bash 的 command 参数——此时猜为 bash 工具。
@@ -1202,6 +1209,14 @@ func (a *Agent) notifyTruncated(step int) {
 func (a *Agent) log(format string, args ...any) {
 	if a.VerboseLog != nil {
 		a.VerboseLog(fmt.Sprintf(format, args...))
+	}
+}
+
+// noteStep 触发实例级 OnStep 回调（nil 安全）。
+// 子代理管理器用它把运行中进度写进句柄缓冲（GAP-S3），主代理默认 nil 不产生开销。
+func (a *Agent) noteStep(format string, args ...any) {
+	if a.OnStep != nil {
+		a.OnStep(fmt.Sprintf(format, args...))
 	}
 }
 

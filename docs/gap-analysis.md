@@ -58,14 +58,13 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 
 **引入方案**：`SubagentConfig` 增加 `PermissionFn func(tool, args string) bool`，由 main.go 注入与主循环一致的审批逻辑；GAP-S1 的工具白名单本身也是一层软权限，两者叠加。
 
-#### 🟡 GAP-S3：运行中进度不可见（~120 行）
+#### 🟡 GAP-S3：实时推送缺失（进度缓冲与查询已落地）
 
-完成时回灌一条 ≤300 字摘要（`notify`），`/subagents` 命令已可人工查看列表与终态；但**运行中**的子 agent：
+已实现（OnStep 回调链路）：Agent 实例级 `OnStep`（loop.go）在每步开始与每次工具调用时触发 → 子代理管理器写进句柄 `progress` 缓冲（最近 20 条，`sm.mu` 保护）→ `get_subagent` 的 `progress` 字段与 `/subagents` 的「进度：step N: tool(args)」行可见，运行中即生效、终态后保留最后一批。
 
-- 步骤进度/当前工具调用对 TUI/WebUI 不可见
-- 无流式输出
+剩余差距：**推送式**可见性——运行中进度不会主动推到 TUI 状态栏/WebUI（`/ws`），需要轮询才可见。
 
-**引入方案**：`SubagentHandle` 增加 `Progress` 环形缓冲（最近 N 步："step 3: bash(ls -la)"，复用 `utils.CircularBuffer`）；给 Agent 加 OnStep 回调（现有 Hooks 已有挂载点，转发即可）；WebUI 走 `/ws` 推送，TUI 状态栏滚动显示。
+**引入方案**：SubagentManager 加 OnProgress 订阅回调（main.go 接线到 WebUI 的事件广播）；TUI 状态栏滚动显示运行中子任务最近一步。
 
 #### 🟡 GAP-S4：子任务记录纯内存（~60 行）
 
@@ -164,7 +163,7 @@ model: 主模型    # 可省略，继承父级
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
 | 🔴 P0 | 子代理权限门禁（PermissionFn + PermissionMode） | ~80 行 | GAP-S2、C-5 |
-| 🟡 P1 | 子任务运行中进度上报（OnStep 回调 + Handle.Progress） | ~120 行 | GAP-S3、C-4 收尾 |
+| 🟡 P1 | 子任务进度推送（OnProgress 订阅 → /ws 广播 + TUI 状态栏） | ~100 行 | GAP-S3 收尾、C-4 |
 | 🟡 P1 | 扩展事件拦截 Decision（对齐 Pi） | ~30 行 | P-1 |
 | 🟡 P1 | 子任务句柄随会话落盘回放 | ~60 行 | GAP-S4 |
 | 🔵 P2 | 用户自定义子代理类型（agents/*.md，含 per-type model） | ~150 行 | GAP-S1 第二层、C-1、P-4 |
@@ -177,7 +176,7 @@ model: 主模型    # 可省略，继承父级
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复（2026-11-14 晚交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents，2026-11-14 晚交付）。
 
 ---
 
