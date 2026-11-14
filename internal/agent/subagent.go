@@ -56,21 +56,31 @@ type SubagentHandle struct {
 	State     SubagentState `json:"state"`
 	CreatedAt time.Time     `json:"created_at"`
 	Depth     int           `json:"depth"`
+	Model     string        `json:"model,omitempty"`     // 实际使用的模型（req.Model 生效后回显）
+	WorkingDir string       `json:"working_dir,omitempty"`
 	Result    string        `json:"result,omitempty"`
 	Error     string        `json:"error,omitempty"`
 	StepsUsed int           `json:"steps_used,omitempty"`
 	Batch     string        `json:"batch,omitempty"` // 同一次 fan-out 的批次 id
 
 	cancel context.CancelFunc `json:"-"` // 运行态，不序列化
+	child  *Agent             `json:"-"` // 运行中的子 Agent（供 Steer 注入纠正）
 }
 
-// snapshot 返回可安全序列化的副本（去掉 cancel）。
+// snapshot 返回可安全序列化的副本（去掉 cancel/child 运行态）。
 func (h *SubagentHandle) snapshot() SubagentHandle {
 	return SubagentHandle{
 		ID: h.ID, Goal: h.Goal, State: h.State, CreatedAt: h.CreatedAt,
-		Depth: h.Depth, Result: h.Result, Error: h.Error,
+		Depth: h.Depth, Model: h.Model, WorkingDir: h.WorkingDir,
+		Result: h.Result, Error: h.Error,
 		StepsUsed: h.StepsUsed, Batch: h.Batch,
 	}
+}
+
+// modelDeriver 可选接口：LLM 能派生一个只换模型的新实例（子任务指定 model 时用）。
+// 放在 agent 包用接口断言，避免 import llm 造成循环依赖。llm.OpenAI 实现它。
+type modelDeriver interface {
+	WithModel(model string) LLM
 }
 
 // ============================================================================
@@ -143,9 +153,20 @@ func (sm *SubagentManager) setState(id string, st SubagentState, result, errMsg 
 	}
 }
 
-// Launch 派单个子任务，异步返回句柄。
+// Launch 派单个子任务，异步返回句柄（深度 1，主对话直派）。
 func (sm *SubagentManager) Launch(req SubagentLaunchRequest) (*SubagentHandle, error) {
-	hs := sm.launchBatch([]SubagentLaunchRequest{req}, 1)
+	return sm.LaunchAtDepth(req, 1)
+}
+
+// LaunchAtDepth 派单个子任务并指定嵌套深度（子 agent 再委派时用）。
+func (sm *SubagentManager) LaunchAtDepth(req SubagentLaunchRequest, depth int) (*SubagentHandle, error) {
+	if depth <= 0 {
+		depth = 1
+	}
+	if depth > sm.maxDepth {
+		return nil, fmt.Errorf("subagent: max depth %d exceeded (got %d)", sm.maxDepth, depth)
+	}
+	hs := sm.launchBatch([]SubagentLaunchRequest{req}, depth)
 	return hs[0], nil
 }
 
@@ -184,12 +205,14 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 			req.TimeoutSecs = defaultTimeoutSecs
 		}
 		h := &SubagentHandle{
-			ID:        fmt.Sprintf("sub-%d-%d", sm.nextID.Add(1), i+1),
-			Goal:      req.Goal,
-			State:     SubagentPending,
-			CreatedAt: time.Now(),
-			Depth:     depth,
-			Batch:     batchID,
+			ID:         fmt.Sprintf("sub-%d-%d", sm.nextID.Add(1), i+1),
+			Goal:       req.Goal,
+			State:      SubagentPending,
+			CreatedAt:  time.Now(),
+			Depth:      depth,
+			Model:      req.Model,       // 未指定时为空，runSubagent 里回显实际值
+			WorkingDir: req.WorkingDir,
+			Batch:      batchID,
 		}
 		sm.register(h)
 		handles = append(handles, h)
@@ -236,12 +259,65 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 		}
 		childPM.RegisterBuiltin(t)
 	}
+	// 有限嵌套：子 agent 可以再派下一代，但深度 +1 且受 maxDepth 闸门拦住。
+	// 只有未达上限、且调用方没显式屏蔽 delegate_task 时才开放，避免递归失控。
+	if h.Depth < sm.maxDepth && !containsStr(req.BlockedTools, "delegate_task") {
+		nextDepth := h.Depth + 1
+		childPM.RegisterBuiltin(plugins.Tool{
+			Name:        "delegate_task",
+			Description: fmt.Sprintf("（第 %d 层子代理）再派下一层子任务并行处理，深度上限 %d。", nextDepth, sm.maxDepth),
+			Run: func(args string) (string, error) {
+				var batch struct {
+					Tasks []SubagentLaunchRequest `json:"tasks"`
+				}
+				var single SubagentLaunchRequest
+				var hs []*SubagentHandle
+				var err error
+				if json.Unmarshal([]byte(args), &batch) == nil && len(batch.Tasks) > 0 {
+					hs, err = sm.LaunchBatch(batch.Tasks, nextDepth)
+				} else if json.Unmarshal([]byte(args), &single) == nil && single.Goal != "" {
+					var h *SubagentHandle
+					h, err = sm.LaunchAtDepth(single, nextDepth)
+					hs = []*SubagentHandle{h}
+				} else {
+					return `{"error": "goal required (or tasks[])"}`, fmt.Errorf("delegate_task: goal required")
+				}
+				if err != nil {
+					return fmt.Sprintf(`{"error": %q}`, err.Error()), err
+				}
+				return marshalHandles(sm, hs), nil
+			},
+		})
+	}
+
+	// 子任务可指定模型：parentLLM 若实现 modelDeriver 就派生一个只换 Model 的
+	// 新实例；否则忽略 req.Model 用主模型（并在句柄标注，避免"以为换了其实没换"）。
+	subLLM := sm.parentLLM
+	if req.Model != "" {
+		if d, ok := sm.parentLLM.(modelDeriver); ok {
+			subLLM = d.WithModel(req.Model)
+		} else {
+			// 不支持派生：用主模型，但在句柄标注，避免"以为换了其实没换"。
+			sm.mu.Lock()
+			h.Error = "指定的 model 被忽略：当前 LLM 不支持按任务切换模型"
+			sm.mu.Unlock()
+		}
+	}
 
 	// 独立 Agent：LLM/插件共享，运行态天然隔离。
-	child := New(sm.parentLLM, childPM)
+	child := New(subLLM, childPM)
 	child.System = sm.parentSys
 	child.MaxSteps = req.MaxSteps
 	child.WorkDir = req.WorkingDir
+	// 把 child 存进句柄，供 Steer(id, msg) 在任务运行中注入纠正消息。
+	sm.mu.Lock()
+	h.child = child
+	sm.mu.Unlock()
+	defer func() {
+		sm.mu.Lock()
+		h.child = nil
+		sm.mu.Unlock()
+	}()
 	task := fmt.Sprintf("%s\n\n【子任务背景/上下文】\n%s\n\n你是被委派的子代理，只完成上面这一件子任务，做完用 respond 工具直接交付结果，不要再委派。",
 		req.Goal, req.Context)
 
@@ -354,6 +430,32 @@ func (sm *SubagentManager) Cancel(id string) error {
 	}
 	h.State = SubagentCancelled
 	h.Error = "subagent: cancelled by user"
+	return nil
+}
+
+// Steer 向运行中的子代理注入一条纠正消息（对齐 Hermes steer）。
+// child.Steer 是线程安全、非阻塞的：消息会在子循环下一步 LLM 调用前被消费。
+// 只在 RUNNING 状态有效；已终结/未启动时返回明确错误，不静默丢弃。
+func (sm *SubagentManager) Steer(id, content string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("subagent: steer content required")
+	}
+	sm.mu.RLock()
+	h, ok := sm.subs[id]
+	var child *Agent
+	var st SubagentState
+	if ok {
+		child = h.child
+		st = h.State
+	}
+	sm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("subagent: %q not found", id)
+	}
+	if child == nil || st != SubagentRunning {
+		return fmt.Errorf("subagent %q 不在运行中（state=%s），无法 steer", id, st)
+	}
+	child.Steer(content)
 	return nil
 }
 
@@ -496,6 +598,57 @@ func CancelSubagentTool(sm *SubagentManager) plugins.Tool {
 				return `{"error": "id required"}`, fmt.Errorf("cancel_subagent: id required")
 			}
 			if err := sm.Cancel(p.ID); err != nil {
+				return fmt.Sprintf(`{"error": %q}`, err.Error()), err
+			}
+			return `{"ok": true}`, nil
+		},
+	}
+}
+
+// DelegationGuide 返回注入主 system prompt 的委派策略（P2 自动分解）。
+//
+// 设计立场：不做硬编码复杂度判定（数句子/关键词那种规则引擎误判率高、维护差），
+// 而是把「何时拆、怎么拆、何时别拆」讲清楚，由模型自己判断。关键是必须带
+// 抑制条件——否则简单任务也会被拆成一堆子代理，白烧 token、结果还更难汇总。
+func DelegationGuide() string {
+	return `
+## 子任务委派策略（delegate_task）
+只有在**确实能并行省时**时才拆，不要为了"看起来专业"而拆。
+
+满足以下全部条件才委派：
+1. 任务能切成 **2 个以上互相独立**的子目标（彼此不依赖对方的中间结果）；
+2. 每个子目标本身有实质工作量（要读多个文件 / 跑多次命令 / 多次检索），不是一两步就能完；
+3. 这些子目标**并行做比顺序做明显更快**。
+
+典型该拆：同时调研 3 个互不相关的技术方案；批量改造 5 个互不依赖的模块。
+**不该拆**（直接自己做）：
+- 单文件修改、单个问题排查、一次搜索能答的问题；
+- 有强先后依赖的步骤（B 必须等 A 的结果）；
+- 你自己一两步就能完成的小事——拆出去反而多一轮汇总开销。
+
+拆的时候：
+- 用 {"tasks":[{goal,context},{goal,context}]} 一次派多个，让它们真并行；
+- 每个 goal 写清"交付什么"，context 补足子代理看不到的背景（它只有你的 messages，没有主对话）；
+- 派完先用 list_subagents 看状态，用 get_subagent 取结果，**汇总后自己写最终答复**——不要把子代理的原始输出直接甩给用户；
+- 发现某个子代理跑偏，用 steer_subagent 发纠正（不终止），确实没救了再 cancel_subagent。
+`
+}
+
+// SteerSubagentTool 向运行中的子代理注入纠正消息（对齐 Hermes steer）。
+// 与 Cancel 的区别：Cancel 终止任务，Steer 只调整方向、任务继续跑。
+func SteerSubagentTool(sm *SubagentManager) plugins.Tool {
+	return plugins.Tool{
+		Name:        "steer_subagent",
+		Description: "给运行中的子代理发一条纠正指令，它会在此后各步优先遵守。Args: {id, message}。任务不终止。",
+		Run: func(args string) (string, error) {
+			var p struct {
+				ID      string `json:"id"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(args), &p); err != nil || p.ID == "" || strings.TrimSpace(p.Message) == "" {
+				return `{"error": "id and message required"}`, fmt.Errorf("steer_subagent: id and message required")
+			}
+			if err := sm.Steer(p.ID, p.Message); err != nil {
 				return fmt.Sprintf(`{"error": %q}`, err.Error()), err
 			}
 			return `{"ok": true}`, nil

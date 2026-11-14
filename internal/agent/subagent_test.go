@@ -161,12 +161,16 @@ func TestSubagent_CanExecuteTools(t *testing.T) {
 	}
 }
 
+// 子 agent 在未达深度上限时**允许**再委派（有限嵌套），但不能无限递归：
+// 深度闸门由 LaunchAtDepth/maxDepth 守住（见 TestSubagent_NestedBlockedAtMaxDepth）。
+// 这里验证「depth=1 未被误判为顶层而全屏蔽」，同时验证禁止项仍被过滤。
 func TestSubagent_ToolsFilteredAgainstRecursion(t *testing.T) {
 	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
 	sm := newTestManager(llm, nil)
-	// 用一个「卡住」的任务，在子 agent 跑起来时检查它收到的工具清单。
-	// 简化：直接跑一个正常任务后检查 gotTool 里不含 delegate_task。
-	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "检查工具集"})
+	h, _ := sm.Launch(SubagentLaunchRequest{
+		Goal:         "检查工具集",
+		BlockedTools: []string{"ping"}, // 显式屏蔽
+	})
 	waitState(sm, h.ID, 2*time.Second)
 	llm.mu.Lock()
 	defer llm.mu.Unlock()
@@ -175,8 +179,8 @@ func TestSubagent_ToolsFilteredAgainstRecursion(t *testing.T) {
 	}
 	for _, tl := range llm.gotTool {
 		for _, tt := range tl {
-			if isDelegationTool(tt.Name) {
-				t.Fatalf("委派工具 %s 泄漏进子 agent 工具集，会导致无限递归", tt.Name)
+			if tt.Name == "ping" {
+				t.Fatal("BlockedTools 指定的 ping 不应出现在子 agent 工具集")
 			}
 		}
 	}
@@ -348,3 +352,181 @@ func TestCancelSubagent_StopsRunning(t *testing.T) {
 		t.Fatalf("重复 Cancel 应幂等: %v", err)
 	}
 }
+
+// ============================================================================
+// P3：生命周期 —— 模型派生 / 深度闸门 / Steer
+// ============================================================================
+
+// deriverLLM 实现 modelDeriver，记录被派生的模型名。
+type deriverLLM struct {
+	scriptedLLM
+	mu        sync.Mutex
+	derived   []string
+	modelName string
+}
+
+func (d *deriverLLM) WithModel(model string) LLM {
+	d.mu.Lock()
+	d.derived = append(d.derived, model)
+	d.mu.Unlock()
+	n := &deriverLLM{modelName: model}
+	n.script = []string{`{"action":"reply","text":"ok from ` + model + `"}`}
+	return n
+}
+
+func TestSubagent_ModelDerived(t *testing.T) {
+	llm := &deriverLLM{modelName: "parent-model"}
+	sm := newTestManager(llm, nil)
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "用指定模型", Model: "child-model"})
+	waitState(sm, h.ID, 2*time.Second)
+
+	llm.mu.Lock()
+	derived := append([]string{}, llm.derived...)
+	llm.mu.Unlock()
+	if len(derived) != 1 || derived[0] != "child-model" {
+		t.Fatalf("应按 req.Model 派生模型，实际 derived=%v", derived)
+	}
+	if got, _ := sm.Get(h.ID); got.Model != "child-model" {
+		t.Fatalf("句柄应回显 model=child-model，实际 %q", got.Model)
+	}
+}
+
+// 不支持派生的 LLM：req.Model 应被忽略并在句柄标注，不能静默假装换了。
+func TestSubagent_ModelIgnoredIsReported(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "换模型", Model: "child-model"})
+	waitState(sm, h.ID, 2*time.Second)
+	got, _ := sm.Get(h.ID)
+	if !strings.Contains(got.Error, "model 被忽略") {
+		t.Fatalf("不支持派生时应在句柄标注忽略原因，实际 Error=%q", got.Error)
+	}
+}
+
+func TestSubagent_DepthGate(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+
+	// 深度 1 可派
+	if _, err := sm.LaunchAtDepth(SubagentLaunchRequest{Goal: "d1"}, 1); err != nil {
+		t.Fatalf("depth=1 应允许: %v", err)
+	}
+	// 等于 maxDepth 可派
+	if _, err := sm.LaunchAtDepth(SubagentLaunchRequest{Goal: "d3"}, sm.maxDepth); err != nil {
+		t.Fatalf("depth=maxDepth 应允许: %v", err)
+	}
+	// 超过 maxDepth 拒绝
+	if _, err := sm.LaunchAtDepth(SubagentLaunchRequest{Goal: "d4"}, sm.maxDepth+1); err == nil {
+		t.Fatal("超过 maxDepth 应拒绝")
+	}
+}
+
+// 子 agent 在未达深度上限时应拿到受限 delegate_task（支持有限嵌套）。
+func TestSubagent_NestedDelegateAvailable(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	h, _ := sm.LaunchAtDepth(SubagentLaunchRequest{Goal: "嵌套检查"}, 1)
+	waitState(sm, h.ID, 2*time.Second)
+
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	hasDelegate := false
+	for _, tl := range llm.gotTool {
+		for _, tt := range tl {
+			if tt.Name == "delegate_task" {
+				hasDelegate = true
+			}
+		}
+	}
+	if !hasDelegate {
+		t.Fatal("未达深度上限的子 agent 应能再委派下一层")
+	}
+}
+
+// 达到深度上限时不应再给 delegate_task（防递归失控）。
+func TestSubagent_NestedBlockedAtMaxDepth(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	h, _ := sm.LaunchAtDepth(SubagentLaunchRequest{Goal: "最深层"}, sm.maxDepth)
+	waitState(sm, h.ID, 2*time.Second)
+
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	for _, tl := range llm.gotTool {
+		for _, tt := range tl {
+			if tt.Name == "delegate_task" {
+				t.Fatalf("已达 maxDepth(%d) 的子 agent 不该再有 delegate_task", sm.maxDepth)
+			}
+		}
+	}
+}
+
+func TestSubagent_SteerRunning(t *testing.T) {
+	bl := &blockingLLM{entered: make(chan struct{})}
+	sm := newTestManager(bl, nil)
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "长任务", TimeoutSecs: 30})
+	select {
+	case <-bl.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("子 agent 没进入运行")
+	}
+	if err := sm.Steer(h.ID, "改用方案B"); err != nil {
+		t.Fatalf("运行中 Steer 应成功: %v", err)
+	}
+	// 不存在的 id
+	if err := sm.Steer("nope", "x"); err == nil {
+		t.Fatal("不存在的 id 应报错")
+	}
+	// 空内容
+	if err := sm.Steer(h.ID, "  "); err == nil {
+		t.Fatal("空 steer 内容应报错")
+	}
+	sm.Cancel(h.ID)
+}
+
+func TestSubagent_SteerNotRunning(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	sm := newTestManager(llm, nil)
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "快任务"})
+	waitState(sm, h.ID, 2*time.Second)
+	if err := sm.Steer(h.ID, "晚了"); err == nil {
+		t.Fatal("已终结的子代理 Steer 应报错，不能静默丢弃")
+	}
+}
+
+func TestSteerSubagentTool(t *testing.T) {
+	bl := &blockingLLM{entered: make(chan struct{})}
+	sm := newTestManager(bl, nil)
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "长任务", TimeoutSecs: 30})
+	select {
+	case <-bl.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("子 agent 没进入运行")
+	}
+	tool := SteerSubagentTool(sm)
+	if _, err := tool.Run(`{"id":"` + h.ID + `","message":"走另一条路"}`); err != nil {
+		t.Fatalf("steer 工具应成功: %v", err)
+	}
+	if _, err := tool.Run(`{"id":"` + h.ID + `"}`); err == nil {
+		t.Fatal("缺 message 应报错")
+	}
+	sm.Cancel(h.ID)
+}
+
+// ============================================================================
+// P2：自动分解指引
+// ============================================================================
+
+func TestDelegationGuide_ContainsSuppression(t *testing.T) {
+	g := DelegationGuide()
+	if g == "" {
+		t.Fatal("委派指引不能为空")
+	}
+	// 必须同时讲「该拆」和「不该拆」——只有鼓励没有抑制会导致简单任务也乱拆。
+	for _, want := range []string{"tasks", "不该拆", "独立", "get_subagent", "steer_subagent"} {
+		if !strings.Contains(g, want) {
+			t.Fatalf("委派指引缺少关键内容 %q", want)
+		}
+	}
+}
+

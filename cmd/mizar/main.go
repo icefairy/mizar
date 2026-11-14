@@ -39,7 +39,7 @@ import (
 	"mizar/internal/skills"
 )
 
-var version = "v0.8.7"
+var version = "v0.8.8"
 
 // buildTag 标识 Windows 产物用的是哪条构建链，由 -ldflags -X main.buildTag=... 注入。
 //
@@ -717,6 +717,12 @@ func main() {
 	pm.RegisterBuiltin(agent.GetSubagentTool(a.SubAgents))
 	pm.RegisterBuiltin(agent.ListSubagentsTool(a.SubAgents))
 	pm.RegisterBuiltin(agent.CancelSubagentTool(a.SubAgents))
+	pm.RegisterBuiltin(agent.SteerSubagentTool(a.SubAgents))
+	// P2 自动分解：把委派策略注入主 system prompt（何时该拆/怎么拆/何时别拆）。
+	// 拼在用户自定义指令之后，不覆盖 a.System 本身。
+	if g := agent.DelegationGuide(); g != "" {
+		a.System = a.System + "\n" + g
+	}
 	// Skill Manager 工具（agent 可自创 skill）
 	pm.RegisterBuiltin(builtins.SkillManagerTool(skillsDir))
 	// Session Insights 工具

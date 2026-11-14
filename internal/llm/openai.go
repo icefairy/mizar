@@ -1383,6 +1383,24 @@ func (o *OpenAI) ModelName() string {
 	return o.Model
 }
 
+// WithModel 派生一个只改 Model 的新实例，供子代理按任务切换模型。
+// 返回 agent.LLM 以满足 agent 包的 modelDeriver 接口（避免循环依赖）。
+//
+// 不浅拷贝整个 struct：OpenAI 含 sync.Mutex（truncMu），拷贝已用 Mutex 未定义；
+// lastUsage/lastTruncated 是「最近一次调用」旁路状态，子进程应各自独立。
+// 这里显式逐字段构造：共享并发安全的 Client 与只读 Params，其余状态归新实例。
+func (o *OpenAI) WithModel(model string) agent.LLM {
+	return &OpenAI{
+		BaseURL:       o.BaseURL,
+		APIKey:        o.APIKey,
+		Model:         model,
+		Client:        o.Client,
+		ThinkingLevel: o.ThinkingLevel,
+		Params:        o.Params,
+		userAgent:     o.userAgent,
+	}
+}
+
 // SetEndpoint 运行时切换供应商端点（baseURL + apiKey）。线程安全由调用方保证
 // （进程级设置，低频；通常在空闲时切换）。apiKey 传空表示该供应商无需鉴权。
 func (o *OpenAI) SetEndpoint(baseURL, apiKey string) {
