@@ -339,8 +339,9 @@ Unix 有 bracketed paste，粘贴本来就是整段处理，不受影响。
 
 ### 2. 内置工具（30+ 个）
 基础工具 `bash` / `grep` / `find` / `read` / `write` / `edit` / `ls` / `skill_manage`，+ dsh 复刻新增：
-- **`todo`**：会话待办清单（动作式 API：list / add / toggle / clear）。状态随会话持久化——内嵌在工具返回文本的标记段中，会话恢复/分支时按历史回放重建（对齐 pi 的 `examples/extensions/todo.ts`）；用 `/todos` 查看
+- **`todo`**：会话待办清单（动作式 API：list / add / toggle / clear，支持 `blocked_by` 串行依赖——完成前置自动解锁后继）。状态随会话持久化——内嵌在工具返回文本的标记段中，会话恢复/分支时按历史回放重建（对齐 pi 的 `examples/extensions/todo.ts`）；用 `/todos` 查看
 - **`ask_user_question`**：向用户提问并等待回答。问题以文本编号选项呈现，用户回复编号即完成选择（TUI / 经典 / `-task` 模式均可用，多选 `1,3`）；无交互界面时自动降级为「选项写进正文 + 用户下一条回编号」
+- **`delegate_task`**：子代理并行委派（`tasks[]` fan-out，role 四选一 leaf/implement/explore/review，只读角色强制摘除写工具）。运行中进度：`/subagents` 查看、TUI 状态栏与 WebUI `/ws` 实时推送（对齐 hermes delegate_tool）
 - **`skill`**：按名加载技能全文（渐进式披露，避免系统提示过长）
 - **`job_list` / `job_output` / `job_kill`**：后台任务管理（bash 支持 `run_in_background`，任务完成后自动注入通知）
 其他能力：文件模糊搜索（`files_fuzzy`）、大文件有界分段读取（`fs_read_range`，单次 4MB）、文档格式解析（PDF/DOCX/XLSX）、Bash 详细截断警告、原生 OpenAI function calling 工具调用。
@@ -704,6 +705,8 @@ chmod +x mizar
   # 鼠标拖选即复制（双击选整行，Esc 取消；Shift+拖拽用终端原生选择）
   # /grill                         拷问模式：动手前用 ask_user_question 把需求问到没歧义（/grill off 退出）
   # /plan                          计划模式：先出方案再动手（模型调 exit_plan_mode 提交；/plan off 强制退出）
+  # /permission                    权限门禁：/permission default 后写类与危险命令执行前弹确认（auto|default|acceptEdits|plan）
+  # /subagents                     查看子任务列表与状态（delegate_task 派发的子代理，运行中含最近一步）
   # /compact                       立即压缩上下文（可附摘要指引）
   # /chat <内容>                    裸聊：不注入任何提示词直接问模型
   # !ls -la                         本地 bash 直执行：!开头直接运行，命令+输出纳入对话历史

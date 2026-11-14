@@ -1,3 +1,28 @@
+## [未发布] — 2026-11-14
+
+> 主题：**子代理权限门禁** —— PermissionMode 四模式 + 逐工具分级审批，主/子代理一条链路全覆盖（GAP-S2/C-5，对齐 Claude Code PermissionMode）。
+
+### ✨ 新增
+
+- **权限门禁 PermissionGate**（`internal/agent/permission.go`，新增）
+  - 四模式：`auto`（出厂默认 = 现行为零破坏）/ `default`（只读放行，写类 + bash 危险命令需确认）/ `acceptEdits`（写类放行，bash 危险命令需确认）/ `plan`（只读放行，写类直接拒绝不询问）。
+  - 风险分级：write/edit/skill_manage/win32 操作类 = 写类；bash 走**命令级**危险匹配（rm -rf、mkfs、dd of=/dev/、git push --force、curl|sh 等 12 条正则，宁可漏报不误报）；其余工具一律放行（含插件/MCP/delegate_task——委派不落盘，风险由子代理内逐工具把关）。
+  - 确认复用 `ask_user_question` 同一弹窗通路（TUI/interactive/Server 零改动）；gate 内串行化审批（TUI askPending 单槽不覆盖）；「本会话允许」缓存键序无关、容量 100 FIFO、不持久化（避免「昨天批准的 rm -rf 今天静默通过」）。
+  - headless 无交互环境：需确认操作一律拒绝（fail-safe），拒绝文案给模型三条出路。
+- **runOneToolCall 执行前审批**（`internal/agent/loop.go`）
+  - `Plugins.Call` 之前 Authorize；拒绝按 guard 终止分支形状回填成对 tool call/result 消息（无孤儿 tool_calls 触发上游 400），`controlNextStep` 跳过本批剩余调用；被拒调用落会话历史（OnToolExchange）。
+- **子代理继承 + 全量接线**（`internal/agent/subagent.go`、`clone.go`、`cmd/mizar/`）
+  - 子代理与主代理共用同一 gate 实例：`/permission` 切换对所有会话/子代理即时生效；子代理里的确认与主代理共用串行化审批，TUI 单槽弹窗不互相覆盖。
+  - `config.json` 新增 `permission_mode` 字段（空=auto）；`/permission` 命令：查看 / 切换（内存即时生效 + 持久化）/ `reset` 清审批缓存。
+- **/subagents 内部命令**：查看子任务列表与状态（批次/模型/步数/结果摘要，运行中含最近一步进度）。
+- **todo 依赖**：`blocked_by` 前置依赖，完成前置自动解锁后继、跳序完成提醒、re-open 自动恢复等待；随会话回放持久化。
+- **子任务进度上报**：`OnStep` 实例级回调 → 句柄 `progress` 缓冲（最近 20 条）→ `get_subagent.progress` / `/subagents` 进度行；`OnProgress` 推送（TUI 状态栏 + WebUI `/ws` `subagent_progress` 事件）。
+- **委派工具参数宽容剥壳**：模型把参数包一层 `{"args":...}` 时自动剥壳（并发实测回归：曾致 `get_subagent: id required` 死循环）。
+
+### 🐛 修复
+
+- **`sleep(ms)` 宿主函数从未注册**（`cmd/mizar/main.go`）：`host.Sleep` 一直未赋值，插件只能拿 powershell.exe 模拟休眠，Linux 上必然 exit 127（win32api 插件实测报 GoError: exit status 127）。现原生 time.Sleep（上限 60s）。
+
 ## [v0.8.6] — 2026-11-14
 
 > 主题：**工具调用历史落盘** —— 刷新 Web 界面后不再只剩一问一答。

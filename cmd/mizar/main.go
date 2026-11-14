@@ -1584,6 +1584,49 @@ func main() {
 			return "", fmt.Errorf("用法: /config 查看 ｜ /config max_steps 30 ｜ /config context_window 128000 ｜ /config user_agent MyApp/1.0（清除用 /config user_agent -）")
 		},
 	})
+	// 内置 /permission 命令：查看/切换权限门禁（GAP-S2，内存即时生效 + config 持久化）
+	a.Commands.Register(agent.Command{
+		Name:        "permission",
+		Description: "查看/切换权限门禁（/permission 查看 ｜ /permission auto|default|acceptEdits|plan ｜ /permission reset 清审批缓存）。注意：plan 权限模式 ≠ /plan 计划模式",
+		Run: func(args string) (string, error) {
+			if a.Permission == nil {
+				return "权限门禁未启用", nil
+			}
+			args = strings.TrimSpace(args)
+			if args == "" {
+				mode := a.Permission.Mode()
+				hint := ""
+				switch mode {
+				case agent.PermAuto:
+					hint = "全部工具放行（现行为，出厂默认）"
+				case agent.PermDefault:
+					hint = "只读工具放行；写类（edit/write 等）与 bash 危险命令执行前弹确认"
+				case agent.PermAcceptEdits:
+					hint = "写类放行；仅 bash 危险命令（rm -rf / git push --force 等）执行前弹确认"
+				case agent.PermPlan:
+					hint = "只读放行；写类与危险命令直接拒绝（不询问）。注意：这是权限模式，与 /plan 计划模式是两回事"
+				}
+				return fmt.Sprintf(`权限门禁: %s
+  %s
+  已批准「本会话允许」: %d 条（/permission reset 清空）
+切换: /permission auto|default|acceptEdits|plan（立即生效并持久化到 config.json）`, mode, hint, a.Permission.ApprovalCount()), nil
+			}
+			if args == "reset" {
+				n := a.Permission.ResetApprovals()
+				return fmt.Sprintf("✓ 已清空 %d 条「本会话允许」审批记录", n), nil
+			}
+			if m, ok := agent.ParsePermissionMode(args); ok {
+				a.Permission.SetMode(m)
+				cfg, _ := config.Load(config.DefaultPath())
+				cfg.PermissionMode = string(m)
+				if err := config.Save(config.DefaultPath(), cfg); err != nil {
+					return fmt.Sprintf("✓ 模式已切换为 %s（内存生效），但持久化失败: %v", m, err), nil
+				}
+				return fmt.Sprintf("✓ 权限模式已切换为 %s（立即生效，主代理与子代理共用同一门禁；已持久化到 %s）", m, config.DefaultPath()), nil
+			}
+			return "", fmt.Errorf("用法: /permission 查看 ｜ /permission auto|default|acceptEdits|plan ｜ /permission reset")
+		},
+	})
 	// 内置 /compact 命令：手动触发上下文压缩
 	a.Commands.Register(agent.Command{
 		Name:        "compact",

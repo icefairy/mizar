@@ -58,6 +58,17 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 
 **引入方案**：`SubagentConfig` 增加 `PermissionFn func(tool, args string) bool`，由 main.go 注入与主循环一致的审批逻辑；GAP-S1 的工具白名单本身也是一层软权限，两者叠加。
 
+#### ✅ GAP-S2：权限门禁（已实现，PermissionMode）
+
+对齐 Claude Code PermissionMode，主代理与子代理共用同一 `PermissionGate` 实例（internal/agent/permission.go）：
+
+- **四模式**：`auto`（出厂默认 = 现行为零破坏，2026-11-14 用户确认）/ `default`（只读放行，写类+bash 危险命令需确认）/ `acceptEdits`（写类放行，bash 危险命令需确认）/ `plan`（只读放行，写类直接拒绝）
+- **分级**：write/edit/skill_manage/win32 操作类 = TierEdit；bash 走命令级危险匹配（rm -rf、mkfs、dd of=/dev/、git push --force、curl|sh 等 12 条正则，宁可漏报不误报）；其余一律 Safe（含 mcp_call/插件/delegate_task——委派不落盘，风险由子代理内逐工具把关）
+- **执行前审批**：runOneToolCall 在 Plugins.Call 之前 Authorize（不受 30s 插件超时影响）；拒绝按 guard 终止分支形状回填成对消息 + controlNextStep 跳过本批剩余
+- **确认通路**：复用 builtins.SetAskUser（TUI/interactive/Server 三处接线，子代理同弹窗）；gate 内 askMu 串行化（TUI askPending 单槽不覆盖）；「本会话允许」缓存（CanonicalizeArgs 键序无关，容量 100 FIFO，仅内存不持久化）
+- **headless fail-safe**：无交互环境 PermAsk 一律拒绝，文案给三条出路（用户确认）
+- **接线**：config.json `permission_mode` / `/permission` 命令（查看/切换+持久化/reset）；子代理经 `SubagentConfig.Permission` 继承，clone 共享指针
+
 #### 🟡 GAP-S3：WebUI 前端渲染收尾（推送链路已落地）
 
 进度可见性三层已通：
@@ -111,7 +122,7 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 | C-2 | 结构化任务清单 | TaskCreate/List/Get/Update：依赖（blockedBy）、owner、状态机、activeForm，多代理共享 | `todo` 已有 blocked_by 依赖 + 自动解锁 + 会话回放；无 owner/认领语义 | 🟢 基本持平 |
 | C-3 | 多代理团队 | TeamCreate + 共享任务列表 + 代理间消息协议（SendMessage），互相认领/阻塞 | 无 | 🟡 |
 | C-4 | 后台代理 | 代理级后台运行 + 完成通知协议，主代理可继续其他工作 | delegate_task 异步 + DrainDone 回灌 + OnProgress 推送已对齐 | 🟢 基本持平 |
-| C-5 | 权限模式 | plan/default/acceptEdits/bypassPermissions 多档 + 逐工具审批 + 子代理继承 | plan 审批 + goal gate，无通用权限分级，子任务无审批（GAP-S2） | 🔴 |
+| C-5 | 权限模式 | plan/default/acceptEdits/bypassPermissions 多档 + 逐工具审批 + 子代理继承 | PermissionMode 四档已实现（auto/default/acceptEdits/plan），逐工具分级审批，子代理继承同一 gate；无逐工具白名单 UI | 🟢 基本持平 |
 | C-6 | 用户级 Hooks | 用户 settings 配置 shell 命令响应工具事件（PreToolUse 等），可阻塞并回注反馈 | hooks 是插件内部机制（agent/hooks.go），用户不可配 shell 命令 | 🟡 |
 | C-7 | 结构化记忆 | 四类记忆（user/feedback/project/reference）+ 索引每会话自动加载 | memory 插件（SQLite/HMEM），非自动加载的结构化记忆 | 🟡 |
 | C-8 | 工作树隔离 | git worktree 一键隔离实验性修改 | 无 | 🔵 |
@@ -163,7 +174,6 @@ model: 主模型    # 可省略，继承父级
 
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
-| 🔴 P0 | 子代理权限门禁（PermissionFn + PermissionMode） | ~80 行 | GAP-S2、C-5 |
 | 🟡 P1 | 扩展事件拦截 Decision（对齐 Pi） | ~30 行 | P-1 |
 | 🟡 P1 | 子任务句柄随会话落盘回放 | ~60 行 | GAP-S4 |
 | 🔵 P2 | 用户自定义子代理类型（agents/*.md，含 per-type model） | ~150 行 | GAP-S1 第二层、C-1、P-4 |
@@ -176,7 +186,7 @@ model: 主模型    # 可省略，继承父级
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播，2026-11-14 晚交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、**权限门禁 PermissionMode 四模式 + 子代理继承**（GAP-S2/C-5，2026-11-14 晚交付）。
 
 ---
 
