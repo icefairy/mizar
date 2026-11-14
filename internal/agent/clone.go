@@ -33,6 +33,7 @@ func (a *Agent) Clone() *Agent {
 		Hooks:        a.Hooks,
 		Tuner:        a.Tuner,
 		Guard:        a.Guard,
+		Permission:   a.Permission, // 权限门禁进程级共享：模式切换对全部会话/子代理即时生效（GAP-S2）
 		Jobs:         a.Jobs,
 		PlanMode:     a.PlanMode,
 		GrillMode:    a.GrillMode,
@@ -45,7 +46,7 @@ func (a *Agent) Clone() *Agent {
 		AskUser:      a.AskUser,
 
 		// ---- 运行态：全新，不继承父实例 ----
-		Initial:        nil,
+		Initial: nil,
 		// ConvID 由调用方（server.agentPool）在克隆后立即赋值；
 		// 这里显式清空，避免从模板继承一个错误的会话归属。
 		ConvID:         "",

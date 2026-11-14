@@ -71,6 +71,10 @@ func interactive(a *agent.Agent, st *session.Store, sessionID string) {
 		})
 	}
 	builtins.SetAskUser(askUser)
+	// 权限门禁确认（GAP-S2）：与 ask_user_question 同一 readline 通路
+	if a.Permission != nil {
+		a.Permission.SetAskUser(askUser)
+	}
 	agent.SetPlanAskUser(askUser)
 
 	// 退出提示

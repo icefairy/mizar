@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -864,5 +865,65 @@ func TestSubagent_OnProgressPushed(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := notes.snapshot(); len(got) != len(before) {
 		t.Fatalf("SetOnProgress(nil) 后不应推送: before=%d after=%d", len(before), len(got))
+	}
+}
+
+// ============================================================================
+// GAP-S2：子代理权限门禁继承（runSubagent child.Permission = sm.permission）
+// ============================================================================
+
+// 传入 SubagentConfig.Permission 后，子 agent 与主代理共用同一 gate 实例；
+// nil 透传（未接线时子代理无门禁，与旧行为一致）。
+func TestSubagentInheritsPermission(t *testing.T) {
+	llm := &scriptedLLM{script: []string{`{"action":"reply","text":"ok"}`}}
+	pm := plugins.NewManager("", nil)
+	gate := NewPermissionGate(PermPlan)
+	sm := NewSubagentManager(SubagentConfig{ParentLLM: llm, ParentSys: "sys", Plugins: pm, Permission: gate})
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "继承检查"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && llm.callCount() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	sm.mu.RLock()
+	child := sm.subs[h.ID].child
+	sm.mu.RUnlock()
+	if child == nil {
+		// 已终结时 child 置 nil：指针断言只在运行窗口内可做，重跑一次阻塞版
+		t.Log("child 已清理，跳过指针断言")
+		return
+	}
+	if child.Permission != gate {
+		t.Fatal("子 agent 应与主代理共享同一 PermissionGate 实例")
+	}
+	// nil 透传
+	sm2 := NewSubagentManager(SubagentConfig{ParentLLM: llm, ParentSys: "sys", Plugins: pm})
+	h2, _ := sm2.Launch(SubagentLaunchRequest{Goal: "nil 透传"})
+	waitState(sm2, h2.ID, 2*time.Second)
+	sm2.mu.RLock()
+	child2 := sm2.subs[h2.ID].child
+	sm2.mu.RUnlock()
+	if child2 != nil && child2.Permission != nil {
+		t.Fatal("未配置 Permission 时子 agent 不应有门禁")
+	}
+}
+
+// 子代理在 plan 门禁下写类工具被拒：edit 不真实执行，任务正常收尾（拒绝不算失败）。
+func TestSubagentPermissionDeniesWriteInPlanMode(t *testing.T) {
+	gate := NewPermissionGate(PermPlan)
+	var edited atomic.Bool
+	llm := &scriptedLLM{script: []string{
+		`{"action":"tool","tool":"edit","args":"{\"p\":1}"}`,
+		`{"action":"reply","text":"收到拒绝"}`,
+	}}
+	pm := plugins.NewManager("", nil)
+	pm.RegisterBuiltin(plugins.Tool{Name: "edit", Description: "t",
+		Run: func(string) (string, error) { edited.Store(true); return "edited", nil }})
+	sm := NewSubagentManager(SubagentConfig{ParentLLM: llm, ParentSys: "sys", Plugins: pm, Permission: gate})
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "尝试写文件"})
+	if st := waitState(sm, h.ID, 3*time.Second); st != SubagentSucceeded {
+		t.Fatalf("子任务应正常收尾（拒绝不算失败），实际 %s", st)
+	}
+	if edited.Load() {
+		t.Fatal("plan 门禁下子代理的 edit 不应真实执行")
 	}
 }

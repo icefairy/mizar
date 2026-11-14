@@ -59,6 +59,11 @@ type Config struct {
 	// Mouse 是否启用鼠标上报（TUI 滚轮/拖选/右键粘贴；nil=平台默认，现在各平台默认开）。
 	// /mouse on|off 写入本字段，启动时恢复。
 	Mouse *bool `json:"mouse,omitempty"`
+	// PermissionMode 权限门禁模式（GAP-S2，/permission 命令写入）：
+	// auto（默认，全放行）| default（只读放行，写类+bash 危险命令需确认）|
+	// acceptEdits（写类放行，bash 危险命令需确认）| plan（只读放行，写类拒绝）。
+	// 空 = auto，保持现行为。
+	PermissionMode string `json:"permission_mode,omitempty"`
 }
 
 // Provider 一个已记住的 LLM 供应商配置。

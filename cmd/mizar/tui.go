@@ -1353,6 +1353,10 @@ func (m *tuiModel) startTask(input string) {
 	m.askPending = nil
 	m.askMu.Unlock()
 	builtins.SetAskUser(m.askViaChat)
+	// 权限门禁确认（GAP-S2）：与 ask_user_question 同一弹窗通路（gate 内已串行化）
+	if m.agent.Permission != nil {
+		m.agent.Permission.SetAskUser(m.askViaChat)
+	}
 	agent.SetPlanAskUser(m.askViaChat)
 
 	// 工具交换收集：每次工具执行后记录，任务结束时持久化到会话文件 + Initial。

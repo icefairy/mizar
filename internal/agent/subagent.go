@@ -117,6 +117,7 @@ type SubagentManager struct {
 	pm         *plugins.Manager      // 共享插件注册表（只读复制工具清单）
 	jobNotify  func(note string)     // 结果回灌：完成通知塞进主循环可见通道
 	onProgress func(id, line string) // 进度推送（GAP-S3 收尾）：每步进度行回调，nil = 关闭
+	permission *PermissionGate       // 权限门禁（GAP-S2）：与主代理共用同一实例，nil = 无门禁
 	sem        chan struct{}         // 并发上限
 }
 
@@ -136,6 +137,10 @@ type SubagentConfig struct {
 	ParentLLM LLM
 	ParentSys string
 	Plugins   *plugins.Manager
+	// Permission 权限门禁（GAP-S2）：主代理与子代理共用同一实例（进程级策略，
+	// 模式运行时可变）。nil = 子代理无门禁（与主代理一致）。子代理里的确认
+	// 走 gate 的 ask 回调，与主代理共用 askMu 串行化（TUI 单槽不覆盖弹窗）。
+	Permission *PermissionGate
 	// JobNotify 子代理完成时调用，note 作为「【后台任务完成】」注入主循环。
 	// nil 时结果仍可通过 get_subagent 查询，但不自动回灌。
 	JobNotify func(note string)
@@ -143,14 +148,15 @@ type SubagentConfig struct {
 
 func NewSubagentManager(cfg SubagentConfig) *SubagentManager {
 	return &SubagentManager{
-		subs:      make(map[string]*SubagentHandle),
-		maxDepth:  defaultMaxDepth,
-		maxSteps:  defaultMaxSteps,
-		parentLLM: cfg.ParentLLM,
-		parentSys: cfg.ParentSys,
-		pm:        cfg.Plugins,
-		jobNotify: cfg.JobNotify,
-		sem:       make(chan struct{}, defaultMaxConcurrent),
+		subs:       make(map[string]*SubagentHandle),
+		maxDepth:   defaultMaxDepth,
+		maxSteps:   defaultMaxSteps,
+		parentLLM:  cfg.ParentLLM,
+		parentSys:  cfg.ParentSys,
+		pm:         cfg.Plugins,
+		jobNotify:  cfg.JobNotify,
+		permission: cfg.Permission,
+		sem:        make(chan struct{}, defaultMaxConcurrent),
 	}
 }
 
@@ -354,6 +360,9 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 	child.System = sm.parentSys
 	child.MaxSteps = req.MaxSteps
 	child.WorkDir = req.WorkingDir
+	// 权限门禁继承（GAP-S2）：与主代理共用同一 gate 实例——模式运行时可变、
+	// 子代理里的确认与主代理共用 askMu 串行化（TUI 单槽不覆盖弹窗）。
+	child.Permission = sm.permission
 	// 进度上报（GAP-S3）：子循环每步/每次工具调用回调一行摘要，写进句柄缓冲
 	//（get_subagent 的 progress 字段与 /subagents 的「进度」行读取）。
 	// 写锁保护；只留最近 maxSubagentProgress 条。推送回调锁外调用：

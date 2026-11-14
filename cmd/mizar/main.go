@@ -506,6 +506,16 @@ func main() {
 	pm.SetDisabledTools(stats.DisabledNames())
 	// agent 实例先声明后赋值（builtins.All 的插件热重载回调需要引用它）
 	a := agent.New(client, pm)
+	// 权限门禁（GAP-S2）：默认 auto（现行为零破坏），config.json permission_mode
+	// opt-in。主代理与子代理共用同一实例（进程级策略，/permission 运行时可切）。
+	permGate := agent.NewPermissionGate(agent.PermAuto)
+	if cfgPerm, err := config.Load(config.DefaultPath()); err == nil && cfgPerm.PermissionMode != "" {
+		if m, ok := agent.ParsePermissionMode(cfgPerm.PermissionMode); ok {
+			permGate.SetMode(m)
+			log.Printf("权限门禁已启用: %s（config.json permission_mode）", m)
+		}
+	}
+	a.Permission = permGate
 	// 插件自动热重载：write/edit 写入插件目录内的 .ts/.js 文件后触发。
 	// 解决“模型自己写插件 → 未重载就调用 → tool not found 错误循环”的自举断裂问题。
 	onPluginChanged := onPluginFileWritten(extAbs, pm, a)
@@ -679,9 +689,10 @@ func main() {
 	// 用 a.LLM（LLM 接口，Run 内部按能力选 tools/ctx），不再只取 ToolCallLLM——
 	// 后者会把子 agent 困在「无工具、不可取消」的纯聊天壳里。
 	a.SubAgents = agent.NewSubagentManager(agent.SubagentConfig{
-		ParentLLM: a.LLM,
-		ParentSys: a.System,
-		Plugins:   pm,
+		ParentLLM:  a.LLM,
+		ParentSys:  a.System,
+		Plugins:    pm,
+		Permission: permGate,
 		JobNotify: func(note string) {
 			// 复用 Jobs.DrainDone() 已挂进主循环(loop.go:655)的完成通知通道：
 			// Start 一个瞬时即完的任务，DrainDone 会把 note 注入主对话。
@@ -1967,6 +1978,8 @@ func main() {
 		// 接到 WebUI 弹窗（之前 Server 模式这两个工具只能降级为「请自行决策」）。
 		// 不设超时——用户可能很久才回来选，题目过期比多等更糟。
 		builtins.SetAskUser(srv.AskUser)
+		// 权限门禁确认（GAP-S2）：走同一 WebUI 弹窗通路（askBroker 多槽支持并发）
+		a.Permission.SetAskUser(srv.AskUser)
 		agent.SetPlanAskUser(srv.AskUser)
 		// 应用持久化的 Web UI 设置（模型/参数/思考等级）
 		srv.ApplyStoredSettings()

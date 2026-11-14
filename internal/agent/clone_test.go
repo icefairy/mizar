@@ -43,6 +43,18 @@ func TestCloneSharesProcessServicesIsolatesRunState(t *testing.T) {
 		t.Fatal("GoalService 必须共享")
 	}
 
+	// TestCloneSharesPermission（内联）：权限门禁进程级共享——
+	// /permission 切换模式后所有克隆会话与子代理即时生效（GAP-S2）。
+	parent.Permission = NewPermissionGate(PermDefault)
+	if child2 := parent.Clone(); child2.Permission != parent.Permission {
+		t.Fatal("Permission 必须共享同一 gate 实例")
+	}
+	// nil 透传：未启用的主代理克隆后同样无门禁
+	parent2 := &Agent{}
+	if c := parent2.Clone(); c.Permission != nil {
+		t.Fatal("nil gate 应透传为 nil")
+	}
+
 	// ---- 隔离：运行态必须独立 ----
 	if child.Initial != nil {
 		t.Fatalf("Initial 必须隔离，实际继承了 %v", child.Initial)
