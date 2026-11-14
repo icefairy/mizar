@@ -172,6 +172,7 @@ type tuiModel struct {
 	autoCompleteList []string        // 当前补全候选列表（用于 Tab 填入）
 	statusBar        *tview.TextView
 	projBar          *tview.TextView // 状态栏第一行：项目路径 / 分支 / 会话 / 运行时长
+	subProgress      string          // 运行中子任务的最近一步（delegate_task 派发；无运行中子任务时不显示）
 	projScrollOn     atomic.Bool     // 路径超宽时的滞动循环是否运行中
 	projScrollTick   atomic.Int64    // 滞动帧序号（由滞动循环推进）
 	project          projectInfo     // 项目信息快照（启动与任务结束时采集，渲染只读）
@@ -613,7 +614,29 @@ func (m *tuiModel) statusBarText() string {
 		sb.WriteString(sgrColor("fuchsia", level))
 	}
 
+	// 子任务进度（GAP-S3 推送式可见性）：delegate_task 派发的运行中子任务
+	// 最近一步。仅在确有 RUNNING 子任务时显示——子任务完成后行自动消失，
+	// 不留陈旧文本（否则状态栏永远挂着上一单的尾巴）。
+	if m.subProgress != "" && m.agentHasRunningSub() {
+		sb.WriteString(sgrColor("fuchsia", " | "))
+		sb.WriteString(sgrColor("yellow", m.subProgress))
+	}
+
 	return sb.String()
+}
+
+// agentHasRunningSub 是否存在运行中的子任务（状态栏每次重绘都会调用，
+// SubAgents.List 只是一次 RLock + 小 map 遍历，开销可忽略）。
+func (m *tuiModel) agentHasRunningSub() bool {
+	if m.agent == nil || m.agent.SubAgents == nil {
+		return false
+	}
+	for _, h := range m.agent.SubAgents.List() {
+		if h.State == agent.SubagentRunning {
+			return true
+		}
+	}
+	return false
 }
 
 // syncStatusBarHeight 按当前终端宽度计算状态栏需要几行，必要时调整 flex 高度。
@@ -2464,6 +2487,16 @@ func (m *tuiModel) deliverReminderHook() {
 	tuiDeliverReminder = func(prompt string) {
 		m.app.QueueUpdateDraw(func() {
 			m.addChatLine(chatLine{role: "err", content: "⏰ 【定时提醒】" + prompt, ts: time.Now()})
+		})
+	}
+	// 子任务进度推送（GAP-S3 收尾）：OnStep 进度行 → 状态栏最近一步显示。
+	// 回调在子 agent goroutine 里同步触发，必须投递回事件循环再改 UI 状态。
+	if m.agent != nil && m.agent.SubAgents != nil {
+		m.agent.SubAgents.SetOnProgress(func(id, line string) {
+			m.app.QueueUpdateDraw(func() {
+				m.subProgress = fmt.Sprintf("%s: %s", id, line)
+				m.statusBarDirect()
+			})
 		})
 	}
 	tuiRequestResync = func() {

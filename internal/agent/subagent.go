@@ -107,16 +107,28 @@ const (
 )
 
 type SubagentManager struct {
-	mu        sync.RWMutex
-	subs      map[string]*SubagentHandle
-	nextID    atomic.Int64
-	maxDepth  int
-	maxSteps  int
-	parentLLM LLM               // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
-	parentSys string            // 主 system（子 agent 个性化指令层）
-	pm        *plugins.Manager  // 共享插件注册表（只读复制工具清单）
-	jobNotify func(note string) // 结果回灌：完成通知塞进主循环可见通道
-	sem       chan struct{}     // 并发上限
+	mu         sync.RWMutex
+	subs       map[string]*SubagentHandle
+	nextID     atomic.Int64
+	maxDepth   int
+	maxSteps   int
+	parentLLM  LLM                   // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
+	parentSys  string                // 主 system（子 agent 个性化指令层）
+	pm         *plugins.Manager      // 共享插件注册表（只读复制工具清单）
+	jobNotify  func(note string)     // 结果回灌：完成通知塞进主循环可见通道
+	onProgress func(id, line string) // 进度推送（GAP-S3 收尾）：每步进度行回调，nil = 关闭
+	sem        chan struct{}         // 并发上限
+}
+
+// SetOnProgress 注册进度推送回调（GAP-S3 收尾：推送式可见性）。nil = 关闭。
+// 与 JobNotify（完成回灌）互补：OnStep 每步/每次工具调用触发，本回调把
+// (句柄id, 进度行) 转给订阅方（TUI 状态栏 / WebUI WS 广播）。
+// 回调在子 agent goroutine 里同步调用且**不带锁**——订阅方必须非阻塞
+// （自己分发/节流），否则会拖慢子循环。
+func (sm *SubagentManager) SetOnProgress(f func(id, line string)) {
+	sm.mu.Lock()
+	sm.onProgress = f
+	sm.mu.Unlock()
 }
 
 // SubagentConfig 构造参数。JobNotify 由 main.go 接入 Jobs 完成通知。
@@ -344,14 +356,20 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 	child.WorkDir = req.WorkingDir
 	// 进度上报（GAP-S3）：子循环每步/每次工具调用回调一行摘要，写进句柄缓冲
 	//（get_subagent 的 progress 字段与 /subagents 的「进度」行读取）。
-	// 写锁保护；只留最近 maxSubagentProgress 条。
+	// 写锁保护；只留最近 maxSubagentProgress 条。推送回调锁外调用：
+	// 只推 RUNNING 态的进度（终态走 JobNotify 完成回灌，不再推线），订阅方非阻塞。
 	child.OnStep = func(step string) {
 		sm.mu.Lock()
 		h.progress = append(h.progress, step)
 		if len(h.progress) > maxSubagentProgress {
 			h.progress = h.progress[len(h.progress)-maxSubagentProgress:]
 		}
+		f := sm.onProgress
+		running := h.State == SubagentRunning
 		sm.mu.Unlock()
+		if f != nil && running {
+			f(h.ID, step)
+		}
 	}
 	// 把 child 存进句柄，供 Steer(id, msg) 在任务运行中注入纠正消息。
 	sm.mu.Lock()

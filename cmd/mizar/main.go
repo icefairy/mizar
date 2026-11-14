@@ -178,7 +178,7 @@ func main() {
 		genOpenOut = flag.String("gen-openapi-out", "docs/openapi.json", "OpenAPI 输出路径")
 		// 前端外部化助手：把内嵌前端释放到目录，改完 -serve 时外部目录生效
 		webuiOut = flag.String("webui-out", "", "把内嵌 Web UI 前端释放到该目录（默认 ~/.mizar/webui/，改完无需重编译）")
-		noAssets   = flag.Bool("no-assets", false, "不释放内置插件/技能（默认首次运行自动释放到 ~/.mizar）")
+		noAssets = flag.Bool("no-assets", false, "不释放内置插件/技能（默认首次运行自动释放到 ~/.mizar）")
 	)
 	// 兼容别名：-server → -serve（Go flag 无别名机制，解析前替换）
 	// 避免用户拼写 -server 时直接 flag 报错
@@ -1972,6 +1972,15 @@ func main() {
 		srv.ApplyStoredSettings()
 		// 插件 ws_emit 能力：注入 Server 广播
 		host.WSEmit = func(event, dataJSON string) { srv.EmitToWS(event, dataJSON) }
+		// 子任务进度推送（GAP-S3 收尾）：delegate_task 派发的运行中子任务
+		// 每步进度实时广播到 /ws（event=subagent_progress, data={id,line}）。
+		// 不进回放日志（无 conversation_id，子代理管理器进程级共享、跨会话）；
+		// 断线重连后由 get_subagent / /subagents 兜底补查终态。
+		if a.SubAgents != nil {
+			a.SubAgents.SetOnProgress(func(id, line string) {
+				srv.EmitToWS("subagent_progress", fmt.Sprintf(`{"id":%q,"line":%q}`, id, line))
+			})
+		}
 		// 强制重载使 ws_emit 对已加载插件生效
 		pm.ReloadAll()
 		log.Printf("Server 模式启动: %s (http=%v rpc=%v ws=%v)", *addr, *httpOn, *rpcOn, *wsOn)

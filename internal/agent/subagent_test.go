@@ -803,3 +803,66 @@ func TestSubagent_ProgressVisibleWhileRunning(t *testing.T) {
 	// 收尾：取消阻塞任务（ctx 解除），避免泄漏 goroutine
 	sm.Cancel(h.ID)
 }
+
+// safeProgress 线程安全的进度回调收集器（OnProgress 在子 goroutine 触发）。
+type safeProgress struct {
+	mu    sync.Mutex
+	items []string
+}
+
+func (s *safeProgress) add(id, line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items = append(s.items, id+"|"+line)
+}
+
+func (s *safeProgress) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.items...)
+}
+
+// OnProgress 推送：RUNNING 期间的每步进度实时回调（id 匹配、含工具调用行）；
+// 任务终结后不再推送；SetOnProgress(nil) 关闭后无推送。
+func TestSubagent_OnProgressPushed(t *testing.T) {
+	script := []string{
+		`{"action":"tool","tool":"ping","args":"{\"x\":1}"}`,
+		`{"action":"reply","text":"ok"}`,
+	}
+	llm := &scriptedLLM{script: script}
+	sm := newTestManager(llm, nil)
+	notes := &safeProgress{}
+	sm.SetOnProgress(notes.add)
+
+	h, _ := sm.Launch(SubagentLaunchRequest{Goal: "推送测试"})
+	if st := waitState(sm, h.ID, 3*time.Second); st != SubagentSucceeded {
+		t.Fatalf("应成功，实际 %s", st)
+	}
+	before := notes.snapshot()
+	if len(before) == 0 {
+		t.Fatal("RUNNING 期间应推送至少一条进度")
+	}
+	foundTool := false
+	for _, n := range before {
+		if strings.HasPrefix(n, h.ID+"|") && strings.Contains(n, "ping(") {
+			foundTool = true
+		}
+	}
+	if !foundTool {
+		t.Fatalf("推送应含工具调用行且 id 匹配: %v", before)
+	}
+	// 终态后不再推送（等一下确认没有终结后的推送混进来）
+	time.Sleep(50 * time.Millisecond)
+	if got := notes.snapshot(); len(got) != len(before) {
+		t.Fatalf("终态后不应再推送: before=%d after=%d", len(before), len(got))
+	}
+
+	// nil = 关闭
+	sm.SetOnProgress(nil)
+	h2, _ := sm.Launch(SubagentLaunchRequest{Goal: "关闭推送"})
+	waitState(sm, h2.ID, 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+	if got := notes.snapshot(); len(got) != len(before) {
+		t.Fatalf("SetOnProgress(nil) 后不应推送: before=%d after=%d", len(before), len(got))
+	}
+}

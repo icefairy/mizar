@@ -58,13 +58,14 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 
 **引入方案**：`SubagentConfig` 增加 `PermissionFn func(tool, args string) bool`，由 main.go 注入与主循环一致的审批逻辑；GAP-S1 的工具白名单本身也是一层软权限，两者叠加。
 
-#### 🟡 GAP-S3：实时推送缺失（进度缓冲与查询已落地）
+#### 🟡 GAP-S3：WebUI 前端渲染收尾（推送链路已落地）
 
-已实现（OnStep 回调链路）：Agent 实例级 `OnStep`（loop.go）在每步开始与每次工具调用时触发 → 子代理管理器写进句柄 `progress` 缓冲（最近 20 条，`sm.mu` 保护）→ `get_subagent` 的 `progress` 字段与 `/subagents` 的「进度：step N: tool(args)」行可见，运行中即生效、终态后保留最后一批。
+进度可见性三层已通：
+1. **缓冲/查询**：Agent 实例级 `OnStep`（loop.go）→ 句柄 `progress` 缓冲（最近 20 条）→ `get_subagent.progress` / `/subagents`「进度」行
+2. **TUI 推送**：`SubagentManager.SetOnProgress` → tui.go `deliverReminderHook` 注册 → QueueUpdateDraw 更新状态栏（仅 RUNNING 时显示，子任务完成后行自动消失）
+3. **WebUI 推送**：serve 模式下 SetOnProgress → `EmitToWS("subagent_progress", {id,line})` 实时广播 /ws（不进回放日志：子代理管理器进程级共享无会话归属，断线重连由 get_subagent 兜底）
 
-剩余差距：**推送式**可见性——运行中进度不会主动推到 TUI 状态栏/WebUI（`/ws`），需要轮询才可见。
-
-**引入方案**：SubagentManager 加 OnProgress 订阅回调（main.go 接线到 WebUI 的事件广播）；TUI 状态栏滚动显示运行中子任务最近一步。
+剩余差距：WebUI **前端**未渲染 `subagent_progress` 事件（前端在 dist/，独立工程）；后端契约已就绪。
 
 #### 🟡 GAP-S4：子任务记录纯内存（~60 行）
 
@@ -109,7 +110,7 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；同日第一层�
 | C-1 | 子代理类型系统 | 具名类型（Explore/Plan/自定义），每类独立工具集+描述，定义在 `.codebuddy/agents/` | role 行为预设 + 只读角色工具白名单已有；无用户自定义类型 | 🟡 |
 | C-2 | 结构化任务清单 | TaskCreate/List/Get/Update：依赖（blockedBy）、owner、状态机、activeForm，多代理共享 | `todo` 已有 blocked_by 依赖 + 自动解锁 + 会话回放；无 owner/认领语义 | 🟢 基本持平 |
 | C-3 | 多代理团队 | TeamCreate + 共享任务列表 + 代理间消息协议（SendMessage），互相认领/阻塞 | 无 | 🟡 |
-| C-4 | 后台代理 | 代理级后台运行 + 完成通知协议，主代理可继续其他工作 | delegate_task 异步 + DrainDone 回灌已近似；缺通知粒度（GAP-S3） | 🟢 基本持平 |
+| C-4 | 后台代理 | 代理级后台运行 + 完成通知协议，主代理可继续其他工作 | delegate_task 异步 + DrainDone 回灌 + OnProgress 推送已对齐 | 🟢 基本持平 |
 | C-5 | 权限模式 | plan/default/acceptEdits/bypassPermissions 多档 + 逐工具审批 + 子代理继承 | plan 审批 + goal gate，无通用权限分级，子任务无审批（GAP-S2） | 🔴 |
 | C-6 | 用户级 Hooks | 用户 settings 配置 shell 命令响应工具事件（PreToolUse 等），可阻塞并回注反馈 | hooks 是插件内部机制（agent/hooks.go），用户不可配 shell 命令 | 🟡 |
 | C-7 | 结构化记忆 | 四类记忆（user/feedback/project/reference）+ 索引每会话自动加载 | memory 插件（SQLite/HMEM），非自动加载的结构化记忆 | 🟡 |
@@ -163,7 +164,6 @@ model: 主模型    # 可省略，继承父级
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
 | 🔴 P0 | 子代理权限门禁（PermissionFn + PermissionMode） | ~80 行 | GAP-S2、C-5 |
-| 🟡 P1 | 子任务进度推送（OnProgress 订阅 → /ws 广播 + TUI 状态栏） | ~100 行 | GAP-S3 收尾、C-4 |
 | 🟡 P1 | 扩展事件拦截 Decision（对齐 Pi） | ~30 行 | P-1 |
 | 🟡 P1 | 子任务句柄随会话落盘回放 | ~60 行 | GAP-S4 |
 | 🔵 P2 | 用户自定义子代理类型（agents/*.md，含 per-type model） | ~150 行 | GAP-S1 第二层、C-1、P-4 |
@@ -176,7 +176,7 @@ model: 主模型    # 可省略，继承父级
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents，2026-11-14 晚交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播，2026-11-14 晚交付）。
 
 ---
 
