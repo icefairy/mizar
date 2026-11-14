@@ -387,6 +387,22 @@ HMEM 连接配置：环境变量 `MIZAR_HMEM_API_URL` / `MIZAR_HMEM_API_KEY` / `
 - 技能使用统计 + 周报 + 禁用功能
 - `skill_manage` 工具自动沉淀经验
 
+**分类目录**（对齐 Hermes 的 `skills/<category>/<name>/SKILL.md`）：
+```
+~/.mizar/skills/
+├── handoff/SKILL.md              # 未分类
+├── devops/
+│   ├── docker-ops/SKILL.md       # 分类 devops
+│   └── k8s-debug/SKILL.md
+└── reverse/ida-tips/SKILL.md
+```
+- 分类 = 技能目录的父目录名，不写进 frontmatter（单一事实源）
+- 创建时自动归类：`skill_manager {"action":"create","name":"docker-ops","category":"devops"}` → 落到 `devops/docker-ops/SKILL.md`
+- 读取时支持：`list` 按分类分组、`list {category:"devops"}` 只列该分类、索引注入带 `[devops]` 前缀
+- 定位支持简写：`edit/patch/delete {"name":"docker-ops"}` 自动在分类目录里找；也可写 `devops/docker-ops`
+- 分类目录本身不含 SKILL.md，不会被误当成技能；删空技能后自动清理空分类目录
+- 不传 `category` 时行为与旧版完全一致（落到顶层 `~/.mizar/skills/<name>/SKILL.md`）
+
 ### 6. Server 模式（持久运行 + 三种接入协议）
 ```bash
 ./mizar --serve --addr :3003 --token your-token \

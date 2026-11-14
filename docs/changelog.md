@@ -1,3 +1,43 @@
+## [v0.8.5] — 2026-11-14
+
+> 主题：**技能文件夹分类** —— 技能多到几十个时不再挤成一坨，按领域分组。
+
+### ✨ 新增
+
+- **技能分类目录**（`internal/skills/skills.go`）—— 对齐 Hermes 的
+  `skills/<category>/<name>/SKILL.md` 布局：
+  - `Skill` 结构新增 `Category` 字段，从相对路径推导（`devops/x/SKILL.md` → `devops`）。
+  - `LoadAll` 支持三种布局混用：顶层 `<name>.md`、`<name>/SKILL.md`（未分类）、
+    `<category>/<name>/SKILL.md`（分类）。
+  - **分类即目录，不写进 frontmatter** —— 单一事实源，避免两处不一致。
+  - 分类目录自身不含 `SKILL.md`，不会被误当成技能（只扫一层子目录）。
+  - 新增 `Manager.Categories()`（去重排序的分类清单）、`Manager.AllByCategory(cat)`。
+  - `RenderIndex` 注入时带 `[devops]` 前缀，模型可按领域筛选后再 `read`。
+
+- **`skill_manager` 工具支持分类**（`internal/builtins/skill_manager_tool.go`）：
+  - `create` 新增 `category` 参数，落到 `<baseDir>/<category>/<name>/SKILL.md`；
+    不传时行为与旧版完全一致。
+  - `locate()` 统一解析技能路径：`edit`/`patch`/`delete` 传裸名会自动在分类目录里找，
+    也支持 `devops/docker-ops` 或 `devops:docker-ops` 显式指定。
+  - `list` 按分类分组显示（`[devops]` / `[未分类]`），`list {"category":"devops"}`
+    只看某一类。
+  - `delete` 删技能目录后若分类目录空了会自动清理，不留空壳。
+  - **防目录穿越**：`name`/`category` 含路径分隔符或为 `.`/`..` 直接拒绝。
+
+### 🧪 测试
+
+- `internal/skills/category_test.go` 新增 5 项：分类加载、分类目录不被误判为技能、
+  索引带分类、`Categories()` 去重排序、`AllByCategory` 过滤。
+- `internal/builtins/skill_manager_category_test.go` 新增 4 项：带分类创建落盘、
+  list 分组与过滤、分类技能的 edit/patch/delete、目录穿越拒绝。
+- 全仓回归 **949 passed**（`context` 包 2 项为环境相关的既有失败）。
+
+### 📄 文档
+
+- `README.md` 技能系统章节补充分类目录布局、创建/读取用法与兼容说明。
+
+---
+
 ## [v0.8.4] — 2026-11-14
 
 > 主题：**自定义前端 + 路由注册表** —— 改前端不用重编译；端点清单有了单一事实源。
