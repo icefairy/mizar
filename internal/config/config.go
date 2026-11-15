@@ -35,8 +35,11 @@ type Config struct {
 	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`           // 技能使用统计+周报（nil=默认开启）
 	SkillStatsTopN    int    `json:"skill_stats_top_n"`             // 周报建议禁用数（0=默认10）
 	SkillInjectMode   string `json:"skill_inject_mode"`             // 技能注入: index(默认,缓存友好)|full(全量正文)
-	UserColor         string `json:"user_color,omitempty"`          // TUI 用户消息颜色（默认 white）
-	AiColor           string `json:"ai_color,omitempty"`            // TUI AI 回复颜色（默认 green）
+	// MemoryEnabled 结构化长期记忆自动注入（C-7，nil=默认开启）。
+	// 关闭后 memory 工具仍可用，但 MEMORY.md 不再自动进系统提示。
+	MemoryEnabled *bool  `json:"memory_enabled,omitempty"`
+	UserColor     string `json:"user_color,omitempty"` // TUI 用户消息颜色（默认 white）
+	AiColor       string `json:"ai_color,omitempty"`   // TUI AI 回复颜色（默认 green）
 	// UserAgent 自定义 User-Agent（空=使用 Go 默认，用于网关/厂商侧识别客户端）
 	UserAgent string `json:"user_agent,omitempty"`
 	// CacheMissNotice 是否显示缓存命中率显著下跌提示（默认 false = 关闭）。
@@ -167,6 +170,14 @@ func (c *Config) SkillInjectIsIndex() bool {
 }
 
 // SkillStatsOn 统计周报默认开启（nil 或 true 均开启，显式 false 关闭）。
+// MemoryOn 是否自动注入结构化长期记忆（默认开启）。
+func (c *Config) MemoryOn() bool {
+	if c == nil || c.MemoryEnabled == nil {
+		return true
+	}
+	return *c.MemoryEnabled
+}
+
 func (c *Config) SkillStatsOn() bool {
 	if c.SkillStatsEnabled == nil {
 		return true

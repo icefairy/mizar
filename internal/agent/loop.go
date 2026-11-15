@@ -110,9 +110,12 @@ const maxStepsWarnRemain = 3
 type Agent struct {
 	LLM          LLM
 	Plugins      *plugins.Manager
-	System       string    // 用户自定义个性化指令（注入 context 层）
-	Soul         string    // SOUL.md 内容（identity 层，跨会话稳定）
-	SkillsPrompt string    // 技能索引/正文（volatile 层，插件热加载时通过 ReloadTools 失效缓存）
+	System       string // 用户自定义个性化指令（注入 context 层）
+	Soul         string // SOUL.md 内容（identity 层，跨会话稳定）
+	SkillsPrompt string // 技能索引/正文（volatile 层，插件热加载时通过 ReloadTools 失效缓存）
+	// MemoryPrompt 结构化长期记忆注入段（C-7，volatile 层：memory 工具写入后
+	// 调用 SetMemoryPrompt 刷新并失效缓存，使新事实当轮即可见）。
+	MemoryPrompt string
 	PluginDir    string    // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
 	WorkDir      string    // 当前工作目录，注入系统提示供模型锚定搜索范围
 	Initial      []Message // 会话恢复时的历史消息（置于 task 之前）
@@ -502,6 +505,10 @@ func (a *Agent) buildVolatileSection() string {
 	if a.SkillsPrompt != "" {
 		sb.WriteString(a.SkillsPrompt)
 	}
+	// 结构化长期记忆（C-7，volatile：memory 工具写入后 SetMemoryPrompt 刷新）
+	if a.MemoryPrompt != "" {
+		sb.WriteString(a.MemoryPrompt)
+	}
 	// 插件目录信息（引导模型自己创建/扩展插件）
 	if a.PluginDir != "" {
 		pluginNames := a.Plugins.PluginNames()
@@ -544,6 +551,13 @@ func (a *Agent) buildVolatileSection() string {
 // 注意：缓存友好约束下，热加载会破坏前缀缓存一次——这是显式 trade-off，
 // 调用方应仅在"确实新增工具"时使用，而非每次轮询都调用。
 func (a *Agent) ReloadTools() {
+	a.systemPromptCache = ""
+}
+
+// SetMemoryPrompt 更新结构化记忆注入段（C-7）并失效系统提示缓存。
+// memory 工具写入后调用，使新增事实当轮即进入模型视野。
+func (a *Agent) SetMemoryPrompt(p string) {
+	a.MemoryPrompt = p
 	a.systemPromptCache = ""
 }
 

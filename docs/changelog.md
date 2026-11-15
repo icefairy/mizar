@@ -1,3 +1,24 @@
+## [未发布] — 2026-11-15（夜）
+
+> 主题：**结构化长期记忆** —— 四分类 MEMORY.md 每会话自动注入（C-7，对齐 CodeBuddy）。
+
+### ✨ 新增
+
+- **结构化记忆包 `internal/memory`**（新增）
+  - `~/.mizar/memory/MEMORY.md` 单文件，固定四分类 `## user / ## feedback / ## project / ## reference`，一行一事实；未知分类归 reference、章节外散条目忽略、换行折叠为单行（保持文件结构不被破坏）。
+  - `Store`：`Add/Remove/Clear/List/Count/Render`，原子写（临时文件 + rename），并发加锁（Web 多会话安全），同分类重复条目幂等。
+  - `Render()` 生成注入段：上限 200 条 / 8000 字节，超限截断并提示完整见 MEMORY.md。
+- **自动注入**（`internal/agent/loop.go`）
+  - `Agent.MemoryPrompt`（volatile 层，与技能索引同级）参与系统提示构建；`SetMemoryPrompt` 写入后失效缓存，新事实当轮即可见；`Clone` 复制该字段。
+- **memory 工具 + `/memory` 命令**（`internal/builtins/memory_tool.go`、`cmd/mizar/main.go`）
+  - 工具 `memory`：action `add/list/remove/count`，写后回调刷新注入段。
+  - 命令 `/memory`：查看 / `add <类别> <内容>` / `rm <类别> <序号>` / `clear [类别]`。
+- **配置**：`config.json memory_enabled`（nil=默认开启）可关闭自动注入（工具仍可用）。
+
+### 📝 说明
+
+- 与 memory 插件（HMEM 语义检索）分工互补：插件面向海量记忆按需检索，本包面向小而精、每会话必见的固定分类事实。
+
 ## [未发布] — 2026-11-14
 
 > 主题：**子代理权限门禁** —— PermissionMode 四模式 + 逐工具分级审批，主/子代理一条链路全覆盖（GAP-S2/C-5，对齐 Claude Code PermissionMode）。

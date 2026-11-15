@@ -1,6 +1,7 @@
 # Mizar 能力差距分析：vs Pi Agent / CodeBuddy
 
 > 撰写日期：2026-11-14（同日更新：并入 v0.8.7/v0.8.8 子任务机制改动后的现状核对）
+> 2026-11-15 晚更新：交付 C-7 结构化记忆（internal/memory 四分类 MEMORY.md 自动注入 + memory 工具/`/memory` 命令）
 > 2026-11-15 更新：交付 P-1 扩展事件拦截（ToolCallDecision）、GAP-S4 子任务句柄随会话落盘回放、P-3 thinking level xhigh/max、GAP-S1 第二层用户自定义子代理类型（~/.mizar/agents/*.md）——四项已移出缺口清单，见路线图尾部
 > 对比对象：Pi Agent（`@earendil-works/pi-coding-agent`，对照 `docs/pi-comparison.md` 快照 + CHANGELOG 0.85→1.4.x 已移植项）、CodeBuddy Code（Claude Code 系 CLI）
 > 方法：逐文件核对 Mizar 当前源码（`internal/agent/subagent.go` 等以实际代码为准），与两者公开能力清单逐项比对
@@ -130,7 +131,7 @@ per-subagent token 计量：子代理 OnLLMStream 置为 usage 累加器（loop 
 | C-4 | 后台代理 | 代理级后台运行 + 完成通知协议，主代理可继续其他工作 | delegate_task 异步 + DrainDone 回灌 + OnProgress 推送已对齐 | 🟢 基本持平 |
 | C-5 | 权限模式 | plan/default/acceptEdits/bypassPermissions 多档 + 逐工具审批 + 子代理继承 | PermissionMode 四档已实现（auto/default/acceptEdits/plan），逐工具分级审批，子代理继承同一 gate；无逐工具白名单 UI | 🟢 基本持平 |
 | C-6 | 用户级 Hooks | 用户 settings 配置 shell 命令响应工具事件（PreToolUse 等），可阻塞并回注反馈 | ✅ 已实现（2026-11-15）：config.json `hooks` 段（pre_tool_use/post_tool_use），stdin JSON 上下文 + MIZAR_HOOK=1；pre 可 deny（stdout JSON 或 exit 2）/rewrite，故障记日志放行；post 只观察；`/hooks` 命令查看 | ✅ 基本持平 |
-| C-7 | 结构化记忆 | 四类记忆（user/feedback/project/reference）+ 索引每会话自动加载 | memory 插件（SQLite/HMEM），非自动加载的结构化记忆 | 🟡 |
+| C-7 | 结构化记忆 | 四类记忆（user/feedback/project/reference）+ 索引每会话自动加载 | ✅ 已实现（2026-11-15）：`internal/memory` 四分类 MEMORY.md + 每会话自动注入系统提示 + memory 工具/`/memory` 命令读写；与 memory 插件（HMEM 语义检索）互补 | ✅ 基本持平 |
 | C-8 | 工作树隔离 | git worktree 一键隔离实验性修改 | 无 | 🔵 |
 | C-9 | 延迟工具加载 | ToolSearch 按需加载工具 schema，未用工具不占上下文 | 工具定义全量注入；有技能渐进披露（SkillInjectMode: index）但工具层无 | 🔵 |
 | C-10 | 联网检索 | WebSearch/WebFetch 内置 | 无（离线定位使然，可经 MCP 接入） | ⚪ 定位外 |
@@ -167,6 +168,15 @@ model: 主模型    # 可省略，继承父级
 
 剩余差距：owner/认领语义（多代理团队 C-3 时再做）。
 
+#### C-7 结构化记忆四分类（✅ 已实现）
+
+对齐 CodeBuddy 的 MEMORY.md 设计，`internal/memory` 包（2026-11-15）：
+
+- **存储**：`~/.mizar/memory/MEMORY.md` 单文件，固定四章节 `## user / ## feedback / ## project / ## reference`，每行 `- 事实`；未知章节/散条目容错（归 reference / 忽略），换行折叠保证「一行一事实」结构不被破坏。
+- **自动注入**：启动时 `Store.Render()` 生成注入段 → `Agent.MemoryPrompt`（volatile 层，与技能索引同级）；注入上限 200 条 / 8000 字节，超限截断并给提示。`config.json memory_enabled=false` 可关闭自动注入（工具仍可用）。
+- **写入即生效**：`memory` 工具（add/list/remove/count）与 `/memory` 命令（查看 / add / rm / clear）写后回调 `SetMemoryPrompt` 刷新并失效系统提示缓存，新事实当轮即可见。
+- **与 memory 插件的分工**：插件 `mem_*` = 海量记忆语义检索（HMEM/向量）；本包 = 小而精、每会话必见的固定分类事实清单。
+
 #### C-5 权限分级（离线部署场景同样需要）
 
 内网/私有化不等于免审批：bash 的 `rm -rf`、edit 生产配置仍需要闸门。方案：
@@ -180,12 +190,11 @@ model: 主模型    # 可省略，继承父级
 
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
-| 🔵 P2 | 结构化记忆四分类 + 自动加载索引 | ~200 行 | C-7 |
 | 🔵 P3 | worktree 隔离 | ~100 行 | C-8 |
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）；**用户级 hooks（C-6，config.json hooks 段 shell 命令响应工具事件）与 per-subagent token 计量（GAP-S5，流式 usage 累加进句柄）**（2026-11-15 晚交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）；**用户级 hooks（C-6，config.json hooks 段 shell 命令响应工具事件）与 per-subagent token 计量（GAP-S5，流式 usage 累加进句柄）**（2026-11-15 晚交付）；**结构化记忆四分类 + MEMORY.md 自动注入索引（C-7，`internal/memory` 包 + memory 工具 + `/memory` 命令 + Agent.MemoryPrompt volatile 段）**（2026-11-15 晚交付）。
 
 ---
 
@@ -199,6 +208,8 @@ model: 主模型    # 可省略，继承父级
 | `cmd/mizar/forkcmd.go` | /fork 分支派生核心逻辑（P-2：前缀重放/血缘/标题） |
 | `internal/session/session.go` | 会话存储（fork 血缘记录 AppendFork/ForkParent） |
 | `internal/userhooks/userhooks.go` | 用户级 hooks（C-6：pre 裁决/post 观察，stdin JSON 上下文） |
+| `internal/memory/memory.go` | 结构化长期记忆（C-7：四分类 MEMORY.md 读写/渲染/注入上限） |
+| `internal/builtins/memory_tool.go` | memory 工具（C-7：add/list/remove/count，写后刷新注入） |
 | `cmd/mizar/main.go:716-723` | 五个委派工具注册 + DelegationGuide 注入 |
 | `internal/llm/openai.go` | `WithModel`（modelDeriver 的实现侧）+ thinking 档位（P-3 xhigh/max） |
 | `internal/builtins/todo_pi.go` | 平铺 todo（C-2 升级对象，回放机制复用点） |

@@ -26,11 +26,11 @@ import (
 	"mizar/internal/config"
 	"mizar/internal/context"
 	"mizar/internal/diag"
-	"mizar/internal/userhooks"
 	"mizar/internal/engine"
 	"mizar/internal/jobs"
 	"mizar/internal/llm"
 	"mizar/internal/lsp"
+	"mizar/internal/memory"
 	"mizar/internal/plugins"
 	"mizar/internal/prompts"
 	"mizar/internal/schedule"
@@ -38,6 +38,7 @@ import (
 	"mizar/internal/session"
 	"mizar/internal/shell"
 	"mizar/internal/skills"
+	"mizar/internal/userhooks"
 )
 
 var version = "v0.8.8"
@@ -612,6 +613,27 @@ func main() {
 		log.Printf("SOUL.md 注入: %s", context.SoulPath())
 	}
 
+	// 结构化长期记忆（C-7，对齐 CodeBuddy 四分类）：~/.mizar/memory/MEMORY.md，
+	// 每次会话自动注入系统提示；memory 工具可增删改。与 memory 插件（HMEM 语义
+	// 检索）互补——这里是小而精、必见的事实清单。
+	memStore := memory.NewStore(filepath.Join(config.ConfigDir(), "memory"))
+	memInject := true
+	if cfgMem, err := config.Load(config.DefaultPath()); err == nil {
+		memInject = cfgMem.MemoryOn()
+	}
+	if err := memStore.Load(); err != nil {
+		log.Printf("结构化记忆加载失败（忽略）: %v", err)
+	} else if cnt, _ := memStore.Count(); cnt > 0 {
+		if memInject {
+			log.Printf("结构化记忆注入: %d 条（%s）", cnt, memStore.Path())
+		} else {
+			log.Printf("结构化记忆已加载 %d 条，但自动注入被关闭（config.json memory_enabled=false）", cnt)
+		}
+	}
+	if memInject {
+		a.MemoryPrompt = memStore.Render()
+	}
+
 	// 会话存储（模仿 pi Agent：按工作路径自动分目录，路径记忆）
 	sessAbs := *sessDir
 	if strings.HasPrefix(sessAbs, "~/") {
@@ -735,6 +757,12 @@ func main() {
 	for _, t := range builtins.JobTools(a.Jobs) {
 		pm.RegisterBuiltin(t)
 	}
+	// 结构化长期记忆工具（C-7）：写入后刷新注入段，使新事实当轮即可见。
+	pm.RegisterBuiltin(builtins.MemoryTool(memStore, func() {
+		if memInject {
+			a.SetMemoryPrompt(memStore.Render())
+		}
+	}))
 	// ask_user_question：TUI 模式下由 tui.go 设置回调；非 TUI 保持 nil（降级提示）
 	// 全局可访问的计划模式实例（供 builtins 工具引用）
 	agent.CurrentPlanMode = a.PlanMode
@@ -1714,6 +1742,90 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 			}
 			sb.WriteString("\n裁决: stdout JSON {\"decision\":\"deny|rewrite\",\"reason\":...} 或 exit 2；失败放行不阻塞主流程")
 			return sb.String(), nil
+		},
+	})
+	// 内置 /memory 命令：查看/管理结构化长期记忆（C-7，~/.mizar/memory/MEMORY.md）
+	a.Commands.Register(agent.Command{
+		Name: "memory",
+		Description: "查看/管理结构化长期记忆（/memory 查看 ｜ /memory add <类别> <内容> ｜ " +
+			"/memory rm <类别> <序号> ｜ /memory clear [类别]）。类别: user/feedback/project/reference",
+		Run: func(args string) (string, error) {
+			args = strings.TrimSpace(args)
+			fields := strings.Fields(args)
+			sub := ""
+			if len(fields) > 0 {
+				sub = strings.ToLower(fields[0])
+			}
+			switch sub {
+			case "", "list", "show":
+				m, err := memStore.List("")
+				if err != nil {
+					return "", err
+				}
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "结构化记忆（%s）：\n", memStore.Path())
+				total := 0
+				for _, cat := range memory.Categories() {
+					items := m[cat]
+					if len(items) == 0 {
+						continue
+					}
+					fmt.Fprintf(&sb, "\n[%s]\n", cat)
+					for i, it := range items {
+						fmt.Fprintf(&sb, "  %d. %s\n", i+1, it)
+						total++
+					}
+				}
+				if total == 0 {
+					return "（结构化记忆为空）\n用 /memory add <类别> <内容> 或让模型调用 memory 工具记录；" +
+						"\n类别: user/feedback/project/reference。每次会话自动注入系统提示。", nil
+				}
+				sb.WriteString("\n（修改后用 /memory 核对；模型也可通过 memory 工具读写）")
+				return sb.String(), nil
+			case "add":
+				if len(fields) < 3 {
+					return "", fmt.Errorf("用法: /memory add <类别> <内容>（类别: user/feedback/project/reference）")
+				}
+				cat := memory.NormalizeCategory(fields[1])
+				text := strings.TrimSpace(strings.TrimPrefix(args, fields[0]+" "+fields[1]))
+				if err := memStore.Add(cat, text); err != nil {
+					return "", err
+				}
+				a.SetMemoryPrompt(memStore.Render())
+				return fmt.Sprintf("✓ 已记入 %s 分类（当轮起注入系统提示）", cat), nil
+			case "rm", "remove", "delete":
+				if len(fields) < 3 {
+					return "", fmt.Errorf("用法: /memory rm <类别> <序号>（序号取自 /memory 列表）")
+				}
+				idx, err := strconv.Atoi(fields[2])
+				if err != nil {
+					return "", fmt.Errorf("序号必须是数字: %q", fields[2])
+				}
+				ok, err := memStore.Remove(fields[1], idx)
+				if err != nil {
+					return "", err
+				}
+				if !ok {
+					return "", fmt.Errorf("删除失败")
+				}
+				a.SetMemoryPrompt(memStore.Render())
+				return "✓ 已删除", nil
+			case "clear":
+				target := ""
+				if len(fields) > 1 {
+					target = fields[1]
+				}
+				if err := memStore.Clear(target); err != nil {
+					return "", err
+				}
+				a.SetMemoryPrompt(memStore.Render())
+				if target == "" {
+					return "✓ 已清空全部结构化记忆", nil
+				}
+				return fmt.Sprintf("✓ 已清空 %s 分类", memory.NormalizeCategory(target)), nil
+			default:
+				return "", fmt.Errorf("用法: /memory ｜ /memory add <类别> <内容> ｜ /memory rm <类别> <序号> ｜ /memory clear [类别]")
+			}
 		},
 	})
 	// 内置 /compact 命令：手动触发上下文压缩

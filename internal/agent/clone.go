@@ -25,6 +25,7 @@ func (a *Agent) Clone() *Agent {
 		System:       a.System,
 		Soul:         a.Soul,
 		SkillsPrompt: a.SkillsPrompt,
+		MemoryPrompt: a.MemoryPrompt,
 		PluginDir:    a.PluginDir,
 		WorkDir:      a.WorkDir,
 		MaxSteps:     a.MaxSteps,
