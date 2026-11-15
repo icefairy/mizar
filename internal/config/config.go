@@ -35,6 +35,9 @@ type Config struct {
 	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`           // 技能使用统计+周报（nil=默认开启）
 	SkillStatsTopN    int    `json:"skill_stats_top_n"`             // 周报建议禁用数（0=默认10）
 	SkillInjectMode   string `json:"skill_inject_mode"`             // 技能注入: index(默认,缓存友好)|full(全量正文)
+	// SecurityRedact 敏感信息脱敏（默认开启）。关闭后会话落盘/导出/诊断日志
+	// 不再掩码 API key、token、私钥等（不建议关闭）。
+	SecurityRedact *bool `json:"security_redact,omitempty"`
 	// ImageRead 图片读取（P-7，nil=默认关闭）：启用后 read 工具遇到图片文件
 	// 会把图片作为视觉附件随下一条消息发送（需多模态网关支持）。
 	ImageRead *bool `json:"image_read,omitempty"`
@@ -175,6 +178,14 @@ func (c *Config) SkillInjectIsIndex() bool {
 }
 
 // SkillStatsOn 统计周报默认开启（nil 或 true 均开启，显式 false 关闭）。
+// SecurityRedactOn 是否启用敏感信息脱敏（默认开启）。
+func (c *Config) SecurityRedactOn() bool {
+	if c == nil || c.SecurityRedact == nil {
+		return true
+	}
+	return *c.SecurityRedact
+}
+
 // ImageReadOn 是否启用图片读取（默认关闭，需多模态网关）。
 func (c *Config) ImageReadOn() bool {
 	if c == nil || c.ImageRead == nil {

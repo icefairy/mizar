@@ -39,6 +39,7 @@ import (
 	"mizar/internal/memory"
 	"mizar/internal/plugins"
 	"mizar/internal/prompts"
+	"mizar/internal/redact"
 	"mizar/internal/reflect"
 	"mizar/internal/schedule"
 	"mizar/internal/server"
@@ -672,6 +673,15 @@ func main() {
 	a.Soul = context.LoadSoul()
 	if a.Soul != "" {
 		log.Printf("SOUL.md 注入: %s", context.SoulPath())
+	}
+
+	// 敏感信息脱敏（2026-11-15，默认开启）：会话落盘/导出/诊断日志里的
+	// API key、token、私钥等会被掩码。config.json security_redact=false 可关闭。
+	if cfgSec, err := config.Load(config.DefaultPath()); err == nil {
+		redact.SetEnabled(cfgSec.SecurityRedactOn())
+		if !cfgSec.SecurityRedactOn() {
+			log.Printf("⚠ 敏感信息脱敏已关闭（config.json security_redact=false）")
+		}
 	}
 
 	// 图片读取（P-7，opt-in）：config image_read=true 时 read 工具把图片作为

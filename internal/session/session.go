@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"mizar/internal/agent"
+	"mizar/internal/redact"
 )
 
 // entryType 会话文件条目的类型标识。
@@ -117,12 +118,31 @@ func (s *Store) Append(id string, msg agent.Message) error {
 	}
 	// 落盘时补写时间戳（未设置才填）：所有调用方无需关心，单条消息一个时间点。
 	msg.EnsureTimestamp()
+	// 落盘前脱敏（2026-11-15）：会话 JSONL 里常有 API key / token（工具参数、
+	// 命令输出、错误信息），脱敏后仍可读但不可复用。只改存储副本，不影响内存中的
+	// 原始消息（模型看到的内容不变，避免破坏工具调用参数）。
+	msg.Content = redact.Apply(msg.Content)
+	msg.ToolArgs = redact.Apply(msg.ToolArgs)
+	msg.ToolCalls = redactToolCalls(msg.ToolCalls)
 	// 消息行不写 type 字段，保持旧格式（旧版本 mizar 仍能读）。
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
 	return s.appendLine(id, b)
+}
+
+// redactToolCalls 对 tool_calls 里的参数与结果做脱敏（返回副本，不改原切片）。
+func redactToolCalls(calls []agent.ToolCallRef) []agent.ToolCallRef {
+	if len(calls) == 0 {
+		return calls
+	}
+	out := make([]agent.ToolCallRef, len(calls))
+	for i, c := range calls {
+		c.Args = redact.Apply(c.Args)
+		out[i] = c
+	}
+	return out
 }
 
 // AppendCompaction 追加一条压缩记录（追加式，不改写已有历史）。

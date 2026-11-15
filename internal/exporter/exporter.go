@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"mizar/internal/agent"
+	"mizar/internal/redact"
 )
 
 // Options 导出参数。
@@ -97,7 +98,7 @@ func renderToolCall(b *strings.Builder, call agent.Message, results []agent.Mess
 		name = "tool"
 	}
 	fmt.Fprintf(b, `<details class="tool"><summary>🔧 %s</summary>`+"\n", html.EscapeString(name))
-	if args := strings.TrimSpace(call.ToolArgs); args != "" {
+	if args := strings.TrimSpace(redact.Apply(call.ToolArgs)); args != "" {
 		fmt.Fprintf(b, `<div class="args"><div class="sub">参数</div><pre>%s</pre></div>`+"\n", html.EscapeString(args))
 	}
 	for _, r := range results {
@@ -153,11 +154,14 @@ func resultBody(content string) string {
 	return tr.Output
 }
 
-// formatText 把纯文本转成 HTML：保留换行（CSS pre-wrap）、转义、简单代码高亮。
+// formatText 把纯文本转成 HTML：脱敏 → 保留换行（CSS pre-wrap）→ 转义 → 简单代码高亮。
+//
+// 脱敏在导出层再做一次（会话落盘时已脱敏，但导出可能读旧会话/外部来源）。
 func formatText(s string) string {
 	if s == "" {
 		return ""
 	}
+	s = redact.Apply(s)
 	// 检测 ``` 代码块并高亮
 	var out strings.Builder
 	lines := strings.Split(s, "\n")

@@ -103,3 +103,37 @@ func TestSessionFileFormat(t *testing.T) {
 		t.Fatalf("bad format: %s", line)
 	}
 }
+
+// TestAppendRedactsSecrets 审计补强回归：落盘前必须脱敏（会话文件不该留明文密钥）。
+func TestAppendRedactsSecrets(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	secret := "sk-proj-AbCdEf0123456789GhIjKlMnOpQrStUv"
+	msgs := []agent.Message{
+		{Role: agent.RoleUser, Content: "我的 key 是 " + secret},
+		{Role: agent.RoleAssistant, Kind: agent.KindToolCall, ToolName: "bash",
+			ToolArgs: `{"command":"curl -H 'Authorization: Bearer ` + secret + `' x"}`},
+	}
+	for _, m := range msgs {
+		if err := st.Append("s1", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "s1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Errorf("会话文件里不应出现明文密钥:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "***") {
+		t.Errorf("应出现掩码:\n%s", raw)
+	}
+	// 关键：内存里的原始消息不能被改（模型看到的参数必须完整）
+	if !strings.Contains(msgs[0].Content, secret) {
+		t.Error("Append 不应修改调用方传入的消息（内存内容必须原样）")
+	}
+	if !strings.Contains(msgs[1].ToolArgs, secret) {
+		t.Error("Append 不应修改 ToolArgs 原始值")
+	}
+}

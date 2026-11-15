@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"mizar/internal/redact"
 )
 
 // maxFileSize 单日日志上限（超过后停止写入，避免磁盘被撑爆）。
@@ -91,8 +93,10 @@ func Logf(tag, format string, args ...any) {
 	if !enabled || file == nil || size >= maxFileSize {
 		return
 	}
+	// 脱敏（2026-11-15）：诊断日志最容易带出密钥（工具参数、错误信息里常有）
+	body := redact.Apply(fmt.Sprintf(format, args...))
 	line := fmt.Sprintf("%s [%-5s] %s\n",
-		time.Now().Format("2006-01-02 15:04:05.000"), tag, fmt.Sprintf(format, args...))
+		time.Now().Format("2006-01-02 15:04:05.000"), tag, body)
 	n, err := file.WriteString(line)
 	if err != nil {
 		enabled = false
