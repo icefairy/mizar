@@ -164,6 +164,11 @@ type Agent struct {
 	// 只在真正发生压缩后注入一次，且注入内容用 KindNormal 的 user 消息（不进 todo 回放）。
 	TodoInject func() string
 
+	// ReviewSignals 自学习节奏双计数器（P2）：记忆看用户轮数、技能看工具迭代数。
+	// 在 Run 开头初始化（按 BackgroundReview 的阈值），每轮/每次工具调用推进；
+	// StepEnd 钩子通过 HookContext.ReviewSignals 读到快照。
+	ReviewSignals *reviewSignalsTracker
+
 	// OnTranscript 可选：Run 结束时回调本次完整消息流（含 system/时间提示/历史/新对话）。
 	// 用途：子代理需要把自己的对话历史留下来，供 delegate_task(action=continue) 续跑。
 	// 在 Run 返回前调用一次（defer），msgs 是快照副本，调用方可安全保存。
@@ -631,6 +636,15 @@ func (a *Agent) Run(task string) (reply string, err error) {
 	if a.Completeness != nil {
 		a.Completeness.Reset()
 	}
+	// 自学习节奏（P2）：每次 Run 重建双计数器（阈值沿用 BackgroundReview 配置）。
+	if a.ReviewSignals == nil {
+		interval := 3
+		if a.BgReview != nil {
+			interval = a.BgReview.Interval()
+		}
+		a.ReviewSignals = newReviewSignalsTracker(interval)
+	}
+	_, _ = a.ReviewSignals.OnUserTurn() // 推进用户轮数；StepEnd 钩子读快照
 	// 重置自愈状态：每次 Run 重新计数递进档位。
 	a.emergencyAttempts = 0
 	a.lastEmergencyPct = 0
@@ -915,7 +929,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 				if escalated, msg := a.Tuner.ParseFailed(qc.Step); escalated {
 					msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 					msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 					step++
 					continue
 				}
@@ -923,7 +937,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			a.Hooks.fireError(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Err: fmt.Errorf("parse: %w", err)}, a.logf)
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: "解析你的回复失败：" + err.Error() + "。请严格按格式输出 JSON。"})
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			step++
 			continue
 		}
@@ -950,7 +964,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 					a.log("%s", q.FormatLog("completeness_nudge", "step=", fmt.Sprintf("%d", qc.Step)))
 					msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 					msgs = append(msgs, Message{Role: RoleUser, Content: nudge})
-					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+					a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 					step++
 					continue
 				}
@@ -959,7 +973,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			// 语气自然但断在中间的回答。必须在收尾前把事实报出去（日志 + 回调）。
 			a.notifyTruncated(qc.Step)
 			q.Complete(nil)
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: req.Text, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: req.Text}, a.logf)
 			return req.Text, nil
 		}
@@ -993,7 +1007,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 		}
 		if terminated {
 			// 终止型工具已给出最终回答，跳过后续 judge/review
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			return lastToolOutput(msgs), nil
 		}
 		if len(calls) == 0 {
@@ -1013,7 +1027,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 				msgs = append(msgs, Message{Role: RoleUser, Content: continuationPrompt})
 				a.log("%s", q.FormatLog("goal_continue", "step=", fmt.Sprintf("%d", qc.Step)))
 				step++
-				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+				a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 				continue
 			}
 		}
@@ -1023,7 +1037,7 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			a.BgReview.Advance(reply, msgs)
 		}
 
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 		step++
 	}
 	stepExceededErr := fmt.Errorf("%w（已用满 %d 步）。可调大上限: 输入 /config max_steps 60 立即生效并持久化，或在 ~/.mizar/config.json 设置 \"max_steps\" 字段", ErrMaxSteps, a.MaxSteps)
@@ -1072,6 +1086,17 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 	q.BeginOperation("tool:" + c.Tool)
 	a.Hooks.fireToolCall(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Tool: c.Tool, Args: c.Args, Reason: c.Reason}, a.logf)
 	a.noteStep("step %d: %s(%s)", qc.Step, c.Tool, truncate(c.Args, 60))
+	// 自学习节奏（P2）：技能复盘看「工具调用迭代数」而不是轮数——
+	// 一次提问里可能连调几十次工具，按轮数永远攒不够。达到阈值时清零并
+	// 让 BackgroundReview 去复盘（二者共用同一份节奏）。
+	if a.ReviewSignals != nil {
+		if skillDue, _ := a.ReviewSignals.OnToolIteration(); skillDue {
+			a.ReviewSignals.CommitSkillReview()
+			if a.BgReview != nil {
+				a.BgReview.ForceReview()
+			}
+		}
+	}
 
 	// 扩展事件拦截（P-1，对齐 pi）：裁决 hook 可在执行前 deny / rewrite。
 	// rewrite 立即写回 c.Tool/c.Args——后续空名兜底、权限门禁、guard、执行
@@ -1097,7 +1122,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 				a.OnToolExchange(c.Tool, c.Args, c.Reason, "", errors.New(denyReason))
 			}
 			a.log("%s", q.FormatLog("hook_deny", "tool=", c.Tool))
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 		case DecisionRewrite:
 			c.Tool, c.Args = dctx.Tool, dctx.Args
@@ -1122,7 +1147,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		msg := fmt.Sprintf("⚠️ 第 %d/%d 个工具调用缺少工具名（tool 字段为空）。请重新调用并填入正确的工具名，例如：{\"action\":\"tool\",\"tool\":\"bash\",\"args\":\"{...}\"}。可用工具见系统提示。", idx+1, total)
 		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 	}
 
@@ -1140,7 +1165,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			// 非法序列，上游报 400「tool calls and tool results do not match」（2026-10-16 实测）。
 			msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 			msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 		}
 		// 更新 forcedToolCalls 计数器：模型调了 respond 也算调工具（重置计数器）
@@ -1148,7 +1173,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			tllm.updateForcedToolCalls(true)
 		}
 		q.Complete(nil)
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: text, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: text, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 		a.Hooks.fireRunEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Reply: text}, a.logf)
 		return callDirective{Msgs: msgs, Reply: text, Control: controlReturn}, false, nil
 	}
@@ -1162,7 +1187,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		// 孤儿 tool_calls → 上游 400（详见上方注释）。
 		msgs = append(msgs, Message{Role: RoleAssistant, Content: reply})
 		msgs = append(msgs, Message{Role: RoleUser, Content: msg})
-		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+		a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 		return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 	}
 
@@ -1187,7 +1212,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 				a.OnToolExchange(c.Tool, c.Args, c.Reason, "", errors.New(denyMsg))
 			}
 			a.log("%s", q.FormatLog("permission_deny", "mode=", string(a.Permission.Mode()), "tool=", c.Tool))
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 		}
 	}
@@ -1216,7 +1241,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			})
 			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
 			msgs = append(msgs, Message{Role: RoleUser, Content: reminder + "\n⚠️ 任务因重复工具调用已终止。"})
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			return callDirective{}, false, fmt.Errorf("%w: tool=%s 连续重复 %d 次，任务终止", errors.New("loop guard terminated"), c.Tool, a.Guard.MaxObserved())
 		} else if reminder != "" {
 			// 渐进提醒，注入为追加用户消息（紧接工具结果之后，模型可据此改参数或停手）
@@ -1228,7 +1253,7 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 			msgs = append(msgs, Message{Role: RoleUser, Content: "工具结果: " + string(b), Kind: KindToolResult, ToolCallID: callID})
 			msgs = append(msgs, Message{Role: RoleUser, Content: reminder})
 			a.log("%s", q.FormatLog("guard_reminder", "step=", fmt.Sprintf("%d", qc.Step), "tool=", c.Tool, "cnt=", fmt.Sprintf("%d", a.Guard.Count())))
-			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs}, a.logf)
+			a.Hooks.fireStepEnd(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Messages: msgs, ReviewSignals: a.reviewSignalsSnapshot()}, a.logf)
 			return callDirective{Msgs: msgs, Control: controlNextStep}, false, nil
 		}
 	}
@@ -1322,6 +1347,15 @@ func (a *Agent) log(format string, args ...any) {
 	if a.VerboseLog != nil {
 		a.VerboseLog(fmt.Sprintf(format, args...))
 	}
+}
+
+// reviewSignalsSnapshot 返回自学习节奏快照（供 StepEnd 钩子只读查看）。
+func (a *Agent) reviewSignalsSnapshot() *ReviewSignals {
+	if a.ReviewSignals == nil {
+		return nil
+	}
+	sig := a.ReviewSignals.Signals()
+	return &sig
 }
 
 // noteStep 触发实例级 OnStep 回调（nil 安全）。

@@ -94,6 +94,29 @@ func (br *BackgroundReview) Advance(lastResponse string, msgs []Message) {
 	go br.triggerReview(lastResponse, msgs)
 }
 
+// ForceReview 立即触发一次复盘（技能复盘按「工具迭代数」到期，不走轮次计数）。
+// 与 Advance 的区别：不检查轮数阈值、不推进轮次计数——调用方（loop）已经
+// 按 ReviewSignals 的双计数器判定过「该做了」。
+func (br *BackgroundReview) ForceReview() {
+	if br == nil || !br.Enabled() || br.cfg.AuxLLM == nil {
+		return
+	}
+	// 用最近的对话做复盘素材由 loop 传入更准确，但为了不改调用签名，
+	// 这里只触发「技能沉淀」这一路（skill 侧看的是工具调用模式，不需要全文）。
+	go br.triggerReview("", nil)
+}
+
+// Interval 返回复盘间隔轮数（供 ReviewSignals 复用同一阈值，避免两处真相）。
+func (br *BackgroundReview) Interval() int {
+	if br == nil {
+		return 3
+	}
+	if br.cfg.MinTurnsBetweenReviews <= 0 {
+		return 3
+	}
+	return br.cfg.MinTurnsBetweenReviews
+}
+
 // Enabled 报告后台自学习是否启用：显式 false 才关闭（nil = 默认开启）。
 func (br *BackgroundReview) Enabled() bool {
 	if br == nil {

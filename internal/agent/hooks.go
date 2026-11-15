@@ -85,6 +85,16 @@ type HookContext struct {
 
 	// 会话相关
 	SessionID string
+
+	// ReviewSignals 自学习节奏信号（P2）：只在 StepEnd 挂载点填充，其它挂载点为 nil。
+	//
+	// 为什么放这里：插件/用户 hooks 想在「回合后」做自己的复盘时，可以复用主
+	// Agent 的节奏判断（该不该做记忆复盘 / 技能复盘），而不必自己数工具调用
+	// ——对齐 hermes 的 post_llm_call(review_signals)。
+	//
+	// 只读语义：这是值拷贝（ReviewSignals 是普通 struct），调用方拿到的是快照，
+	// 改了也不会影响后续钩子读到的值。
+	ReviewSignals *ReviewSignals
 }
 
 // Decision 工具调用裁决（P-1 扩展事件拦截，对齐 pi 的 tool_call 拦截语义）。
@@ -313,6 +323,7 @@ func (h *Hooks) fireLLMResponse(ctx *HookContext, log func(string)) {
 	h.mu.Unlock()
 	h.fire("LLMResponse", hs, ctx, log)
 }
+
 // fireToolCallDecision 依注册顺序执行全部裁决 hook，返回最终 (裁决, 原因)。
 //
 // 规则：
