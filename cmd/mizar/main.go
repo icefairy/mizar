@@ -1201,51 +1201,6 @@ func main() {
 			return sb.String(), nil
 		},
 	})
-	// 内置 /list_plugins：列出插件及其状态（已加载/已禁用）
-	a.Commands.Register(agent.Command{
-		Name:        "list_plugins",
-		Description: "列出插件及状态（已加载/已禁用）",
-		Run: func(args string) (string, error) {
-			all := pm.PluginFiles()
-			if len(all) == 0 {
-				return fmt.Sprintf("插件目录 %s 无插件", pm.Dir()), nil
-			}
-			loaded := map[string]bool{}
-			for _, f := range pm.LoadedPlugins() {
-				loaded[f] = true
-			}
-			var sb strings.Builder
-			fmt.Fprintf(&sb, "插件目录: %s\n共 %d 个:\n", pm.Dir(), len(all))
-			for _, f := range all {
-				status := "✅ 已加载"
-				if pm.PluginDisabled(f) {
-					status = "⛔ 已禁用"
-				} else if !loaded[f] {
-					status = "⚠️ 未加载（加载失败？）"
-				}
-				fmt.Fprintf(&sb, "  %s %s\n", status, f)
-			}
-			sb.WriteString("\n命令: /enable_plugin <名> · /disable_plugin <名> · /reload_plugins")
-			return sb.String(), nil
-		},
-	})
-	// 内置 /enable_plugin：启用插件（取消禁用并加载）
-	a.Commands.Register(agent.Command{
-		Name:        "enable_plugin",
-		Description: "启用插件（/enable_plugin <文件名，可省略 .ts>）",
-		Run: func(args string) (string, error) {
-			name := resolvePluginName(pm, args)
-			if name == "" {
-				return "用法: /enable_plugin <文件名>（用 /list_plugins 查看）", nil
-			}
-			if !pm.PluginDisabled(name) {
-				return fmt.Sprintf("插件 %s 本就处于启用状态", name), nil
-			}
-			pm.SetPluginDisabled(name, false)
-			summary := reloadPlugins(pm, a)
-			return fmt.Sprintf("✅ 已启用 %s\n%s", name, summary), nil
-		},
-	})
 	// 内置 /skills 命令：列出技能、启用/禁用（2026-11-15 审计修复：
 	// 周报里写着「回复『禁用 <技能名>』可将其禁用」，但此前没有任何代码解析这句话，
 	// 禁用名单还被错传给 SetDisabledTools（那是屏蔽工具用的）。现在提供正式入口。）
@@ -1313,38 +1268,6 @@ func main() {
 			default:
 				return "", fmt.Errorf("用法: /skills ｜ /skills disable <名> ｜ /skills enable <名> ｜ /skills stats")
 			}
-		},
-	})
-	// 内置 /disable_plugin：禁用插件（卸载并持久化）
-	a.Commands.Register(agent.Command{
-		Name:        "disable_plugin",
-		Description: "禁用插件（/disable_plugin <文件名，可省略 .ts>）",
-		Run: func(args string) (string, error) {
-			name := resolvePluginName(pm, args)
-			if name == "" {
-				return "用法: /disable_plugin <文件名>（用 /list_plugins 查看）", nil
-			}
-			if pm.PluginDisabled(name) {
-				return fmt.Sprintf("插件 %s 本就处于禁用状态", name), nil
-			}
-			pm.SetPluginDisabled(name, true)
-			// 同步命令注册表（该插件导出的命令需移除）
-			cmds := make([]agent.Command, 0, len(pm.Commands()))
-			for _, c := range pm.Commands() {
-				cc := c
-				cmds = append(cmds, agent.Command{Name: cc.Name, Description: cc.Description, PluginFile: cc.PluginFile, Run: cc.Run})
-			}
-			a.Commands.SyncFromPlugins(cmds)
-			a.ReloadTools()
-			return fmt.Sprintf("⛔ 已禁用 %s（已卸载，配置已持久化）", name), nil
-		},
-	})
-	// 内置 /reload_plugins：强制重载全部插件（跳过已禁用）
-	a.Commands.Register(agent.Command{
-		Name:        "reload_plugins",
-		Description: "重载全部插件（/reload_plugins，已禁用的仍保持禁用）",
-		Run: func(args string) (string, error) {
-			return reloadPlugins(pm, a), nil
 		},
 	})
 	// 内置 /new 命令：直接创建新会话（= /session new 快捷方式）
@@ -1783,6 +1706,44 @@ func main() {
 			return sb.String(), nil
 		},
 	})
+	// 内置 /plugins 命令：插件管理的统一入口（合并原 /list_plugins、/enable_plugin、
+	// /disable_plugin、/reload_plugins 四个分散命令——它们本来就是同一件事的不同动作）。
+	//
+	// 为什么要合并：四个平级命令挤在 /help 里，用户得先记住「我要做的是列/启/禁/重载
+	// 哪一种」再回忆对应命令名；而它们的对象都是「插件」。收敛到一个 /plugins
+	// 下面带子命令，符合 /skills、/permission、/trust、/memory 已经形成的惯例。
+	// 旧命令名保留为别名（见下方 alias 注册），老脚本/习惯不受影响。
+	a.Commands.Register(agent.Command{
+		Name: "plugins",
+		Description: "插件管理（/plugins 列出 ｜ /plugins enable <名> ｜ /plugins disable <名> ｜ " +
+			"/plugins reload 重载全部 ｜ /plugins info <名> 查看详情）。旧命令 /list_plugins、" +
+			"/enable_plugin、/disable_plugin、/reload_plugins 仍可用（别名）",
+		Run: runPluginsCommand(pm, a),
+	})
+	// 别名：保持向后兼容（老用户/文档/技能里写的旧命令名继续工作）。
+	// 旧命令参数是「插件名」而 /plugins 是「子命令+插件名」，位置不同，
+	// 所以用 runPluginsAlias 补上隐含子命令（/enable_plugin X → enable X）。
+	a.Commands.Register(agent.Command{
+		Name:        "list_plugins",
+		Description: "（已并入 /plugins，此名为兼容别名）",
+		Run:         runPluginsAlias(pm, a, ""),
+	})
+	a.Commands.Register(agent.Command{
+		Name:        "enable_plugin",
+		Description: "（已并入 /plugins enable，此名为兼容别名）",
+		Run:         runPluginsAlias(pm, a, "enable"),
+	})
+	a.Commands.Register(agent.Command{
+		Name:        "disable_plugin",
+		Description: "（已并入 /plugins disable，此名为兼容别名）",
+		Run:         runPluginsAlias(pm, a, "disable"),
+	})
+	a.Commands.Register(agent.Command{
+		Name:        "reload_plugins",
+		Description: "（已并入 /plugins reload，此名为兼容别名）",
+		Run:         runPluginsAlias(pm, a, "reload"),
+	})
+
 	// 内置 /config 命令：查看/修改运行配置（对齐 pi 的 /config）
 	a.Commands.Register(agent.Command{
 		Name:        "checkupdate",

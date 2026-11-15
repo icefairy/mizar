@@ -45,8 +45,8 @@ Mizar 内置**两个**记忆插件，导出同名 `mem_*` 工具，**同时只�
 **切换到 HMEM 版**（需先自建 HMEM 服务，默认 `http://localhost:8000`）：
 
 ```
-/disable_plugin memory.ts
-/enable_plugin memory_hmem.ts
+/plugins disable memory.ts
+/plugins enable memory_hmem.ts
 ```
 
 配置 HMEM 连接（或用环境变量 `MIZAR_HMEM_API_URL` / `MIZAR_HMEM_API_KEY` / `MIZAR_HMEM_NAMESPACE`）：
@@ -65,5 +65,5 @@ Mizar 内置**两个**记忆插件，导出同名 `mem_*` 工具，**同时只�
 ## 想换别的记忆后端（如与其它 agent 共用 HMEM）
 
 内置的是本地 SQLite 版。若要与其它 agent **共用一套记忆**（如 HMEM Server），
-用 `/disable_plugin memory.ts` 禁用内置版，再放入你自己的记忆插件即可
-（`/list_plugins` 查看、`/enable_plugin` 启用、`/reload_plugins` 重载）。
+用 `/plugins disable memory.ts` 禁用内置版，再放入你自己的记忆插件即可
+（`/plugins` 查看、`/plugins enable <名>` 启用、`/plugins reload` 重载）。

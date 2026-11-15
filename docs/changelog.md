@@ -1,3 +1,21 @@
+## [未发布] — 2026-11-15（夜·七）插件命令合并为 /plugins
+
+### ♻️ 重构
+
+- **四个分散的插件命令合并成一个 `/plugins`**（原 `/list_plugins`、`/enable_plugin`、
+  `/disable_plugin`、`/reload_plugins`）——它们本来就是「同一个对象（插件）的四种动作」，
+  平铺在 `/help` 里要求用户先记住动作再回忆命令名。现在统一为：
+  - `/plugins` 列出（✅ 已加载 / ⛔ 已禁用 / ⚠️ 加载失败）
+  - `/plugins enable <名>` 启用（取消禁用并加载）
+  - `/plugins disable <名>` 禁用（卸载并持久化到 `.disabled.json`）
+  - `/plugins reload` 重载全部（已禁用的保持禁用）
+  - `/plugins info <名>` 查看该插件导出的工具与命令（新能力）
+  - `/plugins <名>` 直接看详情（直觉行为）
+- 与 `/skills`、`/permission`、`/trust`、`/memory` 已形成的「/命令 + 子命令」惯例一致。
+- **旧命令名全部保留为兼容别名**（参数位置不同，别名内部补上隐含子命令：
+  `/enable_plugin X` → `enable X`），老脚本、文档、技能里的写法继续有效。
+- 新增 `internal/.../pluginscmd_test.go` 7 项测试（列出/启停/重载/详情/别名/裸名/缺参数）。
+
 ## [未发布] — 2026-11-15（夜·六）项目技能沉淀 + 子代理续跑 + 自学习节奏 + 插件安全面
 
 > 来源：hermes 新版本对比里值得吸纳的设计（详见 `docs/hermes-update-2026-11-15.md`）

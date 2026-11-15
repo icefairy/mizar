@@ -381,7 +381,7 @@ Unix 有 bracketed paste，粘贴本来就是整段处理，不受影响。
 - **生命周期钩子**：`plugin_init` / `plugin_cleanup`，文件删除时自动卸载
 - **JS 插件免编译直跑**：`.js` 文件直接由 goja 解释执行
 - **LSP 插件扩展**：JS 插件可注册 Provider，支持诊断 / 定义跳转 / 引用查找 / 补全
-- **启用 / 禁用 / 重载**：`/list_plugins` 查看（✅ 已加载 / ⛔ 已禁用）、`/disable_plugin <名>` 卸载并持久化、`/enable_plugin <名>` 启用、`/reload_plugins` 重载全部。禁用状态存于 `~/.mizar/extensions/.disabled.json`，重启后保持。用于切换插件后端（如用 HMEM 记忆插件替代内置 SQLite 版，与其它 agent 共用记忆）。
+- **统一入口 `/plugins`**：`/plugins` 列出（✅ 已加载 / ⛔ 已禁用）、`/plugins disable <名>` 卸载并持久化、`/plugins enable <名>` 启用、`/plugins reload` 重载全部、`/plugins info <名>` 看该插件导出的工具与命令。禁用状态存于 `~/.mizar/extensions/.disabled.json`，重启后保持。用于切换插件后端（如用 HMEM 记忆插件替代内置 SQLite 版，与其它 agent 共用记忆）。旧命令 `/list_plugins`、`/enable_plugin`、`/disable_plugin`、`/reload_plugins` 保留为兼容别名。
 - **内置资产自动释放**：常用插件（数据库 CRUD、图片识别、记忆）与技能（交接 / 记忆 / 数据库）用 `go:embed` 内嵌，**首次运行自动释放**到 `~/.mizar`，**只补缺不覆盖**（保护用户修改），`--no-assets` 可关闭。
 
 ### 4.1 记忆后端（本地 SQLite / HMEM 服务端，二选一）
