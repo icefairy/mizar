@@ -57,7 +57,7 @@ type SubagentHandle struct {
 	State      SubagentState `json:"state"`
 	CreatedAt  time.Time     `json:"created_at"`
 	Depth      int           `json:"depth"`
-	Role       string        `json:"role,omitempty"` // 行为预设（内置四角色或自定义类型名）
+	Role       string        `json:"role,omitempty"`  // 行为预设（内置四角色或自定义类型名）
 	Model      string        `json:"model,omitempty"` // 实际使用的模型（req.Model 生效后回显）
 	WorkingDir string        `json:"working_dir,omitempty"`
 	Result     string        `json:"result,omitempty"`
@@ -358,7 +358,10 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 		}
 	}
 	childPM := plugins.NewManager("", nil)
-	for _, t := range sm.pm.Tools() {
+	// working_dir（C-8）：把相对路径工具锚到子任务工作目录（worktree 隔离依赖它），
+	// 否则 bash/read/write 仍落在主工作区，隔离形同虚设。
+	sharedTools := wrapToolsForWorkDir(sm.pm.Tools(), req.WorkingDir)
+	for _, t := range sharedTools {
 		if isDelegationTool(t.Name) || containsStr(req.BlockedTools, t.Name) {
 			continue
 		}
@@ -829,7 +832,8 @@ func DelegateTool(sm *SubagentManager) plugins.Tool {
 	desc := "分派子代理并行处理子任务。复杂任务可一次派多个：{\"tasks\":[{\"goal\":\"子任务1\",\"context\":\"背景\"},{\"goal\":\"子任务2\"}]}；" +
 		"单个用 {\"goal\":\"...\",\"context\":\"...\",\"max_steps\":30}。异步返回句柄 id，用 get_subagent 查结果，list_subagents 看全部，运行中可用 steer_subagent 纠偏。" +
 		"role 四选一：leaf(默认，独立执行)、implement(动手实现)、explore(只读调研)、review(只读审查)；explore/review 的写类工具(edit/write)被强制摘除，只出结论。" +
-		"有先后依赖的子任务先记 todo（action=add, blocked_by），完成回灌会自动解锁后继；tasks[] 里只放互相独立的。上下文与主对话隔离。"
+		"有先后依赖的子任务先记 todo（action=add, blocked_by），完成回灌会自动解锁后继；tasks[] 里只放互相独立的。上下文与主对话隔离。" +
+		"隔离实验：先 worktree_create 建独立 git worktree，再把其路径传 working_dir——子代理的 bash/read/write/grep/find/ls 都会锚定到该目录，改动不污染主工作区。"
 	if types := sm.AgentTypes(); len(types) > 0 {
 		var sb strings.Builder
 		sb.WriteString("\n可用自定义子代理类型（role 直接传类型名，工具集/模型/行为按类型定义执行）：")

@@ -132,7 +132,7 @@ per-subagent token 计量：子代理 OnLLMStream 置为 usage 累加器（loop 
 | C-5 | 权限模式 | plan/default/acceptEdits/bypassPermissions 多档 + 逐工具审批 + 子代理继承 | PermissionMode 四档已实现（auto/default/acceptEdits/plan），逐工具分级审批，子代理继承同一 gate；无逐工具白名单 UI | 🟢 基本持平 |
 | C-6 | 用户级 Hooks | 用户 settings 配置 shell 命令响应工具事件（PreToolUse 等），可阻塞并回注反馈 | ✅ 已实现（2026-11-15）：config.json `hooks` 段（pre_tool_use/post_tool_use），stdin JSON 上下文 + MIZAR_HOOK=1；pre 可 deny（stdout JSON 或 exit 2）/rewrite，故障记日志放行；post 只观察；`/hooks` 命令查看 | ✅ 基本持平 |
 | C-7 | 结构化记忆 | 四类记忆（user/feedback/project/reference）+ 索引每会话自动加载 | ✅ 已实现（2026-11-15）：`internal/memory` 四分类 MEMORY.md + 每会话自动注入系统提示 + memory 工具/`/memory` 命令读写；与 memory 插件（HMEM 语义检索）互补 | ✅ 基本持平 |
-| C-8 | 工作树隔离 | git worktree 一键隔离实验性修改 | 无 | 🔵 |
+| C-8 | 工作树隔离 | git worktree 一键隔离实验性修改 | ✅ 已实现（2026-11-15）：`internal/worktree` + worktree_create/leave/list 工具；delegate_task 的 working_dir 现真正锚定子代理的 bash/read/write/grep/find/ls | ✅ 基本持平 |
 | C-9 | 延迟工具加载 | ToolSearch 按需加载工具 schema，未用工具不占上下文 | 工具定义全量注入；有技能渐进披露（SkillInjectMode: index）但工具层无 | 🔵 |
 | C-10 | 联网检索 | WebSearch/WebFetch 内置 | 无（离线定位使然，可经 MCP 接入） | ⚪ 定位外 |
 | C-11 | 计划模式深度 | 计划文件可迭代修订 + 子代理 plan 审批流 | `/plan` + `exit_plan_mode` 基本闭环已对齐 | 🟢 基本持平 |
@@ -177,6 +177,15 @@ model: 主模型    # 可省略，继承父级
 - **写入即生效**：`memory` 工具（add/list/remove/count）与 `/memory` 命令（查看 / add / rm / clear）写后回调 `SetMemoryPrompt` 刷新并失效系统提示缓存，新事实当轮即可见。
 - **与 memory 插件的分工**：插件 `mem_*` = 海量记忆语义检索（HMEM/向量）；本包 = 小而精、每会话必见的固定分类事实清单。
 
+#### C-8 工作树隔离（✅ 已实现）
+
+`internal/worktree` 包（2026-11-15）+ 三个工具，全部走 git 官方命令（不自己造目录结构）：
+
+- **worktree_create**：`git worktree add -b <branch> <path> <base>`，默认路径 `<repo>.worktrees/<branch>`，已存在目录/branch 直接报错（不自动切换已有分支，避免两处同分支互相干扰）。
+- **worktree_leave**：`git worktree remove [--force]`，只删 worktree 与元数据，**不删分支、不 merge**；有未提交改动需 `force=true`。
+- **worktree_list**：解析 `git worktree list --porcelain`，展示分支/路径/locked/prunable。
+- **working_dir 真正生效**（配套关键修复）：此前 `delegate_task.working_dir` 只写子 Agent 的 `WorkDir` 提示锚点，但 bash/read/write/grep/find/ls 全按进程 cwd 解析——隔离形同虚设。现 `internal/agent/workdir_wrap.go` 按工作目录包一层工具适配器：bash 命令前置 `cd "<dir>" && `（模型已显式 cd 则尊重），路径类工具把空/相对 path 锚到 `<dir>`、绝对路径原样。只作用于子代理（不改全局工具实现，避免影响主代理与并发会话）。
+
 #### C-5 权限分级（离线部署场景同样需要）
 
 内网/私有化不等于免审批：bash 的 `rm -rf`、edit 生产配置仍需要闸门。方案：
@@ -190,11 +199,10 @@ model: 主模型    # 可省略，继承父级
 
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
-| 🔵 P3 | worktree 隔离 | ~100 行 | C-8 |
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）；**用户级 hooks（C-6，config.json hooks 段 shell 命令响应工具事件）与 per-subagent token 计量（GAP-S5，流式 usage 累加进句柄）**（2026-11-15 晚交付）；**结构化记忆四分类 + MEMORY.md 自动注入索引（C-7，`internal/memory` 包 + memory 工具 + `/memory` 命令 + Agent.MemoryPrompt volatile 段）**（2026-11-15 晚交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）；**用户级 hooks（C-6，config.json hooks 段 shell 命令响应工具事件）与 per-subagent token 计量（GAP-S5，流式 usage 累加进句柄）**（2026-11-15 晚交付）；**结构化记忆四分类 + MEMORY.md 自动注入索引（C-7，`internal/memory` 包 + memory 工具 + `/memory` 命令 + Agent.MemoryPrompt volatile 段）**（2026-11-15 晚交付）；**worktree 隔离（C-8，`internal/worktree` + worktree_create/leave/list 工具 + delegate_task working_dir 工具锚定）**（2026-11-15 晚交付）。
 
 ---
 
@@ -209,6 +217,9 @@ model: 主模型    # 可省略，继承父级
 | `internal/session/session.go` | 会话存储（fork 血缘记录 AppendFork/ForkParent） |
 | `internal/userhooks/userhooks.go` | 用户级 hooks（C-6：pre 裁决/post 观察，stdin JSON 上下文） |
 | `internal/memory/memory.go` | 结构化长期记忆（C-7：四分类 MEMORY.md 读写/渲染/注入上限） |
+| `internal/worktree/worktree.go` | git worktree 隔离（C-8：Create/List/Remove/Prune，全走 git 官方命令） |
+| `internal/builtins/worktree_tool.go` | worktree_create/leave/list 工具 |
+| `internal/agent/workdir_wrap.go` | working_dir 工具锚定（C-8 配套：bash 前置 cd，路径类工具拼相对路径） |
 | `internal/builtins/memory_tool.go` | memory 工具（C-7：add/list/remove/count，写后刷新注入） |
 | `cmd/mizar/main.go:716-723` | 五个委派工具注册 + DelegationGuide 注入 |
 | `internal/llm/openai.go` | `WithModel`（modelDeriver 的实现侧）+ thinking 档位（P-3 xhigh/max） |

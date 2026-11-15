@@ -763,6 +763,13 @@ func main() {
 			a.SetMemoryPrompt(memStore.Render())
 		}
 	}))
+	// worktree 隔离工具（C-8）：worktree_create/leave/list，为实验性改动提供
+	// 独立 git worktree（配 delegate_task 的 working_dir 使用）。以当前工作目录
+	// 作为仓库锚点；非 git 仓库时工具会在调用时返回明确错误（不影响启动）。
+	for _, t := range builtins.WorktreeTools(wd) {
+		pm.RegisterBuiltin(t)
+	}
+
 	// ask_user_question：TUI 模式下由 tui.go 设置回调；非 TUI 保持 nil（降级提示）
 	// 全局可访问的计划模式实例（供 builtins 工具引用）
 	agent.CurrentPlanMode = a.PlanMode
