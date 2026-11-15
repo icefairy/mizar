@@ -523,8 +523,10 @@ func main() {
 	pm := plugins.NewManager(extAbs, host)
 	// 读入插件禁用清单（.disabled.json）——被禁用的插件不加载
 	pm.LoadDisabledPlugins()
-	// 禁用工具（来自技能统计周报，用户确认后记录）——只影响工具注册表，不动 System prompt
-	pm.SetDisabledTools(stats.DisabledNames())
+	// 注意（2026-11-15 审计修复）：此处**不能**把技能禁用名单传给 SetDisabledTools
+	// ——那个函数屏蔽的是「工具注册表」（按工具名），而 stats 里存的是技能名。
+	// 曾经的接线导致「禁用技能」实际屏蔽了同名工具、且技能照旧注入。
+	// 正确的禁用点在下方的 skm.SetDisabledFromList（技能加载后、渲染前）。
 	// agent 实例先声明后赋值（builtins.All 的插件热重载回调需要引用它）
 	a := agent.New(client, pm)
 	// 权限门禁（GAP-S2）：默认 auto（现行为零破坏），config.json permission_mode
@@ -599,6 +601,13 @@ func main() {
 	// 技能加载（全量渲染，System prompt 字节稳定——禁用只影响工具注册表）
 	skm := skills.NewManager(skAbs)
 	skLoaded, skFailed := skm.LoadAll()
+	// 应用技能禁用名单（来自周报「禁用 xxx」，2026-11-15 审计修复）。
+	// 必须在 RenderIndex/RenderAll 之前——禁用后不进系统提示、不出现在 /skills 列表。
+	if disabledSkills := stats.DisabledNames(); len(disabledSkills) > 0 {
+		skm.SetDisabledFromList(disabledSkills)
+		builtins.SetDisabledSkills(disabledSkills) // 工具层复核（skill 工具拒读）
+		log.Printf("已禁用 %d 个技能（skill_stats）：%s", len(disabledSkills), strings.Join(disabledSkills, ", "))
+	}
 	// 技能注册进统计（0 次使用也计入周报最低活跃）
 	for _, s := range skm.All() {
 		stats.Ensure(s.Name)
@@ -801,14 +810,39 @@ func main() {
 		}
 		_ = st.Append(*sessionID, agent.SubagentStateMessage(snap))
 	})
-	// BackgroundReview：后台自学习
+	// BackgroundReview：后台自学习（每 3 轮起一个一次性 goroutine 复盘，写入技能/记忆）。
+	//
+	// 2026-11-15 审计修复：此前只 New 不 Start，而 Advance() 依赖 running 标志 →
+	// 该功能实际从未工作。现在改成「只看配置」，无需常驻循环；
+	// 记忆写入走 OnMemory 回调写进结构化 MEMORY.md（避免裸 append 破坏四分类格式）。
 	homeDir, _ := os.UserHomeDir()
 	skillsDir := filepath.Join(homeDir, ".mizar", "skills")
+	bgReviewEnabled := true
+	if cfgBg, err := config.Load(config.DefaultPath()); err == nil {
+		bgReviewEnabled = cfgBg.SkillEvolutionEnabled()
+	}
 	a.BgReview = agent.NewBackgroundReview(agent.BackgroundReviewConfig{
+		Enabled:                &bgReviewEnabled,
 		MinTurnsBetweenReviews: 3,
 		AuxLLM:                 auxLLM,
 		SkillsDir:              skillsDir,
+		OnMemory: func(entry string) error {
+			if !memInject {
+				return nil // 记忆自动注入被关闭时不写，避免用户看不到却占存储
+			}
+			if err := memStore.Add(memory.CategoryProject, entry); err != nil {
+				return err
+			}
+			a.SetMemoryPrompt(memStore.Render()) // 写入即生效
+			return nil
+		},
+		OnReview: func(summary string) { log.Printf("[bg-review] %s", summary) },
 	})
+	if bgReviewEnabled {
+		log.Printf("后台自学习已启用：每 3 轮复盘一次，技能写入 %s，记忆写入 MEMORY.md(project)", skillsDir)
+	} else {
+		log.Printf("后台自学习已关闭（config.json skill_evolution=false）")
+	}
 	// 用户自定义子代理类型（GAP-S1 第二层）：~/.mizar/agents/*.md，
 	// frontmatter(name/description/tools/model) + 正文 = system 附加层。
 	// 加载须在 delegate_task 注册（下方 DelegateTool）之前——类型清单要写进工具描述。
@@ -1166,6 +1200,75 @@ func main() {
 			pm.SetPluginDisabled(name, false)
 			summary := reloadPlugins(pm, a)
 			return fmt.Sprintf("✅ 已启用 %s\n%s", name, summary), nil
+		},
+	})
+	// 内置 /skills 命令：列出技能、启用/禁用（2026-11-15 审计修复：
+	// 周报里写着「回复『禁用 <技能名>』可将其禁用」，但此前没有任何代码解析这句话，
+	// 禁用名单还被错传给 SetDisabledTools（那是屏蔽工具用的）。现在提供正式入口。）
+	a.Commands.Register(agent.Command{
+		Name:        "skills",
+		Description: "技能列表与启停（/skills 列出 ｜ /skills disable <名> 禁用 ｜ /skills enable <名> 启用 ｜ /skills stats 使用统计）",
+		Run: func(args string) (string, error) {
+			fields := strings.Fields(strings.TrimSpace(args))
+			sub := ""
+			if len(fields) > 0 {
+				sub = strings.ToLower(fields[0])
+			}
+			switch sub {
+			case "", "list":
+				all := skm.All()
+				if len(all) == 0 {
+					return "（无技能）", nil
+				}
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "技能 %d 个（禁用的不列出；/skills disable <名> 可禁用）：\n", len(all))
+				for _, sk := range all {
+					cat := sk.Category
+					if cat == "" {
+						cat = "未分类"
+					}
+					fmt.Fprintf(&sb, "  • %-24s [%s] %s\n", sk.Name, cat, truncateStr(sk.Description, 60))
+				}
+				if dis := stats.DisabledNames(); len(dis) > 0 {
+					fmt.Fprintf(&sb, "\n🔕 已禁用 %d 个：%s\n", len(dis), strings.Join(dis, ", "))
+				}
+				return strings.TrimSpace(sb.String()), nil
+			case "stats":
+				cfg, _ := config.Load(config.DefaultPath())
+				topN := 10
+				if cfg != nil {
+					topN = cfg.SkillStatsTop()
+				}
+				return stats.Report(topN), nil
+			case "disable", "off":
+				if len(fields) < 2 {
+					return "", fmt.Errorf("用法: /skills disable <技能名>")
+				}
+				name := fields[1]
+				if _, ok := skm.Get(name); !ok && !stats.IsDisabled(name) {
+					return "", fmt.Errorf("技能 %q 不存在（/skills 查看）", name)
+				}
+				stats.SetDisabled(name, true)
+				skm.SetDisabledFromList(stats.DisabledNames())
+				builtins.SetDisabledSkills(stats.DisabledNames())
+				a.SkillsPrompt = renderSkillsPrompt(skm, cfgSkillMode())
+				a.ReloadTools() // 让系统提示重建（技能索引段变化）
+				return fmt.Sprintf("✓ 已禁用技能 %s（不再注入系统提示，skill 工具也拒读；/skills enable %s 可恢复）", name, name), nil
+			case "enable", "on":
+				if len(fields) < 2 {
+					return "", fmt.Errorf("用法: /skills enable <技能名>")
+				}
+				name := fields[1]
+				stats.SetDisabled(name, false)
+				skm.SetDisabledFromList(stats.DisabledNames())
+				builtins.SetDisabledSkills(stats.DisabledNames())
+				skm.LoadAll() // 重新加载磁盘技能（可能之前根本没加载到内存）
+				a.SkillsPrompt = renderSkillsPrompt(skm, cfgSkillMode())
+				a.ReloadTools()
+				return fmt.Sprintf("✓ 已启用技能 %s", name), nil
+			default:
+				return "", fmt.Errorf("用法: /skills ｜ /skills disable <名> ｜ /skills enable <名> ｜ /skills stats")
+			}
 		},
 	})
 	// 内置 /disable_plugin：禁用插件（卸载并持久化）
@@ -2675,6 +2778,31 @@ func mcpNames(servers []engine.MCPServerConf) string {
 		names = append(names, s.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+// renderSkillsPrompt 按当前注入模式（index/full）重新渲染技能提示段。
+func renderSkillsPrompt(skm *skills.Manager, mode string) string {
+	if mode == "full" {
+		return skm.RenderAll()
+	}
+	return skm.RenderIndex()
+}
+
+// cfgSkillMode 返回技能注入模式（index 默认 / full）。
+func cfgSkillMode() string {
+	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillInjectIsIndex() {
+		return "index"
+	}
+	return "full"
+}
+
+// truncateStr 按字符数截断（多字节安全）。
+func truncateStr(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // shortSID 返回会话 id 前 8 位（展示用）。

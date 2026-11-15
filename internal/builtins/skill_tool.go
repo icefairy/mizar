@@ -5,10 +5,35 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"mizar/internal/plugins"
 	"mizar/internal/skills"
 )
+
+// skillDisabledSet 全局技能禁用集合（main.go 在技能加载后注入）。
+// 键是技能名；值为 true 表示禁用。工具层复核，避免「宁可索引里没了、还能按名读」。
+var (
+	skillDisabledMu  sync.RWMutex
+	skillDisabledSet = map[string]bool{}
+)
+
+// SetDisabledSkills 注入技能禁用集合（main.go 调用，与 skm.SetDisabledFromList 同步）。
+func SetDisabledSkills(names []string) {
+	skillDisabledMu.Lock()
+	defer skillDisabledMu.Unlock()
+	skillDisabledSet = make(map[string]bool, len(names))
+	for _, n := range names {
+		skillDisabledSet[n] = true
+	}
+}
+
+// skillIsDisabled 报告技能是否被禁用。
+func skillIsDisabled(name string) bool {
+	skillDisabledMu.RLock()
+	defer skillDisabledMu.RUnlock()
+	return skillDisabledSet[name]
+}
 
 // toolSkill 按名加载技能全文（复刻 dsh tool-skill 的渐进披露语义）。
 // dsh：目录只注入 name+description，模型通过 skill 工具按名加载全文。
@@ -21,6 +46,11 @@ func toolSkill(dir string) plugins.Tool {
 			name := strings.TrimSpace(args)
 			if name == "" {
 				return "", fmt.Errorf("skill: name required")
+			}
+			// 禁用名单（2026-11-15 审计修复）：技能被禁用后连按名加载也应拒绝，
+			// 否则「禁用」只是不让它进系统提示，模型仍可由索引外的途径读到。
+			if skillIsDisabled(name) {
+				return "", fmt.Errorf("技能 %q 已被禁用（在 /skills 周报里恢复后可再用）", name)
 			}
 			// 从技能目录查找：先找精确匹配，再忽略大小写
 			file := findSkillFile(dir, name)

@@ -243,7 +243,7 @@ func (s *Stats) Report(topN int) string {
 		for _, name := range least {
 			sb.WriteString(fmt.Sprintf("  - %s (%d 次)\n", name, uses[name]))
 		}
-		sb.WriteString("回复“禁用 <技能名>”可将其禁用，回复“忽略”跳过。\n")
+		sb.WriteString("用 /skills disable <技能名> 禁用，/skills enable <名> 恢复。\n")
 	}
 	if len(disabled) > 0 {
 		sb.WriteString("\n🔕 已禁用: " + strings.Join(s.DisabledNames(), ", ") + "\n")

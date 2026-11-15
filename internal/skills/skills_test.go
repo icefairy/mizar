@@ -118,3 +118,47 @@ func TestEmptyDir(t *testing.T) {
 		t.Fatalf("want empty got loaded=%v failed=%v", loaded, failed)
 	}
 }
+
+// TestManagerDisabledFiltered 审计修复回归：禁用的技能不进 All()/渲染。
+func TestManagerDisabledFiltered(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name, desc string) {
+		os.MkdirAll(filepath.Join(dir, name), 0o755)
+		os.WriteFile(filepath.Join(dir, name, "SKILL.md"),
+			[]byte("---\nname: "+name+"\ndescription: "+desc+"\n---\nbody\n"), 0o644)
+	}
+	mk("alpha", "A 技能")
+	mk("beta", "B 技能")
+
+	m := NewManager(dir)
+	if _, failed := m.LoadAll(); len(failed) > 0 {
+		t.Fatalf("加载失败: %v", failed)
+	}
+	if len(m.All()) != 2 {
+		t.Fatalf("初始应 2 个技能，got %d", len(m.All()))
+	}
+
+	m.SetDisabledFromList([]string{"alpha"})
+	all := m.All()
+	if len(all) != 1 || all[0].Name != "beta" {
+		t.Errorf("禁用 alpha 后 All() 应只剩 beta，got %+v", all)
+	}
+	if !m.IsDisabled("alpha") || m.IsDisabled("beta") {
+		t.Error("IsDisabled 判定错误")
+	}
+	// 渲染也不含
+	for _, out := range []string{m.RenderIndex(), m.RenderAll()} {
+		if strings.Contains(out, "alpha") {
+			t.Errorf("禁用技能不应出现在渲染结果: %s", out)
+		}
+		if !strings.Contains(out, "beta") {
+			t.Errorf("未禁用技能应出现: %s", out)
+		}
+	}
+
+	// 恢复
+	m.SetDisabledFromList(nil)
+	if len(m.All()) != 2 {
+		t.Error("清除禁用后应恢复 2 个")
+	}
+}

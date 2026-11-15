@@ -14,8 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
 // ============================================================================
@@ -33,7 +31,14 @@ type BackgroundReviewConfig struct {
 	// SkillsDir 技能目录路径。
 	SkillsDir string
 	// MemoryFile 持久化 memory 文件路径（空=不写 memory）。
+	//
+	// 注意（2026-11-15 审计）：MEMORY.md 已升级为结构化四分类格式（internal/memory），
+	// 直接 append 裸行会破坏文件结构。因此优先用 OnMemory 回调写进结构化存储；
+	// MemoryFile 仅作为「没有回调时的兼容兜底」。
 	MemoryFile string
+	// OnMemory 记忆写入回调（推荐）。返回 error 只记录不重试。
+	// main.go 会接成 memoryStore.Add("project", entry)，写入即刷新系统提示。
+	OnMemory func(entry string) error
 	// OnReview 回调：每次 review 完成后调用（可选）。
 	OnReview func(summary string)
 }
@@ -55,9 +60,6 @@ type BackgroundReview struct {
 	cfg                  BackgroundReviewConfig
 	mu                   sync.Mutex
 	turnsSinceLastReview int
-	running              atomic.Bool
-	done                 chan struct{}
-	wg                   sync.WaitGroup
 }
 
 // NewBackgroundReview 创建后台 review 控制器。
@@ -65,59 +67,46 @@ func NewBackgroundReview(cfg BackgroundReviewConfig) *BackgroundReview {
 	if cfg.MinTurnsBetweenReviews <= 0 {
 		cfg.MinTurnsBetweenReviews = 3
 	}
-	return &BackgroundReview{cfg: cfg, done: make(chan struct{})}
-}
-
-// Start 启动后台 review 循环（在 Agent.Run 开始时调用）。
-func (br *BackgroundReview) Start() {
-	br.running.Store(true)
-	br.turnsSinceLastReview = 0
-	br.wg.Add(1)
-	go br.loop()
-}
-
-// Stop 停止后台 review。
-func (br *BackgroundReview) Stop() {
-	br.running.Store(false)
-	close(br.done)
-	br.wg.Wait()
+	return &BackgroundReview{cfg: cfg}
 }
 
 // Advance 每轮调用一次（在 turn 结束后）。
+//
+// 语义修正（2026-11-15 审计）：此前 must 先 Start() 才工作，而 Start() 全仓从未
+// 被调用 → 该功能实际完全失效。现在 Enabled() 只看配置（默认开启），不再依赖
+// 后台 loop 是否启动——review 本身就是「每 N 轮起一个一次性 goroutine」，
+// 不需要常驻循环。
 func (br *BackgroundReview) Advance(lastResponse string, msgs []Message) {
-	br.mu.Lock()
-	br.turnsSinceLastReview++
-	shouldReview := br.turnsSinceLastReview >= br.cfg.MinTurnsBetweenReviews
-	br.mu.Unlock()
-
-	if !shouldReview || br.cfg.AuxLLM == nil {
+	if !br.Enabled() || br.cfg.AuxLLM == nil {
 		return
 	}
 	br.mu.Lock()
-	br.turnsSinceLastReview = 0
+	br.turnsSinceLastReview++
+	shouldReview := br.turnsSinceLastReview >= br.cfg.MinTurnsBetweenReviews
+	if shouldReview {
+		br.turnsSinceLastReview = 0
+	}
 	br.mu.Unlock()
-
-	// 异步触发 review
+	if !shouldReview {
+		return
+	}
+	// 异步触发 review（不阻塞主循环）
 	go br.triggerReview(lastResponse, msgs)
 }
 
-func (br *BackgroundReview) loop() {
-	defer br.wg.Done()
-	for {
-		select {
-		case <-br.done:
-			return
-		case <-time.After(10 * time.Second):
-			// 兜底：每 10s 检查一次是否应该触发 review
-			if !br.running.Load() {
-				return
-			}
-		}
+// Enabled 报告后台自学习是否启用：显式 false 才关闭（nil = 默认开启）。
+func (br *BackgroundReview) Enabled() bool {
+	if br == nil {
+		return false
 	}
+	if br.cfg.Enabled != nil && !*br.cfg.Enabled {
+		return false
+	}
+	return true
 }
 
 func (br *BackgroundReview) triggerReview(lastResponse string, msgs []Message) {
-	if !br.running.Load() {
+	if !br.Enabled() {
 		return
 	}
 	if br.cfg.AuxLLM == nil {
@@ -242,7 +231,15 @@ func (br *BackgroundReview) writeNewSkill(name, body string) {
 }
 
 func (br *BackgroundReview) writeMemory(entry string) {
-	if entry == "" || br.cfg.MemoryFile == "" {
+	if entry == "" {
+		return
+	}
+	// 优先走回调（结构化存储，写入即刷新系统提示）
+	if br.cfg.OnMemory != nil {
+		_ = br.cfg.OnMemory(entry)
+		return
+	}
+	if br.cfg.MemoryFile == "" {
 		return
 	}
 	f, err := os.OpenFile(br.cfg.MemoryFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)

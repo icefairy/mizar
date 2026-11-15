@@ -47,11 +47,44 @@ type Manager struct {
 	mu     sync.RWMutex
 	dir    string
 	skills map[string]Skill
+	// disabled 被禁用的技能名（来自 skill_stats 周报；禁用后不再注入系统提示）。
+	// 2026-11-15 审计修复：此前禁用名单被误传给 plugins.SetDisabledTools（那是
+	// 屏蔽**工具**的），技能渲染完全不看它 → 「禁用技能」实际无效。
+	disabled map[string]bool
 }
 
 // NewManager 创建技能管理器。
 func NewManager(dir string) *Manager {
-	return &Manager{dir: dir, skills: make(map[string]Skill)}
+	return &Manager{dir: dir, skills: make(map[string]Skill), disabled: make(map[string]bool)}
+}
+
+// SetDisabled 设置被禁用的技能集合（技能名 → 是否禁用）。禁用只影响注入与列举，
+// 不影响磁盘文件（随时可恢复）。
+func (m *Manager) SetDisabled(names map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.disabled = make(map[string]bool, len(names))
+	for k, v := range names {
+		if v {
+			m.disabled[k] = true
+		}
+	}
+}
+
+// IsDisabled 报告某技能是否被禁用。
+func (m *Manager) IsDisabled(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.disabled[name]
+}
+
+// SetDisabledFromList 便捷版：从字符串列表生成禁用集合。
+func (m *Manager) SetDisabledFromList(names []string) {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	m.SetDisabled(set)
 }
 
 // LoadAll 加载技能目录下的技能。
@@ -175,6 +208,9 @@ func (m *Manager) All() []Skill {
 	defer m.mu.RUnlock()
 	out := make([]Skill, 0, len(m.skills))
 	for _, s := range m.skills {
+		if m.disabled[s.Name] {
+			continue // 被禁用的技能不参与注入/列举
+		}
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
