@@ -105,7 +105,7 @@
   let streamBuf = "";      // 流式正文累计
   let streamStep = -1;     // 当前流式 step
   let stepsBody = null;    // 答复框内的步骤容器（.《steps》）
-  // 当前轮（turn）：用户提问 → 最终答复（内含 .steps 过程 + .text 正文）
+  // 当前轮（turn）：用户提问 → 最终答复（内含 .text 正文 + .steps 过程，过程在后、限高滚动）
   let turnEl = null;       // 当前轮容器
   let thinkStepEl = null;  // 当前思考步骤
   let thinkStepBuf = "";   // 思考累计
@@ -440,8 +440,10 @@
     const wrap = document.createElement("div");
     wrap.className = "msg assistant";
     wrap.__raw = "";
+    // 工具调用步骤面板放在正文**之后**（用户要一直能看到最新的文本，工具动静
+    // 在下面滚动）。steps 自身限高 + 内部滚动，见 style.css 的 .msg.assistant .steps。
     wrap.innerHTML = whoHtml("开阳", ts) + '<div class="body">' +
-      '<div class="steps"></div><div class="text"></div></div>' +
+      '<div class="text"></div><div class="steps"></div></div>' +
       '<div class="msg-actions"><button class="act msg-copy" type="button">复制</button></div>';
     turnHost().appendChild(wrap);
     stepsBody = wrap.querySelector(".steps");
@@ -455,6 +457,14 @@
     if (streamBody) { stepsBody = streamBody.parentElement.querySelector(".steps"); }
     if (!stepsBody) { const b = ensureReply(); stepsBody = b.parentElement.querySelector(".steps"); }
     return stepsBody;
+  }
+  // 步骤面板内部跟随到底：面板限高（~5 行）后是内部滚动，新步骤要自动滚进来，
+  // 否则用户只能看到最早那几步。只在用户本来就贴着面板底部时才跟随，
+  // 手动上翻看旧步骤时不被拽走。
+  function scrollStepsToEnd(sb) {
+    if (!sb) return;
+    const nearEnd = (sb.scrollHeight - sb.scrollTop - sb.clientHeight) <= 24;
+    if (nearEnd) sb.scrollTop = sb.scrollHeight;
   }
   // 单行压缩：换行/多空格折叠，超长截断
   function compact(s, n) {
@@ -646,6 +656,7 @@
           step.className = "pstep";
           step.textContent = compact(m.content, 300);
           sb.appendChild(step);
+          scrollStepsToEnd(sb);
           bumpProc();
         }
       });
@@ -1131,6 +1142,7 @@
     step.innerHTML = '<span class="pico">🔧</span><span class="ptool">' + esc(tool) + '</span>' +
       (a ? '<span class="pargs">' + esc(a) + '</span>' : "");
     sb.appendChild(step);
+    scrollStepsToEnd(sb);
     bumpProc();
     scrollLog();
   }
@@ -1151,12 +1163,14 @@
       '<span class="ptool">' + esc(m.tool || "") + '</span>' +
       (a ? '<span class="pargs">' + esc(a) + '</span>' : "");
     sb.appendChild(head);
+    scrollStepsToEnd(sb);
     const body = m.err || m.result;
     if (body) {
       const step = document.createElement("div");
       step.className = "pstep pstep-res";
       step.innerHTML = '<span class="pico">↳</span><span class="pres">' + esc(compact(body, 200)) + '</span>';
       sb.appendChild(step);
+      scrollStepsToEnd(sb);
     }
     bumpProc();
   }
@@ -1169,6 +1183,7 @@
     step.className = "pstep pstep-res";
     step.innerHTML = '<span class="pico">↳</span><span class="pres">' + esc(r) + '</span>';
     sb.appendChild(step);
+    scrollStepsToEnd(sb);
     bumpProc();
     scrollLog();
   }
@@ -1184,6 +1199,7 @@
         thinkStepEl.textContent = "";
         thinkStepBuf = "";
         sb.appendChild(thinkStepEl);
+        scrollStepsToEnd(sb);
         bumpProc();
       }
       thinkStepBuf += delta;

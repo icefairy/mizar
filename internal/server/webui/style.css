@@ -217,11 +217,28 @@ button { font-family: inherit; cursor: pointer; }
 .pstep-think { color: var(--text-dim); font-style: italic; display: block; }
 .pstep-text { display: block; color: var(--text-dim); }
 .pstep-text p { margin: .3em 0; }
-/* 步骤追加入最终答复框时同样套用紧凑样式（不依赖工作过程容器） */
-.msg.assistant .steps { border-left: 2px solid var(--border); padding-left: 10px; margin-bottom: 8px; }
+/* 步骤面板：放在答复正文**之后**（见 app.js ensureReply），限高 + 内部滚动。
+   为什么限高：工具调用可能几十条，全展开会把最新正文顶出屏幕；
+   限成 ~5 行后在面板内部滚动——用户始终能看到最新文本，同时看得到工具动静。
+   注意 steps 此时在 .text 之后，所以 margin 用 top 而不是 bottom。 */
+.msg.assistant .steps {
+  border-left: 2px solid var(--border); padding-left: 10px;
+  margin-top: 8px;
+  max-height: 10.5em;     /* ≈5 行（行高 1.5×14px + padding + 行间距） */
+  overflow-y: auto;
+  overscroll-behavior: contain;  /* 滚到边界不带动外层聊天区 */
+  scrollbar-width: thin;
+  padding-right: 2px;
+}
 .msg.assistant .steps:empty { display: none; }
+/* 面板内部滚动条收窄（全局 10px 在这么小的面板里太占宽） */
+.msg.assistant .steps::-webkit-scrollbar { width: 6px; }
 .msg.assistant .pstep { padding: 3px 0; border: none; }
 .msg.assistant .pstep + .pstep { border-top: 1px dashed var(--border); margin-top: 5px; padding-top: 5px; }
+/* 移动端再收一点，避免占掉半个屏幕 */
+@media (max-width: 760px) {
+  .msg.assistant .steps { max-height: 8.5em; }
+}
 .pstep.cursor::after { content: "▋"; animation: blink 1s steps(2, start) infinite; color: var(--accent); margin-left: 1px; }
 
 /* markdown 渲染 */
