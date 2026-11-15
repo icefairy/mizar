@@ -66,9 +66,6 @@ func (a *Agent) ToolInjectMode() string {
 	return ToolInjectFull
 }
 
-// deferToolsManagers 返回工具注册表实例（nil 安全）。
-func (a *Agent) toolManager() *plugins.Manager { return a.Plugins }
-
 // ensureToolIndex 惰性初始化会话级工具索引状态（并发安全的前提：先建再锁）。
 func (a *Agent) ensureToolIndex() {
 	if a.toolIndex == nil {

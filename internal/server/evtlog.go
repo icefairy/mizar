@@ -67,13 +67,6 @@ func (l *evtLog) since(conv string, after int64) ([]map[string]any, int64) {
 	return out, last
 }
 
-// nextSeq 当前会话的下一个 seq（=已用最大值）。前端可用来判断「是否漏了事件」。
-func (l *evtLog) nextSeq(conv string) int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.seq[conv]
-}
-
 // reset 清空某会话的缓冲（新一轮运行开始时调用：旧的增量已并入落盘历史）。
 // seq 保持单调递增，避免前端游标回退后重复重放。
 func (l *evtLog) reset(conv string) {

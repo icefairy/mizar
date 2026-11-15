@@ -10,8 +10,6 @@ package builtins
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"mizar/internal/plugins"
@@ -124,14 +122,4 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
-}
-
-// EnsureSessionsDir 确保会话目录存在（Open 索引前调用）。
-func EnsureSessionsDir(root string) string {
-	if strings.HasPrefix(root, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			root = filepath.Join(home, strings.TrimPrefix(root, "~/"))
-		}
-	}
-	return root
 }

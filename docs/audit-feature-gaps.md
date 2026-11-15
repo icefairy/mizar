@@ -3,12 +3,14 @@
 > 审计日期：2026-11-15
 > 方法：全仓扫描 TODO/FIXME、`go run golang.org/x/tools/cmd/deadcode`（123 个不可达符号）、配置字段读写比对、注释声明 vs 调用点交叉验证、临时测试实证。
 > 结论：**发现 15 处「文档/注释/配置声称有、实际没接线或半成品」**，按严重度分级如下。
+>
+> **修复进度（2026-11-15 当天）**：#1 #2 #3 #5 #6 #7 #8 #10 已修并补测试；#9 #11 #12(部分) #13 已清理死代码；#4（skill_evolution）随 #1 一并接线；#14 #15 保留说明（见文末「修复记录」）。
 
 ---
 
 ## 🔴 严重（功能宣传有、实际完全不工作）
 
-### 1. BackgroundReview 后台自学习从未启动 —— 「自动沉淀技能/记忆」完全失效
+### 1. ✅已修 BackgroundReview 后台自学习从未启动 —— 「自动沉淀技能/记忆」完全失效
 
 | 项 | 内容 |
 |---|---|
@@ -18,7 +20,7 @@
 | 附带 | `BackgroundReviewConfig.MemoryFile` 字段**从未被赋值**（`grep "MemoryFile:"` 空）→ 即使启动，写 memory 那半也不生效 |
 | 修复 | 在 `Agent.Run` 开头调 `a.BgReview.Start()`、结尾 `Stop()`；或改 `Advance` 不再依赖 running 标志。另需补 `MemoryFile` 赋值 |
 
-### 2. 技能禁用名单被当成工具禁用名单 —— 禁用技能实际无效
+### 2. ✅已修 技能禁用名单被当成工具禁用名单 —— 禁用技能实际无效
 
 | 项 | 内容 |
 |---|---|
@@ -31,36 +33,36 @@
 
 ## 🟡 中等（功能半成品 / 松耦合漏接线）
 
-### 3. WebUI 缓存未命中提示：后端空操作 + 前端无开关
+### 3. ✅已修 WebUI 缓存未命中提示：后端空操作 + 前端无开关
 
 - `webstore.go:74` 有 `ShowCacheMiss` 字段，`webui.go:900` 调 `setCacheMissEnabled(v)` —— 但该函数体是 `_ = v`（**空操作**，注释自承「Server 模式下此处暂为空操作」）。
 - 前端 `index.html` / `app.js` 里**根本没有这个开关**（grep 计数 0）→ 用户无法设置，设了也没效果。
 - TUI 侧是好的（`tui.go:1628` 读 `cfg.CacheMissNotice` 并 `NewCacheMissDetector`）。
 
-### 4. `skill_evolution` 配置项从未被读取
+### 4. ✅已修 `skill_evolution` 配置项从未被读取（随 #1 接线）
 
 - `config.go:34` 定义 `SkillEvolution *bool`（注释「技能自动沉淀（nil=默认开启）」）+ `SkillEvolutionEnabled()` 方法。
 - 全仓 `SkillEvolutionEnabled()` **零调用**。配合第 1 条：不但开关没接线，连它想控制的功能本身都没启动。
 
-### 5. GoalGate 的「重试上限 / 失败指纹去重」只有字段没有逻辑
+### 5. ✅已修 GoalGate 的「重试上限 / 失败指纹去重」只有字段没有逻辑
 
 - `GoalGate.MaxRetries`（`goal.go:98`）：只在解析/序列化里被赋值，**从未参与任何判断**（`defaultGateMaxRetry` 常量也无人用）。
 - `GoalGate.LastFailedFP` + `WorkspaceFP(cwd)`（`goal.go:155`）：`WorkspaceFP` 被 deadcode 判定**不可达**，`LastFailedFP` 从未被赋值。
 - 注释暗示「同一工作区状态失败可去重/限次」，实际门禁每次都无条件重跑。
 
-### 6. 子代理拿不到 Compactor → 长任务子代理不压缩上下文
+### 6. ✅已修 子代理拿不到 Compactor → 长任务子代理不压缩上下文
 
 - `subagent.go:4` 头注释：「子 agent 跑原生 Run()——自带工具解析/执行/**纠错/压缩**/步数预算」。
 - 实际 `runSubagent` 只设了 `child.System / MaxSteps / WorkDir / Permission / OnStep / OnLLMStream`，**没有 `child.Compactor`、`child.Tuner`**（`New()` 里 Compactor 默认 nil）。
 - 后果：子代理跑长任务时 `if a.Compactor != nil` 恒假 → 永不压缩 → 撞上游上下文上限直接失败。`Clone()` 是有 Compactor 的，**子代理路径漏了**。
 
-### 7. `agentPool.drop` 从未调用 → 删会话不释放 Agent 实例
+### 7. ✅已修 `agentPool.drop` 从未调用 → 删会话不释放 Agent 实例
 
 - `agentpool.go:69` 注释「会话删除时释放其 Agent（避免长期累积）」。
 - 全仓 `pool.drop(` **零调用**（`webui.go:387` 只 `st.delete(id)` 删存储，没通知 pool）。
 - 后果：`byConv` map 随删除的会话只增不减（每个实例含 Initial 历史，内存持续增长）。`count()` 也是死代码（只能靠测试观察到）。
 
-### 8. 子代理句柄 map 只增不减
+### 8. ✅已修 子代理句柄 map 只增不减
 
 - `subagent.go` 的 `sm.subs[h.ID] = h` 之后**没有任何 delete**（grep 空）。长跑进程里每派一个子任务就永久留一个句柄（含完整 Result 文本）。
 
@@ -107,3 +109,25 @@ grep -oE 'json:"[a-z_]+' internal/config/config.go | ...        # 逐项查读�
 # 关键结论的实证测试（已删除，可复现）
 # 不调 Start() → Advance()×10 → AuxLLM 调用 0 次
 ```
+
+
+---
+
+## 修复记录（2026-11-15）
+
+| # | commit | 要点 |
+|---|---|---|
+| #1 + #4 | `96a40cf` | BgReview 去掉 Start 依赖（改看配置）；新增 `OnMemory` 回调写结构化 MEMORY.md；`skill_evolution` 接线 |
+| #2 | `96a40cf` | `skills.Manager.disabled` 过滤 All/Render；`builtins.SetDisabledSkills` 让 skill 工具拒读；新增 `/skills` 命令；周报文案改指 `/skills disable` |
+| #6 | `1bb4708` | 子代理注入 Compactor / Tuner（Tuner 用新增 `Clone()`，避免与主代理共用计数） |
+| #7 | `1bb4708` | 会话 DELETE 接 `pool.drop` |
+| #8 | `1bb4708` | `maxRetainedSubagents=200` + `pruneLocked`（只淘汰终态、运行中保留） |
+| #3 | `53f5030` | `setCacheMissEnabled` 真接线 + 前端下拉 + `agent.SetCacheMissNoticeEnabled` |
+| #10 | `53f5030` | `-serve` 注册 SIGINT/SIGTERM → 5s 优雅关闭 + 关索引 |
+| #5 | `f29fffe` | `RunGateFull` 维护 Attempts/LastFailedFP；耗尽后停止自动续跑 |
+| #9/#11/#13 | 本次 | 删 `evtLog.nextSeq`、`Agent.toolManager`、`EnsureSessionsDir` 死代码 |
+
+保留说明：
+- **#12** 部分符号（`AllHookSpecs` / `extractAssistantText` / `CacheImpact.String`）**被测试或架构文档引用**，不是死代码，保留。
+- **#14** `ProbeContextWindow` / `ProbeThinking` / `RunWizard`：为未来入口预留，暂不再接线（不误导用户即可）。
+- **#15** 技能统计与工具调用混记：**刻意保留**（周报的「工具调用排行」本身有参考价值），已在代码注释里说明语义。

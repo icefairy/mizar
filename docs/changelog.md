@@ -1,3 +1,23 @@
+## [未发布] — 2026-11-15（夜·五）修复审计发现的 8 个「假功能」
+
+> 主题：**功能兑现审计与修复** —— 详见 `docs/audit-feature-gaps.md`。
+
+### 🐛 修复（均为「文档/注释/配置声称有、实际没接线」）
+
+- **BackgroundReview 后台自学习完全失效**：`Advance()` 依赖 `running` 标志，而 `Start()` 全仓零调用 → 该功能从未工作。改为只看配置（`Enabled()`），删掉无用的常驻 loop/Start/Stop；新增 `OnMemory` 回调写结构化 MEMORY.md（此前 `MemoryFile` 从未赋值，写记忆那半也不生效）。
+- **技能禁用被错当成工具禁用**：`pm.SetDisabledTools(stats.DisabledNames())` 传的是技能名、屏蔽的却是工具注册表，且技能渲染完全不看禁用名单 → 「禁用技能」实际无效。现 `skills.Manager` 自带 disabled 过滤（`All`/`RenderIndex`/`RenderAll`），`skill` 工具也会拒读禁用技能；新增 `/skills` 命令（list/disable/enable/stats）—— 周报里写着「回复禁用 xxx」但此前没有任何解析实现。
+- **子代理不压缩上下文**：头注释称「自带压缩/纠错」，实际 `Compactor`/`Tuner` 恒为 nil → 长任务子代理撞上下文上限直接失败。现注入之；`Tuner` 用新增的 `Clone()`（复制配置 + 清零计数），避免与主代理共用计数被每轮 `Reset` 干扰。
+- **删会话不释放 Agent**：`agentPool.drop` 零调用 → `byConv` 只增不减（每实例持 Initial 历史）。DELETE 分支接上。
+- **子代理句柄只增不减**：新增 `maxRetainedSubagents=200` + 按创建序淘汰终态句柄（运行中的一律保留）。
+- **WebUI 缓存未命中提示是空操作**：`setCacheMissEnabled` 体为 `_ = v`，前端连开关都没有。现真接线 + 前端下拉 + `agent.SetCacheMissNoticeEnabled` 进程级开关。
+- **Server 无优雅退出**：`Server.Shutdown` 全仓零调用、无信号处理 → Ctrl+C 直接杀进程。现注册 SIGINT/SIGTERM，5s 超时优雅关闭 + 关索引。
+- **GoalGate 重试上限/失败指纹只有字段无逻辑**：新增 `RunGateFull` 维护 `Attempts`/`LastFailedFP`（工作区指纹变化则重置），耗尽后停止自动续跑并给明确提示，不再让模型空转。
+
+### 🧹 清理
+
+- 删除死代码：`evtLog.nextSeq`、`Agent.toolManager`、`builtins.EnsureSessionsDir`。
+- 保留但已在注释里说明：`AllHookSpecs`/`extractAssistantText`（被测试/文档引用）、技能统计混记工具调用（有参考价值）。
+
 ## [未发布] — 2026-11-15（夜·四）
 
 > 主题：**学习闭环三件套** —— 技能图谱+反思（H-7）、会话全文搜索（H-1）、待办压缩后重注入（H-2），均对齐 Hermes Agent。
