@@ -92,11 +92,9 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；只读角色工�
 - **不进模型视野**：标记消息恢复时从 LLM 上下文与渲染中剔除（`StripSubagentStateMessages`），只服务于状态重建；会话文件保留原样（append-only）
 - 长任务的子 agent 结论跨会话可引用（get_subagent / list_subagents / /subagents）
 
-#### 🔵 GAP-S5：token/成本计量缺失（~50 行）
+#### ✅ GAP-S5：token 计量（已实现，2026-11-15）
 
-`StepsUsed` 有，但无 per-subagent token/cost 记账。多模型混跑（Model 字段已生效）后无法核算各子任务的消耗，也无法做"给子任务默认配便宜模型"这类策略的收益评估。
-
-**引入方案**：LLM 响应处已有用量统计（`agent/stats.go`），转发进 `SubagentHandle`（`TokensIn/TokensOut` 字段）即可。
+per-subagent token 计量：子代理 OnLLMStream 置为 usage 累加器（loop 据此走流式路径），usage 分片（`stream_options.include_usage` 下发的 final chunk）按请求累加进句柄 `TokensIn/TokensOut`。`/subagents` 渲染带 `tokens:入/出` 段（零计量不显示）；快照随 GAP-S4 落盘持久化。附带收益：子代理在途 LLM 请求也走 CancellableStreamToolCallLLM，支持真取消。非流式 LLM / 网关不下发 usage 时保持 0（best-effort）。
 
 > 备注：v0.8.8 已修复的两项（role 死字段、排队/执行共用超时）与 steer 注册缺失已从本清单移除，见 1.1 现状表。
 
@@ -131,7 +129,7 @@ v0.8.8 已让 `role` 生效（行为边界注入，见 1.1）；只读角色工�
 | C-3 | 多代理团队 | TeamCreate + 共享任务列表 + 代理间消息协议（SendMessage），互相认领/阻塞 | 无 | 🟡 |
 | C-4 | 后台代理 | 代理级后台运行 + 完成通知协议，主代理可继续其他工作 | delegate_task 异步 + DrainDone 回灌 + OnProgress 推送已对齐 | 🟢 基本持平 |
 | C-5 | 权限模式 | plan/default/acceptEdits/bypassPermissions 多档 + 逐工具审批 + 子代理继承 | PermissionMode 四档已实现（auto/default/acceptEdits/plan），逐工具分级审批，子代理继承同一 gate；无逐工具白名单 UI | 🟢 基本持平 |
-| C-6 | 用户级 Hooks | 用户 settings 配置 shell 命令响应工具事件（PreToolUse 等），可阻塞并回注反馈 | hooks 是插件内部机制（agent/hooks.go），用户不可配 shell 命令 | 🟡 |
+| C-6 | 用户级 Hooks | 用户 settings 配置 shell 命令响应工具事件（PreToolUse 等），可阻塞并回注反馈 | ✅ 已实现（2026-11-15）：config.json `hooks` 段（pre_tool_use/post_tool_use），stdin JSON 上下文 + MIZAR_HOOK=1；pre 可 deny（stdout JSON 或 exit 2）/rewrite，故障记日志放行；post 只观察；`/hooks` 命令查看 | ✅ 基本持平 |
 | C-7 | 结构化记忆 | 四类记忆（user/feedback/project/reference）+ 索引每会话自动加载 | memory 插件（SQLite/HMEM），非自动加载的结构化记忆 | 🟡 |
 | C-8 | 工作树隔离 | git worktree 一键隔离实验性修改 | 无 | 🔵 |
 | C-9 | 延迟工具加载 | ToolSearch 按需加载工具 schema，未用工具不占上下文 | 工具定义全量注入；有技能渐进披露（SkillInjectMode: index）但工具层无 | 🔵 |
@@ -182,14 +180,12 @@ model: 主模型    # 可省略，继承父级
 
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
-| 🔵 P2 | 用户级 hooks（shell 命令响应工具事件） | ~150 行 | C-6 |
 | 🔵 P2 | 结构化记忆四分类 + 自动加载索引 | ~200 行 | C-7 |
-| 🔵 P3 | per-subagent token/cost 计量 | ~50 行 | GAP-S5 |
 | 🔵 P3 | worktree 隔离 | ~100 行 | C-8 |
 | 🔵 P3 | 延迟工具加载 | ~120 行 | C-9 |
 | 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）；**用户级 hooks（C-6，config.json hooks 段 shell 命令响应工具事件）与 per-subagent token 计量（GAP-S5，流式 usage 累加进句柄）**（2026-11-15 晚交付）。
 
 ---
 
@@ -202,6 +198,7 @@ model: 主模型    # 可省略，继承父级
 | `internal/agent/subagent_persist.go` | 子任务句柄落盘回放（GAP-S4：标记消息/回放/Restore） |
 | `cmd/mizar/forkcmd.go` | /fork 分支派生核心逻辑（P-2：前缀重放/血缘/标题） |
 | `internal/session/session.go` | 会话存储（fork 血缘记录 AppendFork/ForkParent） |
+| `internal/userhooks/userhooks.go` | 用户级 hooks（C-6：pre 裁决/post 观察，stdin JSON 上下文） |
 | `cmd/mizar/main.go:716-723` | 五个委派工具注册 + DelegationGuide 注入 |
 | `internal/llm/openai.go` | `WithModel`（modelDeriver 的实现侧）+ thinking 档位（P-3 xhigh/max） |
 | `internal/builtins/todo_pi.go` | 平铺 todo（C-2 升级对象，回放机制复用点） |
