@@ -1,3 +1,17 @@
+## [未发布] — 2026-11-15（夜·续）
+
+> 主题：**worktree 隔离（C-8）+ 延迟工具加载（C-9）**。
+
+### ✨ 新增
+
+- **git worktree 隔离（C-8，`internal/worktree` + 工具）**
+  - `worktree_create` / `worktree_leave` / `worktree_list`：全走 git 官方命令（`add -b` / `remove [--force]` / `list --porcelain`），不删分支、不 merge；默认路径 `<repo>.worktrees/<branch>`。
+  - **working_dir 真正生效**（配套修复）：`delegate_task.working_dir` 此前只写子 Agent 的提示锚点，bash/read/write/grep/find/ls 仍按进程 cwd 解析 → 隔离形同虚设。新增 `internal/agent/workdir_wrap.go`：子代理工具按工作目录包一层（bash 前置 `cd "<dir>" && `，路径类参数锚定相对路径），仅作用于子代理，不影响主代理与并发会话。
+- **延迟工具加载（C-9，`internal/agent/tool_index.go`）**
+  - `config.json tool_inject_mode=index` 时，系统提示与 tools 清单只含核心工具，其余工具只列索引（名称+一句话描述，静态缓存友好）。
+  - `tool_search` 工具：按 names/query 加载被推迟的工具，会话内保持可用；`ActiveTools()` 只发核心 + 已加载。
+  - 会话级已加载集合随 Agent 实例隔离（Clone 继承模式不继承集合）。
+
 ## [未发布] — 2026-11-15（夜）
 
 > 主题：**结构化长期记忆** —— 四分类 MEMORY.md 每会话自动注入（C-7，对齐 CodeBuddy）。

@@ -769,6 +769,14 @@ func main() {
 	for _, t := range builtins.WorktreeTools(wd) {
 		pm.RegisterBuiltin(t)
 	}
+	// 延迟工具加载（C-9，opt-in）：config.json tool_inject_mode=index 时，
+	// 系统提示只列核心工具 + 其余索引，模型用 tool_search 按需加载。
+	// tool_search 自身永远注册（index 模式下它被核心集保留）。
+	pm.RegisterBuiltin(agent.ToolSearchTool(a))
+	if cfgTI, err := config.Load(config.DefaultPath()); err == nil && cfgTI.ToolInjectIsIndex() {
+		a.SetToolInjectMode(agent.ToolInjectIndex)
+		log.Printf("工具注入: index（按需加载，其余走 tool_search）")
+	}
 
 	// ask_user_question：TUI 模式下由 tui.go 设置回调；非 TUI 保持 nil（降级提示）
 	// 全局可访问的计划模式实例（供 builtins 工具引用）

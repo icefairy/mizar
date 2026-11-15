@@ -116,9 +116,14 @@ type Agent struct {
 	// MemoryPrompt 结构化长期记忆注入段（C-7，volatile 层：memory 工具写入后
 	// 调用 SetMemoryPrompt 刷新并失效缓存，使新事实当轮即可见）。
 	MemoryPrompt string
-	PluginDir    string    // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
-	WorkDir      string    // 当前工作目录，注入系统提示供模型锚定搜索范围
-	Initial      []Message // 会话恢复时的历史消息（置于 task 之前）
+	// toolInjectMode 工具注入模式（C-9：full 默认 / index 按需加载）。
+	// index 模式下 tools 清单只含核心工具 + 已按需加载的工具，其余走 tool_search。
+	toolInjectMode string
+	// toolIndex 会话级已加载工具集合（index 模式）。
+	toolIndex *toolIndexState
+	PluginDir string    // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
+	WorkDir   string    // 当前工作目录，注入系统提示供模型锚定搜索范围
+	Initial   []Message // 会话恢复时的历史消息（置于 task 之前）
 	// ConvID 本实例服务的 Web 会话 id（非 Web 入口为空）。
 	// 为什么要放在 Agent 上：Hooks 是进程级共享的，多个会话并发运行时
 	// 钩子无法从 Server 的全局状态里判断「这次工具调用属于哪个会话」，
@@ -493,13 +498,17 @@ func (a *Agent) buildContextSection() string {
 // 工具列表/技能变化时通过 ReloadTools 使缓存失效。
 func (a *Agent) buildVolatileSection() string {
 	var sb strings.Builder
-	tools := a.Plugins.Tools()
+	tools := a.ActiveTools()
 	if len(tools) == 0 {
 		sb.WriteString("（无）\n")
 	} else {
 		for _, t := range tools {
 			sb.WriteString(fmt.Sprintf("- %s: %s\n", t.Name, t.Description))
 		}
+	}
+	// 延迟工具：index 模式下未注入的工具只列索引（静态，缓存友好）
+	if idx := a.renderToolIndexSection(); idx != "" {
+		sb.WriteString(idx)
 	}
 	// 技能索引/正文（volatile：技能增删时通过 ReloadTools 失效缓存）
 	if a.SkillsPrompt != "" {
@@ -752,17 +761,17 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			// 优先使用支持取消的流式接口（ESC 取消可中断在途 HTTP 请求）；
 			// 不支持时回退旧接口（取消仍生效，但需等 LLM 自然返回）
 			if toolLLM, ok := a.LLM.(CancellableStreamToolCallLLM); ok {
-				reply, llmErr = toolLLM.ChatWithToolsStreamCtx(a.currentRunCtx(), msgs, a.Plugins.Tools(), emit)
+				reply, llmErr = toolLLM.ChatWithToolsStreamCtx(a.currentRunCtx(), msgs, a.ActiveTools(), emit)
 			} else if llmWithContext, ok := a.LLM.(LLMWithContext); ok {
 				// 支持上下文取消的一次性调用接口：非流式路径也可中断在途请求
-				reply, llmErr = llmWithContext.ChatWithToolsCtx(a.currentRunCtx(), msgs, a.Plugins.Tools())
+				reply, llmErr = llmWithContext.ChatWithToolsCtx(a.currentRunCtx(), msgs, a.ActiveTools())
 			} else if toolLLM, ok := a.LLM.(StreamToolCallLLM); ok {
-				reply, llmErr = toolLLM.ChatWithToolsStream(msgs, a.Plugins.Tools(), emit)
+				reply, llmErr = toolLLM.ChatWithToolsStream(msgs, a.ActiveTools(), emit)
 			} else if sllm, ok := a.LLM.(StreamLLM); ok {
 				reply, llmErr = sllm.ChatStream(msgs, emit)
 			} else if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
 				// LLM 不支持流式且不支持上下文取消：回退一次性调用（ESC 仅设置标志位，需等 LLM 自然返回）
-				reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
+				reply, llmErr = toolLLM.ChatWithTools(msgs, a.ActiveTools())
 			} else {
 				reply, llmErr = a.LLM.Chat(msgs)
 			}
@@ -770,10 +779,10 @@ func (a *Agent) Run(task string) (reply string, err error) {
 			// 非流式路径（原逻辑）
 			// 优先检查支持上下文取消的接口
 			if llmWithContext, ok := a.LLM.(LLMWithContext); ok {
-				reply, llmErr = llmWithContext.ChatWithToolsCtx(a.currentRunCtx(), msgs, a.Plugins.Tools())
+				reply, llmErr = llmWithContext.ChatWithToolsCtx(a.currentRunCtx(), msgs, a.ActiveTools())
 			} else if toolLLM, ok := a.LLM.(ToolCallLLM); ok {
 				// 原生工具调用：发送 tools 参数，模型结构化返回
-				reply, llmErr = toolLLM.ChatWithTools(msgs, a.Plugins.Tools())
+				reply, llmErr = toolLLM.ChatWithTools(msgs, a.ActiveTools())
 			} else {
 				reply, llmErr = a.LLM.Chat(msgs)
 			}

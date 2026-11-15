@@ -35,6 +35,8 @@ type Config struct {
 	SkillStatsEnabled *bool  `json:"skill_stats_enabled"`           // 技能使用统计+周报（nil=默认开启）
 	SkillStatsTopN    int    `json:"skill_stats_top_n"`             // 周报建议禁用数（0=默认10）
 	SkillInjectMode   string `json:"skill_inject_mode"`             // 技能注入: index(默认,缓存友好)|full(全量正文)
+	// ToolInjectMode 工具注入模式（C-9）：full（默认，全量注入）|index（索引+按需 tool_search 加载）。
+	ToolInjectMode string `json:"tool_inject_mode,omitempty"`
 	// MemoryEnabled 结构化长期记忆自动注入（C-7，nil=默认开启）。
 	// 关闭后 memory 工具仍可用，但 MEMORY.md 不再自动进系统提示。
 	MemoryEnabled *bool  `json:"memory_enabled,omitempty"`
@@ -170,6 +172,14 @@ func (c *Config) SkillInjectIsIndex() bool {
 }
 
 // SkillStatsOn 统计周报默认开启（nil 或 true 均开启，显式 false 关闭）。
+// ToolInjectIsIndex 是否启用工具索引模式（默认 full）。
+func (c *Config) ToolInjectIsIndex() bool {
+	if c == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(c.ToolInjectMode), "index")
+}
+
 // MemoryOn 是否自动注入结构化长期记忆（默认开启）。
 func (c *Config) MemoryOn() bool {
 	if c == nil || c.MemoryEnabled == nil {
