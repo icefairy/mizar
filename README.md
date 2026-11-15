@@ -1187,7 +1187,7 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 | 工具按需加载 | ✅ tool_search/describe/call 三桥接 + BM25 | ✅ tool_search（关键词匹配） |
 | 代码量 | 191k 行 Python | 76k 行 Go |
 
-**结论**：Mizar 在「极简 / 离线 / 自举（内嵌编译器 + wasm）」上更彻底；Hermes 在「生态广度（消息平台、多模态、学习闭环）」上是另一个量级。**已落地三项**：会话全文搜索（H-1）、todo 压缩后重注入（H-2）、技能图谱+反思（H-7）；仅剩 memory 字符预算细分（H-3）。
+**结论**：Mizar 在「极简 / 离线 / 自举（内嵌编译器 + wasm）」上更彻底；Hermes 在「生态广度（消息平台、多模态、学习闭环）」上是另一个量级。**已落地三项**：会话全文搜索（H-1）、todo 压缩后重注入（H-2）、技能图谱+反思（H-7）；memory 字符预算细分（H-3）经评估收益低，**已决定不做**。
 
 完整逐项对比见 [docs/hermes-comparison.md](docs/hermes-comparison.md)。
 

@@ -224,7 +224,7 @@ Hermes Agent（Nous Research，191k 行 Python，22 个消息平台）与 Mizar 
 |---|---|---|---|
 | H-1 | ~~会话全文搜索（FTS5）~~ ✅ 已交付 | `internal/sessionsearch`：SQLite FTS5 增量索引（trigram 中英文子串可搜）+ `session_search` 工具（搜索/上下文/整段/列表）+ `/search` 命令 | 已完成 |
 | H-2 | ~~todo 压缩后重注入~~ ✅ 已交付 | `builtins.RenderForInjection` + `Agent.TodoInject`；Compactor 成功压缩后注入 pending 待办（完成项不注） | 已完成 |
-| H-3 | memory 字符预算分类型 | hermes MEMORY.md 2200 字符 / USER.md 1375 字符硬上限 + 冻结快照；Mizar 是 8000 字节/200 条，可细化为按类型分预算 | ~30 行（未做） |
+| H-3 | ~~memory 字符预算分类型~~ ⛔ 已放弃 | hermes MEMORY.md 2200 字符 / USER.md 1375 字符硬上限 + 冻结快照；Mizar 现有 8000 字节/200 条上限已够用，按类型细分预算收益低而复杂度上升（多组阈值+超限策略）。**2026-11-15 决定不做**，如未来记忆条目真的膨胀到影响上下文再重评估 | 不做 |
 | H-7 | ~~技能图谱 + 反思~~ ✅ 已交付 | `internal/learninggraph`（技能/记忆节点 + related_skills 边 + 词法重叠边 + 密度统计）+ `internal/reflect`（孤岛技能/高频工具/记忆脱节/低使用率 四类洞察）+ `/learn graph｜reflect｜json` | 已完成 |
 
 **明确不学**：消息平台网关（22 平台 = 22 份维护）、自研浏览器/TTS/ASR/computer_use（用 MCP）、serverless 后端（modal/daytona，与离线定位冲突）。
