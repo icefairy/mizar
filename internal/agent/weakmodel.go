@@ -57,6 +57,27 @@ func (t *WeakModelTuner) WithRetryConfig(maxRetries, baseDelayMs int) *WeakModel
 	return t
 }
 
+// Clone 复制配置、清空运行态（供子代理使用独立计数）。
+//
+// 为什么子代理不能用共享实例：Reset() 会把父子两边的计数器一起清掉
+// （主代理每轮 Run 开头都 Reset），子代理的重试/解析失败计数会被主代理
+// 悄悄清零或用主代理的计数判阈值。配置是只读的，复制即可。
+func (t *WeakModelTuner) Clone() *WeakModelTuner {
+	if t == nil {
+		return nil
+	}
+	n := &WeakModelTuner{
+		maxParseFailures: t.maxParseFailures,
+		maxLLMRetries:    t.maxLLMRetries,
+		maxStepLimit:     t.maxStepLimit,
+		loopWindowSize:   t.loopWindowSize,
+		retryBaseDelayMs: t.retryBaseDelayMs,
+		onParseEscalate:  t.onParseEscalate,
+	}
+	n.Reset()
+	return n
+}
+
 // Reset 重置所有计数（新任务开始时调用）。
 func (t *WeakModelTuner) Reset() {
 	t.parseFailures.Store(0)

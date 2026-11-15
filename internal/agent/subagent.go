@@ -114,20 +114,24 @@ const (
 )
 
 type SubagentManager struct {
-	mu          sync.RWMutex
-	subs        map[string]*SubagentHandle
-	nextID      atomic.Int64
-	maxDepth    int
-	maxSteps    int
-	parentLLM   LLM                   // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
-	parentSys   string                // 主 system（子 agent 个性化指令层）
-	pm          *plugins.Manager      // 共享插件注册表（只读复制工具清单）
-	jobNotify   func(note string)     // 结果回灌：完成通知塞进主循环可见通道
-	onProgress  func(id, line string) // 进度推送（GAP-S3 收尾）：每步进度行回调，nil = 关闭
-	persister   func(SubagentHandle)  // 终态落盘（GAP-S4）：快照交调用方持久化，nil = 不落盘
-	permission  *PermissionGate       // 权限门禁（GAP-S2）：与主代理共用同一实例，nil = 无门禁
-	customTypes map[string]AgentType  // 用户自定义子代理类型（GAP-S1 第二层），nil = 无
-	sem         chan struct{}         // 并发上限
+	mu         sync.RWMutex
+	subs       map[string]*SubagentHandle
+	nextID     atomic.Int64
+	maxDepth   int
+	maxSteps   int
+	parentLLM  LLM                   // 只要求 LLM（Run 内部自己按接口能力选 tools/ctx）
+	parentSys  string                // 主 system（子 agent 个性化指令层）
+	pm         *plugins.Manager      // 共享插件注册表（只读复制工具清单）
+	jobNotify  func(note string)     // 结果回灌：完成通知塞进主循环可见通道
+	onProgress func(id, line string) // 进度推送（GAP-S3 收尾）：每步进度行回调，nil = 关闭
+	persister  func(SubagentHandle)  // 终态落盘（GAP-S4）：快照交调用方持久化，nil = 不落盘
+	permission *PermissionGate       // 权限门禁（GAP-S2）：与主代理共用同一实例，nil = 无门禁
+	// compactor / tuner：子代理上下文压缩与弱模型宽容（2026-11-15 审计修复）。
+	// 此前子代理这两项恒 nil → 「自带压缩/纠错」不成立，长任务会撞上下文上限。
+	compactor   *Compactor
+	tuner       *WeakModelTuner
+	customTypes map[string]AgentType // 用户自定义子代理类型（GAP-S1 第二层），nil = 无
+	sem         chan struct{}        // 并发上限
 }
 
 // SetOnProgress 注册进度推送回调（GAP-S3 收尾：推送式可见性）。nil = 关闭。
@@ -180,6 +184,12 @@ type SubagentConfig struct {
 	// JobNotify 子代理完成时调用，note 作为「【后台任务完成】」注入主循环。
 	// nil 时结果仍可通过 get_subagent 查询，但不自动回灌。
 	JobNotify func(note string)
+	// Compactor 子代理的上下文压缩器（2026-11-15 审计修复）。
+	// 此前子代理 Compactor 恒 nil → 头注释宣称的「自带压缩」不成立，
+	// 长任务子代理会撞上游上下文上限后直接失败。nil = 不压缩（保持旧行为）。
+	Compactor *Compactor
+	// Tuner 弱模型宽容策略（重试/解析降级）。nil = 不启用。
+	Tuner *WeakModelTuner
 }
 
 func NewSubagentManager(cfg SubagentConfig) *SubagentManager {
@@ -192,16 +202,58 @@ func NewSubagentManager(cfg SubagentConfig) *SubagentManager {
 		pm:         cfg.Plugins,
 		jobNotify:  cfg.JobNotify,
 		permission: cfg.Permission,
+		compactor:  cfg.Compactor,
+		tuner:      cfg.Tuner,
 		sem:        make(chan struct{}, defaultMaxConcurrent),
 	}
 }
+
+// maxRetainedSubagents 已终态句柄的保留上限（2026-11-15 审计修复）。
+//
+// 此前 sm.subs 只增不减：长跑进程里每派一个子任务就永久留一个句柄（含完整
+// Result 文本与进度缓冲）。超出上限时按创建顺序淘汰最老的**终态**句柄；
+// 运行中的一律保留（get/cancel/steer 还要用）。
+const maxRetainedSubagents = 200
 
 // register 把句柄真正写进 subs —— 旧实现最致命的缺失：Launch 造了句柄
 // 却从不登记，导致 get/list/cancel 全部 "not found"，派出去就是孤儿。
 func (sm *SubagentManager) register(h *SubagentHandle) {
 	sm.mu.Lock()
 	sm.subs[h.ID] = h
+	sm.pruneLocked()
 	sm.mu.Unlock()
+}
+
+// pruneLocked 淘汰超限的终态句柄（调用方必须已持锁）。
+func (sm *SubagentManager) pruneLocked() {
+	if len(sm.subs) <= maxRetainedSubagents {
+		return
+	}
+	// 按 ID 数字序（ID 单调递增，等价于创建顺序）收集终态句柄
+	type cand struct {
+		id  string
+		num int64
+	}
+	var finals []cand
+	for id, h := range sm.subs {
+		if h == nil {
+			continue
+		}
+		switch h.State {
+		case SubagentSucceeded, SubagentFailed, SubagentCancelled:
+			var n int64
+			fmt.Sscanf(id, "sub-%d", &n)
+			finals = append(finals, cand{id: id, num: n})
+		}
+	}
+	if len(finals) == 0 {
+		return
+	}
+	sort.Slice(finals, func(i, j int) bool { return finals[i].num < finals[j].num })
+	excess := len(sm.subs) - maxRetainedSubagents
+	for i := 0; i < len(finals) && i < excess; i++ {
+		delete(sm.subs, finals[i].id)
+	}
 }
 
 // setState 在锁内安全更新句柄状态（子 goroutine 与主 goroutine 都会写）。
@@ -439,6 +491,16 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 	// 权限门禁继承（GAP-S2）：与主代理共用同一 gate 实例——模式运行时可变、
 	// 子代理里的确认与主代理共用 askMu 串行化（TUI 单槽不覆盖弹窗）。
 	child.Permission = sm.permission
+	// 上下文压缩 + 弱模型宽容继承（2026-11-15 审计修复）：头注释说子代理
+	// 「自带解析/纠错/压缩」，实际这两个字段此前都是 nil。
+	if sm.compactor != nil {
+		child.Compactor = sm.compactor
+	}
+	if sm.tuner != nil {
+		// 用 Clone：子代理要有独立的解析失败/重试计数，不能与主代理共用
+		// （主代理每轮 Run 开头 Reset，会把子代理的计数一起清掉）。
+		child.Tuner = sm.tuner.Clone()
+	}
 	// 进度上报（GAP-S3）：子循环每步/每次工具调用回调一行摘要，写进句柄缓冲
 	//（get_subagent 的 progress 字段与 /subagents 的「进度」行读取）。
 	// 写锁保护；只留最近 maxSubagentProgress 条。推送回调锁外调用：

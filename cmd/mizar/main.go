@@ -795,6 +795,11 @@ func main() {
 		ParentSys:  a.System,
 		Plugins:    pm,
 		Permission: permGate,
+		// 上下文压缩 + 弱模型宽容（2026-11-15 审计修复）：此前子代理这两项恒 nil，
+		// 长任务会撞上下文上限直接失败。注意 Compactor 是共享实例：它只读取
+		// ContextWindow/Reserve/Keep 策略，统计状态在每次 Compact 调用内局部计算。
+		Compactor: a.Compactor,
+		Tuner:     a.Tuner,
 		JobNotify: func(note string) {
 			// 复用 Jobs.DrainDone() 已挂进主循环(loop.go:655)的完成通知通道：
 			// Start 一个瞬时即完的任务，DrainDone 会把 note 注入主对话。

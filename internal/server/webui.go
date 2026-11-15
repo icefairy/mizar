@@ -388,6 +388,11 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 			errJSON(w, http.StatusNotFound, "conversation not found")
 			return
 		}
+		// 释放该会话的 Agent 实例（2026-11-15 审计修复：agentPool.drop 此前
+		// 零调用 → byConv 只增不减，每个实例都持有 Initial 历史，长期跑内存只涨不落）。
+		if s.pool != nil {
+			s.pool.drop(id)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		errJSON(w, http.StatusMethodNotAllowed, "method not allowed")

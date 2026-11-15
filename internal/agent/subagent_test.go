@@ -927,3 +927,71 @@ func TestSubagentPermissionDeniesWriteInPlanMode(t *testing.T) {
 		t.Fatal("plan 门禁下子代理的 edit 不应真实执行")
 	}
 }
+
+// TestSubagentInheritsCompactorAndTuner 审计修复回归：子代理必须拿到压缩器与
+// 独立的宽容策略实例（此前两者恒 nil，「自带压缩」不成立）。
+func TestSubagentInheritsCompactorAndTuner(t *testing.T) {
+	pm := testManager(t)
+	comp := &Compactor{ContextWindow: 100000, ReserveTokens: 1000, KeepRecentTokens: 2000}
+	tuner := DefaultTuner()
+	sm := NewSubagentManager(SubagentConfig{
+		ParentLLM: &scriptLLM{},
+		Plugins:   pm,
+		Compactor: comp,
+		Tuner:     tuner,
+	})
+	if sm.compactor != comp {
+		t.Error("Compactor 未注入")
+	}
+	if sm.tuner != tuner {
+		t.Error("Tuner 未注入")
+	}
+	// Clone 后应是不同实例（独立计数）
+	cloned := tuner.Clone()
+	if cloned == tuner {
+		t.Error("Tuner.Clone 应返回新实例")
+	}
+	if cloned.maxParseFailures != tuner.maxParseFailures {
+		t.Error("Clone 应保留配置")
+	}
+}
+
+func TestWeakModelTunerCloneNil(t *testing.T) {
+	var t0 *WeakModelTuner
+	if got := t0.Clone(); got != nil {
+		t.Error("nil Clone 应返回 nil")
+	}
+}
+
+// TestSubagentPruneRetained 审计修复回归：终态句柄超上限要淘汰，运行中的保留。
+func TestSubagentPruneRetained(t *testing.T) {
+	sm := NewSubagentManager(SubagentConfig{ParentLLM: &scriptLLM{}, Plugins: testManager(t)})
+	sm.mu.Lock()
+	for i := 0; i < maxRetainedSubagents+50; i++ {
+		h := &SubagentHandle{ID: fmt.Sprintf("sub-%d-1", i+1), State: SubagentSucceeded}
+		sm.subs[h.ID] = h
+	}
+	// 一个运行中的，必须保住
+	live := &SubagentHandle{ID: "sub-99999-1", State: SubagentRunning}
+	sm.subs[live.ID] = live
+	sm.pruneLocked()
+	sm.mu.Unlock()
+
+	sm.mu.RLock()
+	n := len(sm.subs)
+	_, liveOK := sm.subs[live.ID]
+	sm.mu.RUnlock()
+	if n > maxRetainedSubagents {
+		t.Errorf("应淘汰到 ≤ %d，实际 %d", maxRetainedSubagents, n)
+	}
+	if !liveOK {
+		t.Error("运行中的句柄不应被淘汰")
+	}
+	// 最老的应被淘汰
+	sm.mu.RLock()
+	_, oldest := sm.subs["sub-1-1"]
+	sm.mu.RUnlock()
+	if oldest {
+		t.Error("最老的终态句柄应被淘汰")
+	}
+}
