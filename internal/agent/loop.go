@@ -164,6 +164,11 @@ type Agent struct {
 	// 只在真正发生压缩后注入一次，且注入内容用 KindNormal 的 user 消息（不进 todo 回放）。
 	TodoInject func() string
 
+	// OnTranscript 可选：Run 结束时回调本次完整消息流（含 system/时间提示/历史/新对话）。
+	// 用途：子代理需要把自己的对话历史留下来，供 delegate_task(action=continue) 续跑。
+	// 在 Run 返回前调用一次（defer），msgs 是快照副本，调用方可安全保存。
+	OnTranscript func(msgs []Message)
+
 	// CurrentTask 最近/正在执行的任务（Run 开始时记录）。
 	// 为何需要：a.Initial 只在 Run 结束后才追加本次对话，因此运行中执行
 	// /handoff 时无从得知「当前在做什么」——而交接文档最该写的恰恰是这个。
@@ -657,6 +662,11 @@ func (a *Agent) Run(task string) (reply string, err error) {
 	// 供压缩回调把切点换算成会话消息条数。
 	histEnd := len(msgs)
 	msgs = append(msgs, Message{Role: RoleUser, Content: task})
+	// 子代理对话留档：Run 返回前把本次消息流交给调用方（delegate continue 用）。
+	// 注意 defer 捕获的是变量 msgs 本身——后续 msgs = fin.Msgs 的重赋值它能看见。
+	if a.OnTranscript != nil {
+		defer func() { a.OnTranscript(msgs) }()
+	}
 	// 标记人类直接消息（用于 goal create/edit/pause/resume 权限校验）
 	if a.GoalService != nil {
 		a.GoalService.MarkHumanTurn()

@@ -78,6 +78,16 @@ type SubagentHandle struct {
 	child  *Agent             `json:"-"` // 运行中的子 Agent（供 Steer 注入纠正）
 
 	progress []string // 运行中进度（child.OnStep 写入，sm.mu 保护）；快照时截取到 Progress
+
+	// Transcript 子代理自己的对话历史（P1，2026-11-15）：child.OnTranscript 在
+	// 每次 Run 结束时写入。供 delegate_task(action=continue) 续跑——重建 child 时
+	// 把它灌进 Initial，子代理就「记得」上次说过什么、改过哪些文件。
+	// 落盘时只保留可读消息（工具结果可能巨大，见 transcriptForPersist）。
+	Transcript []Message `json:"transcript,omitempty"`
+	// Request 原始派发参数（continue 时要沿用 role/model/working_dir/工具白名单）。
+	Request SubagentLaunchRequest `json:"request,omitempty"`
+	// Continues 续跑次数（continue 一次 +1），供观测。
+	Continues int `json:"continues,omitempty"`
 }
 
 // maxSubagentProgress 进度缓冲上限：只留最近 N 条，防长任务把句柄撑爆。
@@ -92,7 +102,10 @@ func (h *SubagentHandle) snapshot() SubagentHandle {
 		Result: h.Result, Error: h.Error,
 		StepsUsed: h.StepsUsed, Batch: h.Batch,
 		TokensIn: h.TokensIn, TokensOut: h.TokensOut,
-		Progress: append([]string(nil), h.progress...),
+		Progress:   append([]string(nil), h.progress...),
+		Transcript: transcriptForPersist(h.Transcript),
+		Request:    h.Request,
+		Continues:  h.Continues,
 	}
 }
 
@@ -346,6 +359,7 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 			Model:      req.Model, // 未指定时为空，runSubagent 里回显实际值
 			WorkingDir: req.WorkingDir,
 			Batch:      batchID,
+			Request:    req,
 		}
 		sm.register(h)
 		handles = append(handles, h)
@@ -360,6 +374,11 @@ func (sm *SubagentManager) launchBatch(reqs []SubagentLaunchRequest, depth int) 
 
 // runSubagent 跑一个子 agent：独立 Agent 实例 → 原生 Run() 主循环。
 func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequest) {
+	sm.runSubagentInner(h, req, nil)
+}
+
+// runSubagentInner 同 runSubagent，可带初始对话历史（续跑用，P1）。
+func (sm *SubagentManager) runSubagentInner(h *SubagentHandle, req SubagentLaunchRequest, prior []Message) {
 	// 并发上限：拿不到槽就排队（不丢弃任务）。
 	//
 	// 排队超时与执行超时必须分开：早前两段共用 req.TimeoutSecs，排队 250s 才拿到槽
@@ -528,6 +547,17 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 		sm.mu.Lock()
 		h.TokensIn += d.Usage.PromptTokens
 		h.TokensOut += d.Usage.CompletionTokens
+		sm.mu.Unlock()
+	}
+	// 续跑（P1）：把上一轮对话历史灌进 Initial，子代理因此「记得」上次做了什么。
+	if len(prior) > 0 {
+		child.Initial = append([]Message(nil), prior...)
+	}
+	// 对话留档（P1）：Run 结束时把消息流存进句柄，供后续 continue。
+	// 注意 OnTranscript 会被 defer 调用，此时 h 仍活着（不依赖 h.child）。
+	child.OnTranscript = func(msgs []Message) {
+		sm.mu.Lock()
+		h.Transcript = transcriptForPersist(msgs)
 		sm.mu.Unlock()
 	}
 	// 把 child 存进句柄，供 Steer(id, msg) 在任务运行中注入纠正消息。
@@ -895,7 +925,9 @@ func DelegateTool(sm *SubagentManager) plugins.Tool {
 		"单个用 {\"goal\":\"...\",\"context\":\"...\",\"max_steps\":30}。异步返回句柄 id，用 get_subagent 查结果，list_subagents 看全部，运行中可用 steer_subagent 纠偏。" +
 		"role 四选一：leaf(默认，独立执行)、implement(动手实现)、explore(只读调研)、review(只读审查)；explore/review 的写类工具(edit/write)被强制摘除，只出结论。" +
 		"有先后依赖的子任务先记 todo（action=add, blocked_by），完成回灌会自动解锁后继；tasks[] 里只放互相独立的。上下文与主对话隔离。" +
-		"隔离实验：先 worktree_create 建独立 git worktree，再把其路径传 working_dir——子代理的 bash/read/write/grep/find/ls 都会锚定到该目录，改动不污染主工作区。"
+		"隔离实验：先 worktree_create 建独立 git worktree，再把其路径传 working_dir——子代理的 bash/read/write/grep/find/ls 都会锚定到该目录，改动不污染主工作区。" +
+		"续跑：已完成/失败/取消的子代理可以追加一轮——{\"action\":\"continue\",\"id\":\"sub-3\",\"message\":\"把刚改的地方补测试\"}；" +
+		"它会带着上一轮的对话历史继续（沿用原 role/model/working_dir），适用「改完再补测试」「接着排查」这类接续工作。运行中的请改用 steer_subagent。"
 	if types := sm.AgentTypes(); len(types) > 0 {
 		var sb strings.Builder
 		sb.WriteString("\n可用自定义子代理类型（role 直接传类型名，工具集/模型/行为按类型定义执行）：")
@@ -909,6 +941,23 @@ func DelegateTool(sm *SubagentManager) plugins.Tool {
 		Description: desc,
 		Run: func(args string) (string, error) {
 			args = unwrapArgsJSON(args)
+			// P1 续跑：{"action":"continue","id":"sub-3","message":"..."}
+			// 给已终态的子代理追加一轮，沿用原 role/model/working_dir 与工具白名单。
+			var cont struct {
+				Action  string `json:"action"`
+				ID      string `json:"id"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal([]byte(args), &cont) == nil && strings.EqualFold(cont.Action, "continue") {
+				if strings.TrimSpace(cont.ID) == "" {
+					return `{"error": "continue 需要 id"}`, fmt.Errorf("delegate_task continue: id required")
+				}
+				h, err := sm.Continue(cont.ID, cont.Message)
+				if err != nil {
+					return fmt.Sprintf(`{"error": %q}`, err.Error()), err
+				}
+				return marshalHandles(sm, []*SubagentHandle{h}), nil
+			}
 			var batch struct {
 				Tasks []SubagentLaunchRequest `json:"tasks"`
 			}
