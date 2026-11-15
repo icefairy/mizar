@@ -171,7 +171,7 @@ peek()    # 只读
 
 | 优先级 | 项 | 工作量 | 理由 |
 |---|---|---|---|
-| **P0** | **敏感信息脱敏 `internal/redact`** | ~150 行 | **真实缺口**（会话/导出/日志/错误回填全裸奔），不是「借鉴」 |
+| **P0** ✅已完成 | **敏感信息脱敏 `internal/redact`** | ~300 行 | **真实缺口**（会话/导出/日志全裸奔）——`b7aabd9` 已落地 |
 | P1 | 子代理 `action=continue`（续跑终态子代理） | ~120 行 | 需要补落子代理 transcript；对长任务链很有用 |
 | P2 | `review_signals` 双计数器 + 只读语义 | ~60 行 | 直接改进刚修好的 BackgroundReview |
 | P3 | 插件 ctx：先做 `redact_text`，后考虑「回合后回调 + 预算 + 白名单」 | ~80 / ~300 行 | 插件生态能力面的第一步 |
@@ -199,3 +199,12 @@ peek()    # 只读
        security: redact_phone_numbers 等一批脱敏 fix
        tools: FTS 命中与 live context 同源时正确披露
 ```
+
+
+---
+
+## 附：本次已落地（2026-11-15）
+
+| 项 | commit | 内容 |
+|---|---|---|
+| 敏感信息脱敏 | `b7aabd9` | `internal/redact`：26 条前缀族 + 键值对 + PEM + 手机号(opt-in)；接 session.Append / exporter / diag.Logf；`config security_redact` 开关；10 项测试 |
