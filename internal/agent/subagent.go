@@ -64,6 +64,11 @@ type SubagentHandle struct {
 	Error      string        `json:"error,omitempty"`
 	StepsUsed  int           `json:"steps_used,omitempty"`
 	Batch      string        `json:"batch,omitempty"` // 同一次 fan-out 的批次 id
+	// TokensIn/TokensOut 本子任务累计 token 用量（GAP-S5）：流式路径的 usage 分片
+	// 累加（prompt 每次调用含全量历史，总和即「处理过的 token」口径，可评估成本）。
+	// 非流式 LLM / 网关不下发 usage 时为 0（best-effort 计量）。
+	TokensIn  int `json:"tokens_in,omitempty"`
+	TokensOut int `json:"tokens_out,omitempty"`
 
 	// Progress 最近 N 条运行步骤（get_subagent / /subagents 可见；运行中持续更新，
 	// 终态后保留最后一批供事后查看）。快照字段，由 snapshot() 从 progress 复制。
@@ -86,6 +91,7 @@ func (h *SubagentHandle) snapshot() SubagentHandle {
 		Depth: h.Depth, Role: h.Role, Model: h.Model, WorkingDir: h.WorkingDir,
 		Result: h.Result, Error: h.Error,
 		StepsUsed: h.StepsUsed, Batch: h.Batch,
+		TokensIn: h.TokensIn, TokensOut: h.TokensOut,
 		Progress: append([]string(nil), h.progress...),
 	}
 }
@@ -447,6 +453,18 @@ func (sm *SubagentManager) runSubagent(h *SubagentHandle, req SubagentLaunchRequ
 			f(h.ID, step)
 		}
 	}
+	// token 计量（GAP-S5）：子循环走流式路径（OnLLMStream 非空时 loop 优先选
+	// CancellableStreamToolCallLLM），usage 分片累加进句柄。顺带收益：子代理
+	// 的在途 LLM 请求也支持 ESC 取消。网关不下发 usage / 非流式回退时保持 0。
+	child.OnLLMStream = func(step int, d StreamDelta) {
+		if d.Usage == nil {
+			return
+		}
+		sm.mu.Lock()
+		h.TokensIn += d.Usage.PromptTokens
+		h.TokensOut += d.Usage.CompletionTokens
+		sm.mu.Unlock()
+	}
 	// 把 child 存进句柄，供 Steer(id, msg) 在任务运行中注入纠正消息。
 	sm.mu.Lock()
 	h.child = child
@@ -739,6 +757,9 @@ func (sm *SubagentManager) RenderSubagentsForHuman() string {
 		}
 		if h.StepsUsed > 0 {
 			fmt.Fprintf(&sb, "  %d步", h.StepsUsed)
+		}
+		if h.TokensIn > 0 || h.TokensOut > 0 {
+			fmt.Fprintf(&sb, "  tokens:%d入/%d出", h.TokensIn, h.TokensOut)
 		}
 		fmt.Fprintf(&sb, "\n     任务：%s\n", truncate(h.Goal, 80))
 		// 最近一步（当前在干什么）；终态后 Progress 保留最后一批供事后查看

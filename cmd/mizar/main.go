@@ -26,6 +26,7 @@ import (
 	"mizar/internal/config"
 	"mizar/internal/context"
 	"mizar/internal/diag"
+	"mizar/internal/userhooks"
 	"mizar/internal/engine"
 	"mizar/internal/jobs"
 	"mizar/internal/llm"
@@ -766,6 +767,41 @@ func main() {
 	// 拼在用户自定义指令之后，不覆盖 a.System 本身。
 	if g := agent.DelegationGuide(); g != "" {
 		a.System = a.System + "\n" + g
+	}
+	// 用户级 hooks（C-6）：config.json hooks 段配 shell 命令响应工具事件，
+	// pre_tool_use 可 deny/rewrite（exit 2 或 stdout JSON），post_tool_use 只观察。
+	// a.Hooks 需在此确保非空（Run 内才惰性创建，注册挂载点必须先有实例）。
+	if a.Hooks == nil {
+		a.Hooks = agent.NewHooks()
+	}
+	if cfgH, err := config.Load(config.DefaultPath()); err == nil && !cfgH.Hooks.Empty() {
+		hookLogf := func(format string, args ...any) { diag.Logf("userhooks", format, args...) }
+		if fn := cfgH.Hooks.PreToolDecision(hookLogf); fn != nil {
+			a.Hooks.OnToolCallDecision(func(ctx *agent.HookContext) (agent.Decision, string) {
+				r := fn(ctx.Tool, ctx.Args, ctx.SessionID)
+				switch r.Decision {
+				case userhooks.DecisionDeny:
+					return agent.DecisionDeny, r.Reason
+				case userhooks.DecisionRewrite:
+					if strings.TrimSpace(r.NewTool) != "" {
+						ctx.Tool = r.NewTool
+					}
+					if r.NewArgs != "" {
+						ctx.Args = r.NewArgs
+					}
+					return agent.DecisionRewrite, r.Reason
+				}
+				return agent.DecisionAllow, ""
+			})
+		}
+		if fn := cfgH.Hooks.PostToolObserve(hookLogf); fn != nil {
+			a.Hooks.OnToolResult(func(ctx *agent.HookContext) error {
+				fn(ctx.Tool, ctx.Args, ctx.Result, ctx.Err, ctx.SessionID)
+				return nil
+			})
+		}
+		log.Printf("用户级 hooks 已接线: pre_tool_use=%d post_tool_use=%d",
+			len(cfgH.Hooks.PreToolUse), len(cfgH.Hooks.PostToolUse))
 	}
 	// Skill Manager 工具（agent 可自创 skill）
 	pm.RegisterBuiltin(builtins.SkillManagerTool(skillsDir))
@@ -1646,6 +1682,38 @@ func main() {
 				return fmt.Sprintf("✓ 权限模式已切换为 %s（立即生效，主代理与子代理共用同一门禁；已持久化到 %s）", m, config.DefaultPath()), nil
 			}
 			return "", fmt.Errorf("用法: /permission 查看 ｜ /permission auto|default|acceptEdits|plan ｜ /permission reset")
+		},
+	})
+	// 内置 /hooks 命令：查看用户级 hooks 配置（C-6，只读展示 + 用法提示）
+	a.Commands.Register(agent.Command{
+		Name:        "hooks",
+		Description: "查看用户级 hooks（config.json hooks 段，shell 命令响应工具事件；修改 config 后重启生效）",
+		Run: func(args string) (string, error) {
+			cfg, err := config.Load(config.DefaultPath())
+			if err != nil {
+				return "", fmt.Errorf("读取配置失败: %v", err)
+			}
+			if cfg.Hooks.Empty() {
+				return `（未配置用户级 hooks）
+在 config.json（` + config.DefaultPath() + `）加 hooks 段，用 shell 命令响应工具事件：
+  "hooks": {
+    "pre_tool_use":  [{"command": "检查脚本.sh", "timeout_ms": 10000}],
+    "post_tool_use": [{"command": "审计脚本.sh"}]
+  }
+上下文经 stdin 传 JSON（tool/args/session/cwd；另注入 MIZAR_HOOK=1 环境变量）。
+pre_tool_use 裁决：stdout 输出 {"decision":"deny","reason":"..."} 或 {"decision":"rewrite","tool":"...","args":"..."}；
+exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行，不阻塞主流程。`, nil
+			}
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "用户级 hooks（%s）：\n", config.DefaultPath())
+			for _, h := range cfg.Hooks.PreToolUse {
+				fmt.Fprintf(&sb, "  pre_tool_use:  %s（超时 %dms）\n", h.Command, h.TimeoutMs)
+			}
+			for _, h := range cfg.Hooks.PostToolUse {
+				fmt.Fprintf(&sb, "  post_tool_use: %s（超时 %dms）\n", h.Command, h.TimeoutMs)
+			}
+			sb.WriteString("\n裁决: stdout JSON {\"decision\":\"deny|rewrite\",\"reason\":...} 或 exit 2；失败放行不阻塞主流程")
+			return sb.String(), nil
 		},
 	})
 	// 内置 /compact 命令：手动触发上下文压缩

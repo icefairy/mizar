@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mizar/internal/engine"
+	"mizar/internal/userhooks"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -64,6 +65,9 @@ type Config struct {
 	// acceptEdits（写类放行，bash 危险命令需确认）| plan（只读放行，写类拒绝）。
 	// 空 = auto，保持现行为。
 	PermissionMode string `json:"permission_mode,omitempty"`
+	// Hooks 用户级 hooks（C-6，internal/userhooks）：shell 命令响应工具事件，
+	// pre_tool_use 可 deny/rewrite（exit 2 或 stdout JSON {"decision":...}）。
+	Hooks *userhooks.Config `json:"hooks,omitempty"`
 }
 
 // Provider 一个已记住的 LLM 供应商配置。
