@@ -197,7 +197,12 @@ func (br *BackgroundReview) buildReviewPrompt(lastResponse string, msgs []Messag
 			sb.WriteString(truncate(body, 4000))
 			sb.WriteString("\n```\n\n")
 		} else {
-			sb.WriteString("（该技能尚不存在——如果这轮确实产生了项目相关的可复用知识，就创建它）\n\n")
+			sb.WriteString("（该技能尚不存在——如果这轮确实产生了项目相关的可复用知识，就创建它）\n")
+			if trs := br.projectSkillTriggers(); len(trs) > 0 {
+				sb.WriteString("创建时 frontmatter 请写 `triggers: [" + strings.Join(trs, ", ") + "]`，")
+				sb.WriteString("这样用户以后提到项目名时这条技能能被检索召回。\n")
+			}
+			sb.WriteString("\n")
 		}
 	}
 
@@ -215,6 +220,40 @@ func (br *BackgroundReview) buildReviewPrompt(lastResponse string, msgs []Messag
 		sb.WriteString(fmt.Sprintf("[%s] %s\n", role, content))
 	}
 	return sb.String()
+}
+
+// projectSkillTriggers 由 WorkDir 推导项目技能的触发词（项目名 + 路径片段）。
+//
+// 为什么必须自动带：项目技能靠「任务里提到项目名」召回。如果只写 description
+// 里一句泛泛的说明，用户说「帮我改下 mizar」时词法可能匹配不上——把项目目录名
+// 及其各级父目录名都塞进 triggers，召回率立刻上来（这是召回优先的取舍）。
+func (br *BackgroundReview) projectSkillTriggers() []string {
+	if br == nil || strings.TrimSpace(br.cfg.WorkDir) == "" {
+		return nil
+	}
+	clean := filepath.Clean(br.cfg.WorkDir)
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	base := filepath.Base(clean)
+	add(base)
+	// 父目录名有时才是用户称呼（如 /data/codes/mizar 里的 codes 太泛，跳过单字符/通用词）
+	parent := filepath.Base(filepath.Dir(clean))
+	for _, generic := range []string{"codes", "code", "src", "data", "home", "root", "work", "projects", "www", "opt", "tmp", ".", "/"} {
+		if strings.EqualFold(parent, generic) {
+			parent = ""
+			break
+		}
+	}
+	add(parent)
+	return out
 }
 
 // projectSkillName 由 WorkDir 推导项目技能名（如 /data/codes/mizar → project-mizar）。

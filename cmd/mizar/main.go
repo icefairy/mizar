@@ -626,7 +626,10 @@ func main() {
 	skMode := "index"
 	skPrompt := ""
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillInjectIsIndex() {
-		skPrompt = skm.RenderIndex()
+		// 系统提示只放「常驻 + 按名序前 N」——刻意不放全部：
+		// 技能会随项目数量增长，全量注入会把上下文吃光。
+		// 与本次任务相关的那些在 Run 里按任务文本补一段（Agent.SkillRelevant）。
+		skPrompt = skm.RenderRelevant("", skills.RelevanceOptions{})
 	} else {
 		skMode = "full"
 		skPrompt = skm.RenderAll()
@@ -635,6 +638,13 @@ func main() {
 		log.Printf("技能注入 %d 个 (%s)", len(skLoaded), skMode)
 	}
 	a.SkillsPrompt = skPrompt
+	// 按本次任务再补一段相关技能（不破坏 system 前缀缓存：它作为消息插入）。
+	a.SkillRelevant = func(task string) string {
+		if cfg, err := config.Load(config.DefaultPath()); err == nil && !cfg.SkillInjectIsIndex() {
+			return "" // full 模式已经全量注入，不重复
+		}
+		return skm.RenderRelevant(task, skills.RelevanceOptions{})
+	}
 	// AGENTS.md 自动读取（全局 ~/.mizar/AGENTS.md + 局部向上查找，相加注入）
 	wd := *workDir
 	if wd == "" {
@@ -891,6 +901,10 @@ func main() {
 	for _, t := range builtins.JobTools(a.Jobs) {
 		pm.RegisterBuiltin(t)
 	}
+	// 技能检索工具（2026-11-15）：技能很多时系统提示只列最相关的几条，
+	// 其余用 skill_search 按关键词找回（按需加载，不占常驻上下文）。
+	pm.RegisterBuiltin(builtins.SkillSearchTool(skm))
+
 	// 结构化长期记忆工具（C-7）：写入后刷新注入段，使新事实当轮即可见。
 	pm.RegisterBuiltin(builtins.MemoryTool(memStore, func() {
 		if memInject {

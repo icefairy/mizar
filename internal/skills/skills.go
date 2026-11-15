@@ -28,6 +28,17 @@ type Skill struct {
 	// CreatedBy 创建者（frontmatter `created_by`，如 agent / user / learn）。
 	// 技能图谱用它区分「学来的」与「预置的」。
 	CreatedBy string
+	// Triggers 触发词（frontmatter `triggers: [a, b]`），用于**相关性检索**。
+	// 项目技能会自动带上项目名/路径片段，保证「聊到 xx 项目」能召回它。
+	Triggers []string
+	// SearchText 预计算的检索文本（name + description + triggers + category 小写）。
+	// 相关性打分用它，避免每次现拼。
+	SearchText string
+	// DescTokens 描述的分词缓存（懒计算，见 relevance.go Score）。
+	DescTokens map[string]bool
+	// AlwaysOn 是否常驻注入（frontmatter `always: true`）。
+	// 用于少数必须总在视野里的技能；默认 false——技能按相关性按需注入。
+	AlwaysOn bool
 }
 
 // Render 生成注入 system prompt 的文本。
@@ -162,10 +173,21 @@ func (m *Manager) LoadAll() (loaded []string, failed map[string]error) {
 		}
 		s.Path = c.file
 		s.Category = categoryFromRel(c.rel)
+		s.SearchText = buildSearchText(s)
+		s.DescTokens = tokenize(s.Description) // 预计算，避免每次打分现切
 		m.skills[s.Name] = s
 		loaded = append(loaded, c.rel)
 	}
 	return loaded, failed
+}
+
+// buildSearchText 拼出技能的相关性检索文本（全部小写）。
+// 刻意包含 name/description/triggers/category：项目技能的 triggers 里会带
+// 项目名与路径片段，这样「聊到 xx 项目」能直接命中。
+func buildSearchText(s Skill) string {
+	parts := []string{s.Name, s.Description, s.Category}
+	parts = append(parts, s.Triggers...)
+	return strings.ToLower(strings.Join(parts, " "))
 }
 
 // categoryFromRel 从技能文档相对路径推导分类：
@@ -321,6 +343,10 @@ func parseSkill(source, body string) (Skill, error) {
 				s.CreatedBy = val
 			case "related_skills", "related":
 				s.Related = parseRelatedList(val)
+			case "triggers", "trigger", "keywords":
+				s.Triggers = parseRelatedList(val)
+			case "always", "always_on":
+				s.AlwaysOn = strings.EqualFold(val, "true") || val == "1"
 			}
 		}
 		rest := strings.Join(lines[end+1:], "\n")

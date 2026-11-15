@@ -164,6 +164,13 @@ type Agent struct {
 	// 只在真正发生压缩后注入一次，且注入内容用 KindNormal 的 user 消息（不进 todo 回放）。
 	TodoInject func() string
 
+	// SkillRelevant 可选：按「本次任务文本」挑选相关技能段（返回注入文本，空=不注入）。
+	// 由 main.go 接成 skm.RenderRelevant(task, opt)。
+	//
+	// 为什么不在系统提示里做：system prompt 要字节稳定（前缀缓存）。技能随任务变化，
+	// 只能作为**消息**插在 system 之后、历史之前——那一段本来就不在缓存前缀里。
+	SkillRelevant func(task string) string
+
 	// ReviewSignals 自学习节奏双计数器（P2）：记忆看用户轮数、技能看工具迭代数。
 	// 在 Run 开头初始化（按 BackgroundReview 的阈值），每轮/每次工具调用推进；
 	// StepEnd 钩子通过 HookContext.ReviewSignals 读到快照。
@@ -670,6 +677,13 @@ func (a *Agent) Run(task string) (reply string, err error) {
 	}
 	if notice := HistoryTimeNotice(a.Initial, TimeNow()); notice != "" {
 		msgs = append(msgs, Message{Role: RoleUser, Kind: KindSummary, Content: "【时间提示】" + notice})
+	}
+	// 按任务相关性注入技能（2026-11-15）：技能库可能有很多条，系统提示只放常驻/前 N 个，
+	// 真正相关的按本��任务再补一段。放在 system 之后、历史之前——不破坏缓存前缀。
+	if a.SkillRelevant != nil {
+		if rel := strings.TrimSpace(a.SkillRelevant(task)); rel != "" {
+			msgs = append(msgs, Message{Role: RoleSystem, Content: rel})
+		}
 	}
 	msgs = append(msgs, a.Initial...)
 	// histLen 记录「会话消息」在 msgs 中的结束位置（前缀 + Initial 之后），

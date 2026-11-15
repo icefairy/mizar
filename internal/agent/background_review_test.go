@@ -270,3 +270,34 @@ func TestProjectSkillEndToEnd(t *testing.T) {
 		t.Errorf("旧内容应保留（模型做合并）:\n%s", b)
 	}
 }
+
+// TestProjectSkillTriggers 项目技能自动带触发词（保证「聊到 xx 项目」能召回）。
+func TestProjectSkillTriggers(t *testing.T) {
+	br := NewBackgroundReview(BackgroundReviewConfig{WorkDir: "/data/codes/mizar"})
+	trs := br.projectSkillTriggers()
+	if len(trs) == 0 || trs[0] != "mizar" {
+		t.Errorf("首个触发词应为项目目录名，got %v", trs)
+	}
+	// 通用父目录（codes）应被跳过
+	for _, tr := range trs {
+		if strings.EqualFold(tr, "codes") {
+			t.Errorf("通用父目录不该进触发词: %v", trs)
+		}
+	}
+	// 空 WorkDir → 空
+	if got := NewBackgroundReview(BackgroundReviewConfig{}).projectSkillTriggers(); len(got) != 0 {
+		t.Errorf("空 WorkDir 应无触发词，got %v", got)
+	}
+}
+
+// TestPromptSuggestsTriggers 新建项目技能时提示词要建议 triggers。
+func TestPromptSuggestsTriggers(t *testing.T) {
+	br := NewBackgroundReview(BackgroundReviewConfig{
+		SkillsDir: t.TempDir(),
+		WorkDir:   "/data/codes/mizar",
+	})
+	p := br.buildReviewPrompt("回复", nil)
+	if !strings.Contains(p, "triggers") {
+		t.Errorf("新建技能时应建议写 triggers:\n%s", p)
+	}
+}
