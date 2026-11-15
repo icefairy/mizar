@@ -1133,6 +1133,33 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 
 ---
 
+## 与 Hermes Agent 的对比
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research）是另一个定位的参考对象：**云端常驻的多平台消息机器人 + 自进化研究代理**（Python，191k 行，22 个消息平台，学习闭环）。Mizar 与它**不是同一赛道**——一个要「拷一个文件到内网就跑」，一个要「在云端 VM 上 7×24 服务 22 个聊天平台」。
+
+| 维度 | Hermes | Mizar |
+|---|---|---|
+| 定位 | 云端常驻 / 多平台消息 / 研究代理 | 离线内网 CLI 编码 Agent |
+| 部署 | Python + venv + node_modules（3.2G） | 静态 Go 二进制，零依赖 |
+| 内嵌编译器 | — | ✅ Zig 工具链（`/zig init` 现场编 C/Zig） |
+| WASM 计算内核 | — | ✅ Zig→wasm（wazero 纯 Go） |
+| 插件 | Python + manifest | TS/JS 单文件热重载 |
+| 消息平台网关 | ✅ 22 个（telegram/discord/slack/whatsapp/…） | ❌ 定位外（可用 MCP/插件外挂） |
+| 会话全文搜索 | ✅ SQLite FTS5（4 种模式） | ❌ **可补**（依赖已在，~300 行） |
+| 学习闭环 | ✅ 自动建技能 + 记忆图谱 + 反思 | 🟡 background_review + 技能周报，无图谱 |
+| 终端后端 | ✅ 6 种（local/docker/ssh/daytona/modal/singularity） | 🟡 仅本地 shell（docker/ssh 值得补） |
+| 多模态 | ✅ vision/image_gen/video_gen/tts(18)/asr/computer_use(18) | 🟡 图片识别 + 图片读取，其余靠 MCP |
+| 多凭据池 | ✅ 同 provider 多 key 轮换 + 模型冷却 | ❌ 仅多供应商收藏夹 |
+| 子代理委派 | ✅ delegate_task（10+ 文件） | ✅ delegate_task（单文件，含进度/落盘/嵌套/steer） |
+| 工具按需加载 | ✅ tool_search/describe/call 三桥接 + BM25 | ✅ tool_search（关键词匹配） |
+| 代码量 | 191k 行 Python | 76k 行 Go |
+
+**结论**：Mizar 在「极简 / 离线 / 自举（内嵌编译器 + wasm）」上更彻底；Hermes 在「生态广度（消息平台、多模态、学习闭环）」上是另一个量级。Mizar 值得借鉴的三项已写入路线图：**会话全文搜索（H-1）、todo 压缩后重注入（H-2）、memory 字符预算（H-3）**。
+
+完整逐项对比见 [docs/hermes-comparison.md](docs/hermes-comparison.md)。
+
+---
+
 ## 关联项目
 
 开阳生态下的配套项目，可独立部署或组合使用：

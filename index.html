@@ -365,6 +365,23 @@ worktree_create {"branch":"exp"}
         </table>
       </div>
       <p style="color:var(--muted);font-size:13px;margin-top:8px">完整对比分析见 <a href="docs/pi-comparison.md">docs/pi-comparison.md</a>。</p>
+  <h3 style="margin-top:26px">与 Hermes Agent 的对比</h3>
+  <p style="color:var(--muted);font-size:13.5px">Hermes Agent（Nous Research）是「云端常驻 + 22 个消息平台 + 学习闭环」的 Python 研究代理（191k 行），与 Mizar「离线单文件」定位不同，不是同一赛道。</p>
+  <div style="overflow-x:auto">
+    <table>
+      <tr><th>维度</th><th>Hermes</th><th>Mizar</th></tr>
+      <tr><td>定位</td><td>云端常驻 / 消息机器人 / 研究代理</td><td>离线内网 CLI 编码 Agent</td></tr>
+      <tr><td>部署</td><td>Python + venv（3.2G）</td><td>静态 Go 二进制，零依赖</td></tr>
+      <tr><td>内嵌编译器</td><td>—</td><td>✅ Zig（现场编 C/Zig）</td></tr>
+      <tr><td>WASM 内核</td><td>—</td><td>✅ Zig→wasm（wazero）</td></tr>
+      <tr><td>消息平台网关</td><td>✅ 22 个</td><td>❌ 定位外</td></tr>
+      <tr><td>会话全文搜索</td><td>✅ SQLite FTS5</td><td>❌ 可补</td></tr>
+      <tr><td>终端后端</td><td>✅ 6 种（含 docker/ssh/modal）</td><td>🟡 仅本地</td></tr>
+      <tr><td>多模态全家桶</td><td>✅ vision/tts/asr/computer_use</td><td>🟡 图片；其余靠 MCP</td></tr>
+      <tr><td>多凭据池</td><td>✅ 同 provider 多 key + 冷却</td><td>❌ 仅多供应商</td></tr>
+    </table>
+  </div>
+  <p style="color:var(--muted);font-size:13px;margin-top:8px">完整逐项对比见 <a href="docs/hermes-comparison.md">docs/hermes-comparison.md</a>。</p>
     </section>
 
     <footer>

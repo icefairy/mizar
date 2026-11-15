@@ -214,6 +214,20 @@ model: 主模型    # 可省略，继承父级
 
 ---
 
+## 四·五、与 Hermes Agent 的对比（2026-11-15 新增）
+
+Hermes Agent（Nous Research，191k 行 Python，22 个消息平台）与 Mizar 定位不同赛道，逐子系统对比见 **`docs/hermes-comparison.md`**。
+
+从 hermes 提炼的、值得 Mizar 补的三项（已进入待办）：
+
+| 编号 | 项 | 说明 | 工作量 |
+|---|---|---|---|
+| H-1 | 会话全文搜索（FTS5） | hermes `session_search` 796 行，SQLite FTS5 索引全部会话，4 种模式（搜索/上下文窗口/整段/列表），cron 会话降权。Mizar 只能靠 `/sessions` 列表 + grep 文件 | ~300 行 |
+| H-2 | todo 压缩后重注入 | hermes `format_for_injection` 在每次压缩后重新注入 pending/in_progress todo（完成项不注入）；Mizar 压缩后 todo 从模型视野消失 | ~50 行 |
+| H-3 | memory 字符预算分类型 | hermes MEMORY.md 2200 字符 / USER.md 1375 字符硬上限 + 冻结快照；Mizar 是 8000 字节/200 条，可细化为按类型分预算 | ~30 行 |
+
+**明确不学**：消息平台网关（22 平台 = 22 份维护）、自研浏览器/TTS/ASR/computer_use（用 MCP）、serverless 后端（modal/daytona，与离线定位冲突）。
+
 ## 五、涉及文件索引
 
 | 文件 | 内容 |
@@ -229,6 +243,7 @@ model: 主模型    # 可省略，继承父级
 | `internal/builtins/worktree_tool.go` | worktree_create/leave/list 工具 |
 | `internal/agent/workdir_wrap.go` | working_dir 工具锚定（C-8 配套：bash 前置 cd，路径类工具拼相对路径） |
 | `internal/agent/tool_index.go` | 延迟工具加载（C-9：ActiveTools/延迟索引/tool_search/会话级已加载集合） |
+| `docs/hermes-comparison.md` | 与 Hermes Agent 逐子系统对比（2026-11-15，H-1~H-3 待办来源） |
 | `internal/trust/trust.go` | 项目信任（P-5：project_trust.json 判定/ProjectResources/Ensure） |
 | `internal/exporter/exporter.go` | 会话导出 HTML（P-6：自包含文档/代码高亮/工具折叠块/HTML 转义） |
 | `internal/agent/image_sink.go` | 图片读取（P-7：待注入队列/ImageMIME/attachPendingImages） |
