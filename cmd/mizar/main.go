@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -2647,6 +2648,13 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 			os.Exit(0)
 		}()
 		if err := srv.Start(); err != nil {
+			// 主动 Shutdown（上面信号处理）会让 ListenAndServe 返回
+			// http.ErrServerClosed —— 这是正常退出，不是异常。
+			// 之前的实现把它当成错误打印「❌ Server 运行异常退出」并以 1 退出，
+			// 在 systemd/supervisor 下会被误判为崩溃并触发无意义重启。
+			if errors.Is(err, http.ErrServerClosed) {
+				return
+			}
 			fmt.Fprintf(os.Stderr, "\n❌ Server 运行异常退出: %v\n", err)
 			os.Exit(1)
 		}
