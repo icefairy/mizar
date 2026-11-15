@@ -1,3 +1,25 @@
+## [未发布] — 2026-11-15（夜·六）项目技能沉淀 + 子代理续跑 + 自学习节奏 + 插件安全面
+
+> 来源：hermes 新版本对比里值得吸纳的设计（详见 `docs/hermes-update-2026-11-15.md`）
+
+### ✨ 新增
+
+- **项目技能沉淀**：和一个项目聊过之后，后台复盘把它总结成 `project-<目录名>` 技能，
+  **写进全局技能库**（`~/.mizar/skills/`），下次在同项目里开工时一加载即恢复相关记忆。
+  - 复盘提示词带「当前项目路径 + 本项目技能名 + 该技能现有内容」（read-before-write）
+  - 已存在 → `update_skill`（增量合并，绝不丢旧内容）；不存在 → `new_skill`
+  - `new_skill` 遇已存在文件直接跳过——后台复盘不会冲掉用户手写的技能
+  - 写入后自动重载技能索引，**当轮即生效**
+- **子代理续跑**（`delegate_task {"action":"continue","id":"sub-3","message":"..."}`）：
+  给已终态的子代理追加一轮，沿用原 role/model/working_dir，带着上一轮对话历史继续
+  （`Agent.OnTranscript` 留档 → `transcriptForPersist` 裁剪 → 灌进 child.Initial）
+- **自学习节奏双计数器**（`ReviewSignals`）：记忆看用户轮数、技能看工具迭代数，
+  不再混用一个计数器；`HookContext.ReviewSignals` 在 StepEnd 提供只读快照
+- **插件安全能力面**：
+  - `redact_text` / `redact_text_phone` 宿主函数（插件可脱敏工具结果）
+  - 宿主函数调用预算（`hook_budget(n)` + `SetHostBudget`）：挡「一次回调调一万次」
+    这类超时挡不住的数量放大，只计量有 I/O 的 11 个函数
+
 ## [未发布] — 2026-11-15（夜·五）修复审计发现的 8 个「假功能」
 
 > 主题：**功能兑现审计与修复** —— 详见 `docs/audit-feature-gaps.md`。

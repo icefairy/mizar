@@ -1203,3 +1203,19 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 | **璇玑网关** | [icefairy/xuanji](https://github.com/icefairy/xuanji) | API 网关，为开阳 Agent 提供多供应商模型路由、鉴权与流量管理 |
 | **飞鹤输入法** | [icefairy/feihe](https://github.com/icefairy/feihe) | 开源输入法，支持自定义词库与插件扩展 |
 | **HMEM 记忆系统** | [icefairy/hmem_hermes_agent](https://github.com/icefairy/hmem_hermes_agent) | 分布式长期记忆后端，为开阳 Agent 提供 HMEM 服务端记忆模式（见 §4.1） |
+
+### 25. 项目技能沉淀（聊过的项目自动总结成技能）
+和某个项目聊过之后，后台复盘会把**这个项目的相关内容**沉淀成一条技能；下次再在这个项目里干活，这条技能一加载就等于恢复了该项目的相关记忆。
+
+- **写在全局技能库**：`~/.mizar/skills/project-<目录名>/SKILL.md`（不写进项目目录，换机器/换 checkout 都还在）
+- **增量更新而非覆盖**：复盘时先把该技能的**现有内容**喂给模型（read-before-write），已存在的走 `update_skill`（合并、不丢旧内容）；不存在才 `new_skill`。用户手写的技能绝不会被后台覆盖
+- **只记耐用的东西**：项目用途/目录结构/构建测试命令/必须遵守的约定/踩过的坑/外部端点路径；一次性任务结果与流水账不记
+- **当轮即生效**：写入后自动重载技能索引并失效提示缓存，不用等重启
+- 触发节奏：技能侧按**工具调用迭代数**（默认每 3 次工具调用评估一次），记忆侧按**用户轮数**
+
+```
+# 首次在某项目里聊几轮后
+ls ~/.mizar/skills/project-<目录名>/SKILL.md   # 自动生成
+/skills                                        # 列表里能看到它
+# 下次同项目开工，它已在系统提示的技能索引里
+```
