@@ -19,6 +19,9 @@ type Engine struct {
 	closed      bool
 	callTimeout time.Duration
 	runTimeout  time.Duration
+	// hostBudget 宿主函数调用预算（P3）：防「一次回调里调一万次」这类放大攻击。
+	// nil = 不限（默认，保持现行为）。
+	hostBudget *hostBudget
 }
 
 const defaultTimeout = 30 * time.Second
@@ -121,9 +124,20 @@ func New(host *HostFuncs) (*Engine, error) {
 
 func (e *Engine) registerHostFuncs() error {
 	h := e.host
+	// guarded 包装需要预算的宿主函数（有 I/O 的：网络/文件/DB/MCP/子进程）。
+	// 纯函数（分词/编解码/token 计数/wasm）不计量——它们没有放大风险，
+	// 计量反而给正常的高频调用（如逐条 tokenize）加错误。
+	guarded := func(name string, fn any) {
+		e.vm.Set(name, wrapBudget(e, name, fn))
+	}
 	reg := func(name string, fn any) {
 		_ = e.vm.Set(name, fn)
 	}
+	// 预算控制面（插件可用）：hook_budget(n) 收紧/放开当前引擎的调用预算。
+	reg("hook_budget", func(n int) string {
+		e.SetHostBudget(n)
+		return fmt.Sprintf("宿主函数预算已设为 %d（<=0 表示不限）", n)
+	})
 	// 纯函数标准库（无 I/O、零副作用），引擎创建时无条件注册
 	registerStdlib(reg)
 	// 中文+英文分词宿主函数（seg_cut / seg_pos）
@@ -132,14 +146,16 @@ func (e *Engine) registerHostFuncs() error {
 	registerMem(reg)
 	// Zig→wasm 计算内核（wasm_invoke / wasm_invoke_b64 / wasm_kernels）
 	registerWasm(reg)
+	// 敏感信息脱敏（redact_text / redact_text_phone）——P3，插件安全能力面
+	registerRedact(reg)
 	if h.HTTPGet != nil {
-		reg("http_get", h.HTTPGet)
+		guarded("http_get", h.HTTPGet)
 	}
 	if h.HTTPPost != nil {
-		reg("http_post", h.HTTPPost)
+		guarded("http_post", h.HTTPPost)
 	}
 	if h.HTTPRequest != nil {
-		reg("http_request", h.HTTPRequest)
+		guarded("http_request", h.HTTPRequest)
 	}
 	if h.JSONDecode != nil {
 		reg("json_decode", h.JSONDecode)
@@ -148,19 +164,19 @@ func (e *Engine) registerHostFuncs() error {
 		reg("json_encode", h.JSONEncode)
 	}
 	if h.FSRead != nil {
-		reg("fs_read", h.FSRead)
+		guarded("fs_read", h.FSRead)
 	}
 	if h.FSReadRange != nil {
-		reg("fs_read_range", h.FSReadRange)
+		guarded("fs_read_range", h.FSReadRange)
 	}
 	if h.FSWrite != nil {
-		reg("fs_write", h.FSWrite)
+		guarded("fs_write", h.FSWrite)
 	}
 	if h.FSList != nil {
-		reg("fs_list", h.FSList)
+		guarded("fs_list", h.FSList)
 	}
 	if h.ShellExec != nil {
-		reg("shell_exec", h.ShellExec)
+		guarded("shell_exec", h.ShellExec)
 	}
 	if h.LSPRegisterDiagnostic != nil {
 		reg("lsp_register_diagnostic", h.LSPRegisterDiagnostic)
@@ -201,16 +217,16 @@ func (e *Engine) registerHostFuncs() error {
 		reg("ws_emit", h.WSEmit)
 	}
 	if h.DBQuery != nil {
-		reg("db_query", h.DBQuery)
+		guarded("db_query", h.DBQuery)
 	}
 	if h.DBExecBatch != nil {
-		reg("db_exec_batch", h.DBExecBatch)
+		guarded("db_exec_batch", h.DBExecBatch)
 	}
 	if h.DBClose != nil {
 		reg("db_close", h.DBClose)
 	}
 	if h.MCPCall != nil {
-		reg("mcp_call", h.MCPCall)
+		guarded("mcp_call", h.MCPCall)
 	}
 	if h.HookOn != nil {
 		// hook_on(eventName, jsCallback)：goja 对 (string,error) 多返回值

@@ -216,6 +216,17 @@ FTP 客户端登录（仅客户端，不提供服务器）。超时 10s。`},
 关闭 WS 连接。`},
 
 	// ---- 中文分词 ----
+	{Name: "redact_text", Brief: "敏感信息脱敏：把文本里的 API key/令牌/私钥/密码替换成掩码", Full: `redact_text(text) -> string
+redact_text_phone(text) -> string   // 额外脱敏手机号
+
+何时用：插件工具结果里可能含密钥（命令行参数、配置片段、报错信息）时，
+先过一遍再返回，避免明文进模型上下文 / 文件 / 日志。
+
+覆盖：sk-/ghp_/AKIA/AQ./xoxb-/AIza/glpat- 等 26 类厂商前缀、api_key=/password=
+这类键值对（保留键名只掩值）、PEM 私钥整段。掩码保留前 4 后 4 位便于排查。
+
+示例: redact_text("key=sk-proj-AbCdEf0123456789GhIjKl")
+      // "key=sk-p***GhIjKl"`},
 	{Name: "seg_cut", Brief: "中文+英文分词，返回词列表", Full: `seg_cut(text) -> string[]
 对中英文混排文本做精确+HMM分词，过滤标点/空白/空串，返回词列表。
 英文按单词切分（小写），中文按词典切词。
