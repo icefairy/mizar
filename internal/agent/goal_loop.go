@@ -8,6 +8,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -102,7 +103,19 @@ func (gl *GoalLoop) EvaluateAfterTurn(lastResponse string) (bool, string, error)
 
 	// 检查质量门禁
 	cwd := gl.cwd // 由 SetCwd 注入（空则用进程当前目录）
-	allPassed, failedIdx, exitCode, output := gl.gs.EvaluateGates(cwd)
+	// 用 Detailed 版本拿 GateResult：同一工作区状态重试到头后不再盲目续跑
+	// （2026-11-15 审计修复：MaxRetries/Attempts 此前只有字段无逻辑）。
+	failedIdx, gres, allPassed := gl.gs.EvaluateGatesDetailed(context.Background(), cwd)
+	exitCode, output := gres.ExitCode, gres.OutputTail
+	if !allPassed && failedIdx >= 0 && gres.Exhausted {
+		// 工作区没变、重试次数用尽：明确停下，不再让模型空转
+		gl.active.Store(false)
+		return false, fmt.Sprintf(
+			"[Goal gate exhausted] 门禁命令连续失败 %d 次且工作区状态未变，已停止自动续跑。\n"+
+				"  命令: %s\n  退出码: %d\n  输出尾部:\n```\n%s\n```\n\n"+
+				"请先实质性修改代码（或用 /goal pause 手动接管），再 /goal resume 继续。",
+			gres.Attempts, g.Gates[failedIdx].Command, exitCode, output), nil
+	}
 	if !allPassed && failedIdx >= 0 {
 		gate := g.Gates[failedIdx]
 		// 门禁失败：直接返回 continuation prompt（不经过 judge），让模型修到通过为止。

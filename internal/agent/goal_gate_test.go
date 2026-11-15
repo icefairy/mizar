@@ -167,3 +167,47 @@ func TestWorkspaceFPDistinguishesChanges(t *testing.T) {
 		t.Fatalf("non-git dir fingerprint = %q, want empty", fp)
 	}
 }
+
+// TestGateMaxRetriesExhausted 审计修复回归：同一工作区状态失败达上限后 Exhausted。
+func TestGateMaxRetriesExhausted(t *testing.T) {
+	dir := t.TempDir() // 非 git 目录 → WorkspaceFP 为空
+	g := &GoalGate{Command: "exit 1", TimeoutSeconds: 5, MaxRetries: 2}
+	for i := 0; i < 2; i++ {
+		_, code, _, res := g.RunGateFull(context.Background(), dir)
+		if code != 1 {
+			t.Fatalf("退出码应 1，got %d", code)
+		}
+		if i == 0 && res.Exhausted {
+			t.Error("第 1 次失败不应判定为耗尽")
+		}
+		if i == 1 && !res.Exhausted {
+			t.Error("第 2 次失败（MaxRetries=2）应判定为耗尽")
+		}
+	}
+	if g.Attempts != 2 {
+		t.Errorf("Attempts 应 2，got %d", g.Attempts)
+	}
+}
+
+// TestGatePassResetsAttempts 通过后计数归零。
+func TestGatePassResetsAttempts(t *testing.T) {
+	g := &GoalGate{Command: "exit 0", TimeoutSeconds: 5}
+	g.Attempts = 5
+	g.LastFailedFP = "deadbeef"
+	passed, code, _, res := g.RunGateFull(context.Background(), t.TempDir())
+	if !passed || code != 0 || !res.Passed {
+		t.Fatal("应通过")
+	}
+	if g.Attempts != 0 || g.LastFailedFP != "" {
+		t.Errorf("通过后应重置，got attempts=%d fp=%q", g.Attempts, g.LastFailedFP)
+	}
+}
+
+// TestGateEmptyCommandPasses 空命令视为通过（不执行）。
+func TestGateEmptyCommandPasses(t *testing.T) {
+	g := &GoalGate{}
+	passed, _, _, _ := g.RunGateFull(context.Background(), t.TempDir())
+	if !passed {
+		t.Error("空命令应视为通过")
+	}
+}

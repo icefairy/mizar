@@ -116,8 +116,32 @@ func (g *GoalGate) RunGate(cwd string) (bool, int, string) {
 
 // RunGateCtx 与 RunGate 相同，但支持外部传入 context（用于随 Run 取消）。
 func (g *GoalGate) RunGateCtx(ctx context.Context, cwd string) (bool, int, string) {
+	passed, code, tail, _ := g.RunGateFull(ctx, cwd)
+	return passed, code, tail
+}
+
+// GateResult 一次门禁执行的完整结果（含「是否需要重试」判定）。
+type GateResult struct {
+	Passed     bool
+	ExitCode   int
+	OutputTail string
+	// Exhausted true = 已达 MaxRetries 且工作区状态未变，不该再无限重试
+	// （2026-11-15 审计修复：MaxRetries/Attempts/LastFailedFP 此前只有字段无逻辑）。
+	Exhausted bool
+	// Skipped true = 同一工作区状态已失败过且次数用尽，本次直接跳过
+	Skipped  bool
+	Attempts int
+}
+
+// RunGateFull 执行门禁并维护 Attempts / LastFailedFP / MaxRetries 语义：
+//   - 每次失败 Attempts++，并记录工作区指纹（WorkspaceFP）
+//   - 若「同一指纹」失败次数已达 MaxRetries（默认 3），Exhausted=true，
+//     调用方应停止让模型盲目重跑（工作区没变，再跑一次结果必然一样）
+//   - 工作区指纹变化（模型改了代码）→ 计数归零，重新获得 MaxRetries 次机会
+func (g *GoalGate) RunGateFull(ctx context.Context, cwd string) (passed bool, exitCode int, tail string, res GateResult) {
 	if g.Command == "" {
-		return true, 0, ""
+		res.Passed = true
+		return true, 0, "", res
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -136,20 +160,44 @@ func (g *GoalGate) RunGateCtx(ctx context.Context, cwd string) (bool, int, strin
 	configureGateCmd(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.CombinedOutput()
-	tail := string(out)
+	tail = string(out)
 	if len(tail) > gateOutputTailChars {
 		tail = tail[len(tail)-gateOutputTailChars:]
 	}
+	fp := WorkspaceFP(cwd)
+	onFailure := func(code int, out string, exhausted bool) (bool, int, string, GateResult) {
+		g.Attempts++
+		g.LastExitCode = &code
+		g.LastOutputTail = out
+		// 同一工作区状态连续失败才累计；状态变了（模型改过代码）→ 重置
+		if fp != "" && g.LastFailedFP == fp {
+			// 同一指纹再次失败，计数已在上面累加
+		} else {
+			g.LastFailedFP = fp
+		}
+		maxRetry := g.MaxRetries
+		if maxRetry <= 0 {
+			maxRetry = defaultGateMaxRetry
+		}
+		ex := exhausted || g.Attempts >= maxRetry
+		res := GateResult{Passed: false, ExitCode: code, OutputTail: out, Exhausted: ex, Attempts: g.Attempts}
+		return false, code, out, res
+	}
 	if cctx.Err() == context.DeadlineExceeded {
-		return false, -1, tail + fmt.Sprintf("\n[gate timeout after %ds]", timeout)
+		return onFailure(-1, tail+fmt.Sprintf("\n[gate timeout after %ds]", timeout), false)
 	}
 	if err != nil {
+		code := -1
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return false, exitErr.ExitCode(), tail
+			code = exitErr.ExitCode()
 		}
-		return false, -1, tail
+		return onFailure(code, tail, false)
 	}
-	return true, 0, tail
+	// 通过：重置失败状态
+	g.Attempts = 0
+	g.LastFailedFP = ""
+	res = GateResult{Passed: true, ExitCode: 0, OutputTail: tail}
+	return true, 0, tail, res
 }
 
 // WorkspaceFP 工作区指纹（git HEAD + status 的 SHA-256）。
@@ -481,6 +529,23 @@ func (g *GoalService) EvaluateGatesCtx(ctx context.Context, cwd string) (bool, i
 		}
 	}
 	return true, -1, 0, ""
+}
+
+// EvaluateGatesDetailed 与 EvaluateGates 相同，但额外返回失败门禁的 GateResult
+// （含 Exhausted/Attempts），供调用方判断「同一工作区状态已经重试到头」。
+func (g *GoalService) EvaluateGatesDetailed(ctx context.Context, cwd string) (failedIdx int, res GateResult, allPassed bool) {
+	g.mu.RLock()
+	gates := g.goal.Gates
+	g.mu.RUnlock()
+	for i := range gates {
+		passed, code, output, r := gates[i].RunGateFull(ctx, cwd)
+		if !passed {
+			r.ExitCode = code
+			r.OutputTail = output
+			return i, r, false
+		}
+	}
+	return -1, GateResult{Passed: true}, true
 }
 
 // RenderJSON 渲染为目标 JSON。
