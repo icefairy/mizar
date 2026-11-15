@@ -12,10 +12,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	ctxpkg "context"
@@ -2625,6 +2627,25 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 		fmt.Printf("   JSON-RPC:    POST %s/rpc   WebSocket: %s/ws\n", *addr, *addr)
 		fmt.Printf("   Web UI:      http://%s/web/  (用户 %s)\n", hostPort(*addr), webCfg.Username)
 		fmt.Printf("   Ctrl+C 停止服务\n\n")
+		// 优雅退出（2026-11-15 审计修复）：Server.Shutdown 此前全仓零调用，
+		// 也没有任何信号处理 → Ctrl+C 直接杀进程，会话/DB/插件服务器来不及收尾。
+		go func() {
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+			<-sigCh
+			fmt.Printf("\n⏹ 收到退出信号，正在关闭服务…\n")
+			ctx, cancel := ctxpkg.WithTimeout(ctxpkg.Background(), 5*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "关闭异常: %v\n", err)
+			}
+			// 关掉会话搜索索引等资源（若已打开）
+			if ssIdx != nil {
+				_ = ssIdx.Close()
+			}
+			fmt.Printf("✓ 已退出\n")
+			os.Exit(0)
+		}()
 		if err := srv.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "\n❌ Server 运行异常退出: %v\n", err)
 			os.Exit(1)

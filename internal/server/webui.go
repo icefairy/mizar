@@ -967,9 +967,11 @@ func (s *Server) ApplyStoredSettings() {
 }
 
 // setCacheMissEnabled 设置缓存命中率下跌提示开关（进程级）。
-// TUI 模式下通过 config.json 的 CacheMissNotice 控制，Server 模式下此处暂为空操作。
+//
+// 2026-11-15 审计修复：此前是空操作（`_ = v`），WebUI 又没有对应开关 →
+// show_cache_miss 字段形同虚设。现在真正落到 agent 包的进程级开关上。
 func (s *Server) setCacheMissEnabled(v bool) {
-	_ = v
+	agent.SetCacheMissNoticeEnabled(v)
 }
 
 // errString 简单 error 包装。

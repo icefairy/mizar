@@ -1729,6 +1729,7 @@
   const setModel = $("setModel"), setThinking = $("setThinking"), setTemp = $("setTemp"),
     setTopp = $("setTopp"), setMaxTokens = $("setMaxTokens"), setSystem = $("setSystem"),
     setMaxHistory = $("setMaxHistory"), setTitleModel = $("setTitleModel"),
+    setCacheMiss = $("setCacheMiss"),
     tempVal = $("tempVal"), toppVal = $("toppVal"), modelList = $("modelList"), modelHint = $("modelHint");
   let curSettings = {};
   let tempTouched = false, toppTouched = false;
@@ -1740,6 +1741,7 @@
     setMaxTokens.value = curSettings.max_tokens || "";
     setMaxHistory.value = curSettings.max_history || 50;
     setTitleModel.value = curSettings.title_model || "";
+    setCacheMiss.value = curSettings.show_cache_miss ? "1" : "";
     setSystem.value = curSettings.system || "";
     // 快捷行同步
     qkModel.value = curSettings.model || "";
@@ -1791,6 +1793,7 @@
       max_tokens: parseInt(setMaxTokens.value || "0", 10) || 0,
       max_history: parseInt(setMaxHistory.value || "50", 10) || 50,
       title_model: setTitleModel.value.trim(),
+      show_cache_miss: setCacheMiss.value === "1",
       system: setSystem.value,
     };
     if (tempTouched) v.temperature = parseFloat(setTemp.value);

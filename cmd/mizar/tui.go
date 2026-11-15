@@ -159,8 +159,8 @@ type tuiModel struct {
 	sessionID string // 启动时的会话 ID（sessionIDFn 为 nil 时的兜底）
 	// sessionIDFn 动态取当前会话 ID：/session 切换、/fork 分叉在 TUI 内执行后
 	// 落盘目标立即跟随（读 main 持有的 *sessionID）。nil = 用启动时的静态值。
-	sessionIDFn func() string
-	lines       []chatLine
+	sessionIDFn      func() string
+	lines            []chatLine
 	stats            tuiStats
 	userColor        string                // 用户消息颜色（默认 white）
 	aiColor          string                // AI 回复颜色（默认 green）
@@ -1627,6 +1627,7 @@ func newTuiModel(a *agent.Agent, st *session.Store, sid string, titleCache *sess
 		}
 		if cfg.CacheMissNotice != nil && *cfg.CacheMissNotice {
 			m.cacheMissEnabled.Store(true)
+			agent.SetCacheMissNoticeEnabled(true) // 同步全局开关（供 server 侧共用）
 		}
 	}
 	// 若有加载的历史消息，渲染到聊天区

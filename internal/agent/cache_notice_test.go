@@ -5,8 +5,16 @@ import (
 	"testing"
 )
 
+// enableCacheMiss 在用例内开启全局开关（默认关闭是产品语义），返回恢复函数。
+func enableCacheMiss(t *testing.T) {
+	t.Helper()
+	SetCacheMissNoticeEnabled(true)
+	t.Cleanup(func() { SetCacheMissNoticeEnabled(false) })
+}
+
 // 低于阈值的 prompt 太小，比率噪音大，不应产生提示。
 func TestCacheMissSmallPromptNoNotice(t *testing.T) {
+	enableCacheMiss(t)
 	d := NewCacheMissDetector()
 	d.Observe(&Usage{PromptTokens: 3000, CachedTokens: 3000}) // 100% 命中，建立基线
 	got := d.Observe(&Usage{PromptTokens: 100, CachedTokens: 0})
@@ -17,6 +25,7 @@ func TestCacheMissSmallPromptNoNotice(t *testing.T) {
 
 // 命中率从高位跌到低位 → 提示一次。
 func TestCacheMissDetectsDrop(t *testing.T) {
+	enableCacheMiss(t)
 	d := NewCacheMissDetector()
 	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 19000}) // 95%
 	got := d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 1000})
@@ -30,6 +39,7 @@ func TestCacheMissDetectsDrop(t *testing.T) {
 
 // 同一轮下跌只提示一次，不刷屏。
 func TestCacheMissNoticesOncePerDrop(t *testing.T) {
+	enableCacheMiss(t)
 	d := NewCacheMissDetector()
 	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 19000})
 	if d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 1000}) == "" {
@@ -44,6 +54,7 @@ func TestCacheMissNoticesOncePerDrop(t *testing.T) {
 
 // 命中率恢复后再次下跌，应能再次提示。
 func TestCacheMissReFiresAfterRecovery(t *testing.T) {
+	enableCacheMiss(t)
 	d := NewCacheMissDetector()
 	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 19000})
 	d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 1000})  // 提示
@@ -55,6 +66,7 @@ func TestCacheMissReFiresAfterRecovery(t *testing.T) {
 
 // 命中率一直很高不应提示。
 func TestCacheMissStableHighNoNotice(t *testing.T) {
+	enableCacheMiss(t)
 	d := NewCacheMissDetector()
 	for i := 0; i < 5; i++ {
 		if got := d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 19000}); got != "" {
@@ -65,6 +77,7 @@ func TestCacheMissStableHighNoNotice(t *testing.T) {
 
 // 首次请求（无基线）不应提示：没有对比就没有"下跌"。
 func TestCacheMissFirstObservationNoNotice(t *testing.T) {
+	enableCacheMiss(t)
 	d := NewCacheMissDetector()
 	if got := d.Observe(&Usage{PromptTokens: 20000, CachedTokens: 0}); got != "" {
 		t.Fatalf("首次观测无基线，不应提示，得到 %q", got)
@@ -74,6 +87,7 @@ func TestCacheMissFirstObservationNoNotice(t *testing.T) {
 // 服务端不报缓存信息（CachedTokens=0 且无基线）时不应误报；
 // 一旦基线建立后，普通下跌按阈值处理。
 func TestCacheMissNilUsageSafe(t *testing.T) {
+	enableCacheMiss(t)
 	d := NewCacheMissDetector()
 	if got := d.Observe(nil); got != "" {
 		t.Fatalf("nil usage 不应提示，得到 %q", got)

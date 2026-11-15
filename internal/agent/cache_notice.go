@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,16 @@ const (
 	cacheMissLowRate = 0.5
 )
 
+// cacheMissNoticeEnabled 进程级开关（WebUI 设置 / config 控制）。
+// 默认关闭——命中率提示只在显式开启时出现，避免噪音。
+var cacheMissNoticeEnabled atomic.Bool
+
+// SetCacheMissNoticeEnabled 设置缓存未命中提示的全局开关。
+func SetCacheMissNoticeEnabled(on bool) { cacheMissNoticeEnabled.Store(on) }
+
+// CacheMissNoticeEnabled 报告全局开关状态。
+func CacheMissNoticeEnabled() bool { return cacheMissNoticeEnabled.Load() }
+
 // NewCacheMissDetector 创建检测器。
 func NewCacheMissDetector() *CacheMissDetector {
 	return &CacheMissDetector{
@@ -42,6 +53,10 @@ func NewCacheMissDetector() *CacheMissDetector {
 // Observe 观测一次请求用量；命中率显著下跌时返回提示文本，否则返回空串。
 func (d *CacheMissDetector) Observe(u *Usage) string {
 	if d == nil || u == nil || u.PromptTokens < cacheMissMinPromptTokens {
+		return ""
+	}
+	// 全局开关（WebUI 设置 / TUI config）关闭时不做任何判定
+	if !CacheMissNoticeEnabled() {
 		return ""
 	}
 	rate := float64(u.CachedTokens) / float64(u.PromptTokens)
