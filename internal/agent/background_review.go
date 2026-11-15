@@ -39,6 +39,14 @@ type BackgroundReviewConfig struct {
 	// OnMemory 记忆写入回调（推荐）。返回 error 只记录不重试。
 	// main.go 会接成 memoryStore.Add("project", entry)，写入即刷新系统提示。
 	OnMemory func(entry string) error
+	// WorkDir 当前工作目录（用于识别「在哪个项目里干活」）。
+	// review 会把项目名带进提示词，让模型产出/更新**项目技能**——
+	// 下次在同个项目里开工时，这条技能一加载就等于恢复了相关记忆。
+	WorkDir string
+	// ProjectSkillPrefix 项目技能名前缀（默认 "project-"）。
+	// 项目技能一律落在全局技能库（SkillsDir），不写进项目目录——
+	// 这样换个机器/换个 checkout 也还在。
+	ProjectSkillPrefix string
 	// OnReview 回调：每次 review 完成后调用（可选）。
 	OnReview func(summary string)
 }
@@ -48,6 +56,7 @@ func DefaultBackgroundReviewConfig() BackgroundReviewConfig {
 	return BackgroundReviewConfig{
 		MinTurnsBetweenReviews: 3,
 		SkillsDir:              "", // 由调用方设置
+		ProjectSkillPrefix:     "project-",
 	}
 }
 
@@ -98,12 +107,17 @@ func (br *BackgroundReview) Advance(lastResponse string, msgs []Message) {
 // 与 Advance 的区别：不检查轮数阈值、不推进轮次计数——调用方（loop）已经
 // 按 ReviewSignals 的双计数器判定过「该做了」。
 func (br *BackgroundReview) ForceReview() {
+	br.ForceReviewWith("", nil)
+}
+
+// ForceReviewWith 带对话素材的立即复盘（技能侧按工具迭代数到期时由 loop 调用）。
+// lastResponse 与 msgs 都为空时退化为「只按项目上下文判断」——信息量有限，
+// 但仍可能更新项目技能（例如补齐构建命令）。
+func (br *BackgroundReview) ForceReviewWith(lastResponse string, msgs []Message) {
 	if br == nil || !br.Enabled() || br.cfg.AuxLLM == nil {
 		return
 	}
-	// 用最近的对话做复盘素材由 loop 传入更准确，但为了不改调用签名，
-	// 这里只触发「技能沉淀」这一路（skill 侧看的是工具调用模式，不需要全文）。
-	go br.triggerReview("", nil)
+	go br.triggerReview(lastResponse, msgs)
 }
 
 // Interval 返回复盘间隔轮数（供 ReviewSignals 复用同一阈值，避免两处真相）。
@@ -153,8 +167,12 @@ func (br *BackgroundReview) triggerReview(lastResponse string, msgs []Message) {
 	}
 
 	// 执行写操作
-	if result.NewSkill != "" {
-		br.writeNewSkill(result.NewSkillName, result.NewSkill)
+	// update_skill：显式覆盖已有项目技能（模型已按提示做过合并，写回整份即可）。
+	// new_skill：只在不存在时创建，避免把别人（或自己上次）写的内容冲掉。
+	if result.Action == "update_skill" && result.NewSkill != "" {
+		br.writeSkill(result.NewSkillName, result.NewSkill, true)
+	} else if result.NewSkill != "" {
+		br.writeSkill(result.NewSkillName, result.NewSkill, false)
 	}
 	if result.MemoryEntry != "" {
 		br.writeMemory(result.MemoryEntry)
@@ -168,6 +186,21 @@ func (br *BackgroundReview) triggerReview(lastResponse string, msgs []Message) {
 
 func (br *BackgroundReview) buildReviewPrompt(lastResponse string, msgs []Message) string {
 	var sb strings.Builder
+
+	// 项目上下文：告诉模型「你在哪个项目里干活」以及该项目的技能叫什么。
+	// 这是「聊过一个项目 → 沉淀成技能 → 下次加载即恢复记忆」的关键。
+	if name := br.projectSkillName(); name != "" {
+		sb.WriteString("当前工作目录（项目）：" + br.cfg.WorkDir + "\n")
+		sb.WriteString("本项目对应的技能名：**" + name + "**\n\n")
+		if body := br.readProjectSkill(name); body != "" {
+			sb.WriteString("该技能当前内容（请在其基础上**增量更新**，不要丢掉已有内容）：\n```markdown\n")
+			sb.WriteString(truncate(body, 4000))
+			sb.WriteString("\n```\n\n")
+		} else {
+			sb.WriteString("（该技能尚不存在——如果这轮确实产生了项目相关的可复用知识，就创建它）\n\n")
+		}
+	}
+
 	sb.WriteString("最近一轮 AI 回复：\n")
 	sb.WriteString(truncate(lastResponse, 2000))
 	sb.WriteString("\n\n")
@@ -184,23 +217,89 @@ func (br *BackgroundReview) buildReviewPrompt(lastResponse string, msgs []Messag
 	return sb.String()
 }
 
-func buildReviewSystemPrompt() string {
-	return `You are a knowledge distillation assistant. Your job is to analyze an AI agent's recent conversation turn and decide if anything worth remembering was produced.
+// projectSkillName 由 WorkDir 推导项目技能名（如 /data/codes/mizar → project-mizar）。
+// 目录名为空/不可用时返回空串（此时不做项目技能沉淀）。
+func (br *BackgroundReview) projectSkillName() string {
+	if br == nil || strings.TrimSpace(br.cfg.WorkDir) == "" {
+		return ""
+	}
+	base := filepath.Base(filepath.Clean(br.cfg.WorkDir))
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return ""
+	}
+	prefix := br.cfg.ProjectSkillPrefix
+	if prefix == "" {
+		prefix = "project-"
+	}
+	return prefix + sanitizeSkillSlug(base)
+}
 
-Analyze the output and decide ONE of:
-- "new_skill": You identified a reusable procedural pattern (a way to do a specific type of task). Output the skill name and full SKILL.md body.
-- "memory": You identified an important fact or context worth remembering for future turns. Output the memory entry.
+// sanitizeSkillSlug 把目录名转成安全的技能名片段（小写，非字母数字转连字符）。
+func sanitizeSkillSlug(s string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(s) {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash && b.Len() > 0 {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "unnamed"
+	}
+	return out
+}
+
+// readProjectSkill 读已有项目技能正文（不存在返回空串）。
+func (br *BackgroundReview) readProjectSkill(name string) string {
+	if br == nil || br.cfg.SkillsDir == "" || name == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(br.cfg.SkillsDir, name, "SKILL.md"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func buildReviewSystemPrompt() string {
+	return `You are a knowledge distillation assistant. Analyze an AI agent's recent conversation turn and decide whether anything worth remembering was produced.
+
+Decide ONE of:
+- "update_skill": The named project skill already exists and should be EXTENDED (add a rule, a pitfall, a path, a command). Output the FULL new SKILL.md body — merge old content with the new knowledge, never drop what was already there.
+- "new_skill": A reusable procedural pattern worth capturing (a way to do a specific type of task), and no project skill exists yet. Output its name and full SKILL.md body.
+- "memory": An important standalone fact worth remembering (preference, convention, external system). Output the entry.
 - "nothing": Nothing worth persisting.
 
 Reply ONLY with a single JSON object on one line:
+{"action": "update_skill", "skill_name": "project-foo", "skill_body": "..."}
 {"action": "new_skill", "skill_name": "my-skill", "skill_body": "..."}
 {"action": "memory", "entry": "important fact here..."}
 {"action": "nothing"}
 
+PROJECT SKILLS (highest priority when a project is in play):
+- If the prompt names a project skill and that skill already exists, prefer "update_skill" — the whole point
+  is that next time the user works on this project, loading that one skill restores the relevant memory.
+- Project skills are cumulative project notes. Good content: what this project is for, its layout and key
+  files, build/test/run commands, conventions that must be followed, gotchas hit in practice, external
+  endpoints/paths that matter. Bad content: one-off task results, timestamps, "today we fixed X".
+- Patching beats rewriting: keep existing sections, add the new knowledge where it belongs. If a section
+  would grow past ~30 lines, compress it to the rule rather than the transcript.
+- If the project skill does NOT exist yet and this session produced real project knowledge, create it
+  with "new_skill" using exactly the name the prompt suggests.
+
 Rules:
-- A "new_skill" must be a general procedure, not a one-time task result
-- A "memory" must be a factual statement, not a plan or goal
-- Never fabricate skills or memories that weren't clearly demonstrated`
+- "new_skill" must be a general procedure, not a one-time task result.
+- "memory" must be a factual statement, not a plan or goal; one fact per entry.
+- Never fabricate skills or memories that weren't clearly demonstrated in the conversation.
+- If the session produced nothing durable, reply "nothing" — a wrong note misleads every future session.`
 }
 
 func parseReviewResult(text string) (struct {
@@ -239,18 +338,33 @@ func parseReviewResult(text string) (struct {
 	}, nil
 }
 
-func (br *BackgroundReview) writeNewSkill(name, body string) {
-	if name == "" || body == "" {
+// writeSkill 写技能文件。
+//
+// overwrite=false（new_skill）：目标已存在则**跳过**——后台复盘不该覆盖已有内容
+// （可能是用户手写的、或上一轮更完整的版本）。
+// overwrite=true（update_skill）：模型已按要求做过合并，整份写回。
+func (br *BackgroundReview) writeSkill(name, body string, overwrite bool) {
+	if name == "" || body == "" || br.cfg.SkillsDir == "" {
 		return
 	}
 	dir := filepath.Join(br.cfg.SkillsDir, name)
+	path := filepath.Join(dir, "SKILL.md")
+	if !overwrite {
+		if _, err := os.Stat(path); err == nil {
+			return // 已存在，保留原样
+		}
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
-	path := filepath.Join(dir, "SKILL.md")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return
 	}
+}
+
+// writeNewSkill 兼容旧调用点（等价于 writeSkill(..., false)）。
+func (br *BackgroundReview) writeNewSkill(name, body string) {
+	br.writeSkill(name, body, false)
 }
 
 func (br *BackgroundReview) writeMemory(entry string) {

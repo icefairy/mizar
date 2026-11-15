@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -140,5 +141,132 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// ---- 项目技能沉淀（2026-11-15）----
+
+func TestProjectSkillName(t *testing.T) {
+	cases := []struct{ dir, want string }{
+		{"/data/codes/mizar", "project-mizar"},
+		{"/data/codes/My_Project", "project-my-project"},
+		{"/data/codes/hmem-go", "project-hmem-go"},
+		{"/", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		br := NewBackgroundReview(BackgroundReviewConfig{WorkDir: c.dir})
+		if got := br.projectSkillName(); got != c.want {
+			t.Errorf("WorkDir=%q → %q want %q", c.dir, got, c.want)
+		}
+	}
+}
+
+func TestSanitizeSkillSlug(t *testing.T) {
+	cases := map[string]string{
+		"Mizar":        "mizar",
+		"my project":   "my-project",
+		"a__b":         "a-b",
+		"--x--":        "x",
+		"中文项目":         "unnamed",
+		"project_v2.1": "project-v2-1",
+	}
+	for in, want := range cases {
+		if got := sanitizeSkillSlug(in); got != want {
+			t.Errorf("sanitizeSkillSlug(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+// TestReviewPromptIncludesProject 提示词必须带上项目技能名与已有内容（read-before-write）。
+func TestReviewPromptIncludesProject(t *testing.T) {
+	dir := t.TempDir()
+	// 预置一个已有项目技能
+	os.MkdirAll(filepath.Join(dir, "project-mizar"), 0o755)
+	os.WriteFile(filepath.Join(dir, "project-mizar", "SKILL.md"),
+		[]byte("---\nname: project-mizar\n---\n## 构建\nmake build\n"), 0o644)
+
+	br := NewBackgroundReview(BackgroundReviewConfig{
+		SkillsDir: dir,
+		WorkDir:   "/data/codes/mizar",
+	})
+	p := br.buildReviewPrompt("回复内容", nil)
+	if !strings.Contains(p, "project-mizar") {
+		t.Errorf("提示词应含项目技能名:\n%s", p)
+	}
+	if !strings.Contains(p, "make build") {
+		t.Errorf("提示词应含已有技能内容（供增量更新）:\n%s", p)
+	}
+	if !strings.Contains(p, "/data/codes/mizar") {
+		t.Errorf("提示词应含工作目录:\n%s", p)
+	}
+}
+
+// TestReviewPromptNoProject 无 WorkDir 时不带项目段（保持旧行为）。
+func TestReviewPromptNoProject(t *testing.T) {
+	br := NewBackgroundReview(BackgroundReviewConfig{SkillsDir: t.TempDir()})
+	p := br.buildReviewPrompt("回复", nil)
+	if strings.Contains(p, "本项目对应的技能名") {
+		t.Errorf("无 WorkDir 不应有项目段:\n%s", p)
+	}
+}
+
+// TestUpdateSkillOverwrites  update_skill 应覆盖（模型已做合并）。
+func TestUpdateSkillOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "project-x"), 0o755)
+	path := filepath.Join(dir, "project-x", "SKILL.md")
+	os.WriteFile(path, []byte("旧内容"), 0o644)
+
+	br := NewBackgroundReview(BackgroundReviewConfig{SkillsDir: dir})
+	br.writeSkill("project-x", "旧内容 + 新规则", true)
+	b, _ := os.ReadFile(path)
+	if string(b) != "旧内容 + 新规则" {
+		t.Errorf("update_skill 应覆盖，got %q", b)
+	}
+}
+
+// TestNewSkillDoesNotOverwrite new_skill 遇到已存在文件应跳过（不冲掉已有内容）。
+func TestNewSkillDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "existing"), 0o755)
+	path := filepath.Join(dir, "existing", "SKILL.md")
+	os.WriteFile(path, []byte("用户手写的"), 0o644)
+
+	br := NewBackgroundReview(BackgroundReviewConfig{SkillsDir: dir})
+	br.writeSkill("existing", "模型乱写", false)
+	b, _ := os.ReadFile(path)
+	if string(b) != "用户手写的" {
+		t.Errorf("new_skill 不应覆盖已有文件，got %q", b)
+	}
+	// 新建的仍可写
+	br.writeSkill("brand-new", "新技能", false)
+	if _, err := os.Stat(filepath.Join(dir, "brand-new", "SKILL.md")); err != nil {
+		t.Error("新技能应被创建")
+	}
+}
+
+// TestProjectSkillEndToEnd 全链路：update_skill 动作写入项目技能。
+func TestProjectSkillEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "project-demo"), 0o755)
+	skillPath := filepath.Join(dir, "project-demo", "SKILL.md")
+	os.WriteFile(skillPath, []byte("## 旧\n已有知识"), 0o644)
+
+	aux := &countingAux{reply: `{"action":"update_skill","skill_name":"project-demo","skill_body":"## 旧\n已有知识\n\n## 新\n补充的规则"}`}
+	br := NewBackgroundReview(BackgroundReviewConfig{
+		MinTurnsBetweenReviews: 1,
+		AuxLLM:                 aux,
+		SkillsDir:              dir,
+		WorkDir:                "/data/codes/demo",
+	})
+	br.Advance("resp", nil)
+	waitFor(t, 2*time.Second, func() bool {
+		b, err := os.ReadFile(skillPath)
+		return err == nil && strings.Contains(string(b), "补充的规则")
+	})
+	b, _ := os.ReadFile(skillPath)
+	if !strings.Contains(string(b), "已有知识") {
+		t.Errorf("旧内容应保留（模型做合并）:\n%s", b)
 	}
 }

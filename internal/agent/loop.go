@@ -1093,7 +1093,8 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 		if skillDue, _ := a.ReviewSignals.OnToolIteration(); skillDue {
 			a.ReviewSignals.CommitSkillReview()
 			if a.BgReview != nil {
-				a.BgReview.ForceReview()
+				// 带上当前对话素材，否则复盘只能看到项目名、产不出东西
+				a.BgReview.ForceReviewWith("", msgs)
 			}
 		}
 	}

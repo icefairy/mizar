@@ -844,6 +844,10 @@ func main() {
 		MinTurnsBetweenReviews: 3,
 		AuxLLM:                 auxLLM,
 		SkillsDir:              skillsDir,
+		// 项目技能沉淀：把当前工作目录带进去，review 会产出/续写
+		// `project-<目录名>` 技能（落在全局技能库，不写进项目目录）。
+		// 下次在同项目里开工，这条技能一加载即恢复该项目的相关记忆。
+		WorkDir: wd,
 		OnMemory: func(entry string) error {
 			if !memInject {
 				return nil // 记忆自动注入被关闭时不写，避免用户看不到却占存储
@@ -854,7 +858,15 @@ func main() {
 			a.SetMemoryPrompt(memStore.Render()) // 写入即生效
 			return nil
 		},
-		OnReview: func(summary string) { log.Printf("[bg-review] %s", summary) },
+		OnReview: func(summary string) {
+			log.Printf("[bg-review] %s", summary)
+			// 技能可能刚被写入/更新：内存里的 skm 不会自动重扫，必须重载，
+			// 否则新沉淀的项目技能要等下次启动才进系统提示（本该「下次聊到就恢复」
+			// 的语义就断了）。重载后重建技能提示段并失效提示缓存。
+			skm.LoadAll()
+			a.SkillsPrompt = renderSkillsPrompt(skm, cfgSkillMode())
+			a.ReloadTools()
+		},
 	})
 	if bgReviewEnabled {
 		log.Printf("后台自学习已启用：每 3 轮复盘一次，技能写入 %s，记忆写入 MEMORY.md(project)", skillsDir)
