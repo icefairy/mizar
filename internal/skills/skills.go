@@ -22,6 +22,12 @@ type Skill struct {
 	// 空串表示未分类（顶层 `<skill>/SKILL.md` 或 `<name>.md`）。
 	// 对齐 Hermes 的做法：分类即目录，不写进 frontmatter，避免两处真相。
 	Category string
+	// Related 关联技能名（frontmatter `related_skills`，对齐 hermes learning_graph）。
+	// 用于技能图谱连边；引用不存在的技能忽略。
+	Related []string
+	// CreatedBy 创建者（frontmatter `created_by`，如 agent / user / learn）。
+	// 技能图谱用它区分「学来的」与「预置的」。
+	CreatedBy string
 }
 
 // Render 生成注入 system prompt 的文本。
@@ -275,6 +281,10 @@ func parseSkill(source, body string) (Skill, error) {
 				s.Name = val
 			case "description":
 				s.Description = val
+			case "created_by", "createdBy":
+				s.CreatedBy = val
+			case "related_skills", "related":
+				s.Related = parseRelatedList(val)
 			}
 		}
 		rest := strings.Join(lines[end+1:], "\n")
@@ -301,6 +311,23 @@ func parseSkill(source, body string) (Skill, error) {
 		s.Description = s.Name
 	}
 	return s, nil
+}
+
+// parseRelatedList 解析 related_skills 的几种写法：
+//
+//	[a, b] / [a,b] / a, b / a
+func parseRelatedList(val string) []string {
+	val = strings.TrimSpace(val)
+	val = strings.TrimPrefix(val, "[")
+	val = strings.TrimSuffix(val, "]")
+	var out []string
+	for _, part := range strings.Split(val, ",") {
+		p := strings.Trim(strings.TrimSpace(part), `"'`)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // defaultSkillName 从来源路径推断技能名：

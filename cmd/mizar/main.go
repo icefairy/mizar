@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ctxpkg "context"
@@ -29,11 +30,13 @@ import (
 	"mizar/internal/engine"
 	"mizar/internal/exporter"
 	"mizar/internal/jobs"
+	"mizar/internal/learninggraph"
 	"mizar/internal/llm"
 	"mizar/internal/lsp"
 	"mizar/internal/memory"
 	"mizar/internal/plugins"
 	"mizar/internal/prompts"
+	"mizar/internal/reflect"
 	"mizar/internal/schedule"
 	"mizar/internal/server"
 	"mizar/internal/session"
@@ -44,7 +47,13 @@ import (
 	"mizar/internal/userhooks"
 )
 
-var version = "v0.8.8"
+var version = "v0.8.9"
+
+// 进程内工具调用计数（供 /learn reflect 的「高频工具」洞察；不持久化）。
+var (
+	toolUsageMu sync.Mutex
+	toolUsage   = map[string]int{}
+)
 
 // buildTag 标识 Windows 产物用的是哪条构建链，由 -ldflags -X main.buildTag=... 注入。
 //
@@ -572,7 +581,12 @@ func main() {
 
 	// 技能使用统计回调（每次工具调用 +1；周报每周提示，距上次 ≥7 天触发）
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillStatsOn() {
-		pm.SetOnToolCall(func(name string) { stats.Incr(name) })
+		pm.SetOnToolCall(func(name string) {
+			stats.Incr(name)
+			toolUsageMu.Lock()
+			toolUsage[name]++
+			toolUsageMu.Unlock()
+		})
 		// 每周提示使用情况（距上次 ≥7 天触发）
 		if stats.DueReport(time.Now()) {
 			fmt.Printf("\n%s\n", stats.Report(cfg.SkillStatsTop()))
@@ -1819,6 +1833,45 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 			}
 			sb.WriteString("\n裁决: stdout JSON {\"decision\":\"deny|rewrite\",\"reason\":...} 或 exit 2；失败放行不阻塞主流程")
 			return sb.String(), nil
+		},
+	})
+	// 内置 /learn 命令：学习闭环可视化（H-7）——技能图谱 + 反思。
+	a.Commands.Register(agent.Command{
+		Name: "learn",
+		Description: "学习闭环：/learn graph 看技能与记忆的关联图谱 ｜ /learn reflect 反思哪些技能是孤岛/该沉淀。" +
+			"（技能图谱收录「被使用过或 agent 创建」的技能 + 全部结构化记忆）",
+		Run: func(args string) (string, error) {
+			sub := strings.TrimSpace(args)
+			// 重新加载技能目录（模型/用户可能刚用 skill_manage 写了新技能，
+			// 内存里的 skm 不会自动刷新——图谱要看最新状态必须重扫）。
+			skm.LoadAll()
+			// 组装当前图谱
+			memMap, _ := memStore.List("")
+			gr := learninggraph.Build(skm.All(), stats.UsesSnapshot(), memMap)
+			switch {
+			case sub == "" || sub == "graph" || sub == "图谱":
+				return reflect.RenderGraph(gr), nil
+			case sub == "reflect" || sub == "反思":
+				// 统计最近工具使用（从 stats 里拿不到工具计数，用 u 的 Pending 无法——
+				// 这里以技能使用次数为代理，工具计数缺省为空，仍能覆盖技能/记忆维度）
+				toolUsageMu.Lock()
+				tu := make(map[string]int, len(toolUsage))
+				for k, v := range toolUsage {
+					tu[k] = v
+				}
+				toolUsageMu.Unlock()
+				act := reflect.Activity{Graph: gr, SkillCounts: stats.UsesSnapshot(), ToolCounts: tu}
+				ins := reflect.Heuristic(act)
+				return reflect.Render(ins), nil
+			case sub == "json":
+				b, err := json.MarshalIndent(gr, "", "  ")
+				if err != nil {
+					return "", err
+				}
+				return string(b), nil
+			default:
+				return "", fmt.Errorf("用法: /learn graph ｜ /learn reflect ｜ /learn json")
+			}
 		},
 	})
 	// 内置 /search 命令：跨会话全文搜索（H-1，session_search 工具的斜杠入口）

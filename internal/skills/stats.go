@@ -59,6 +59,20 @@ func LoadStats(path string) *Stats {
 }
 
 // Save 持久化（原子写）。
+// UsesSnapshot 返回使用次数的副本（并发安全），供学习图谱等只读消费方使用。
+func (s *Stats) UsesSnapshot() map[string]int {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int, len(s.Uses))
+	for k, v := range s.Uses {
+		out[k] = v
+	}
+	return out
+}
+
 func (s *Stats) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

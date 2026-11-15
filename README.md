@@ -362,6 +362,7 @@ Unix 有 bracketed paste，粘贴本来就是整段处理，不受影响。
 - **`memory`**：结构化长期记忆读写（add / list / remove / count，四分类 user/feedback/project/reference，写后立即注入系统提示）
 - **`worktree_create` / `worktree_leave` / `worktree_list`**：git worktree 隔离，配合 `delegate_task` 的 `working_dir` 在独立工作树里跑实验性改动
 - **`tool_search`**：延迟工具加载——`tool_inject_mode=index` 时按名称/关键词加载被推迟注入的工具 schema
+- **`session_search`**：跨全部历史会话的全文检索（SQLite FTS5 增量索引；搜索/上下文/整段/列表四模式）
 其他能力：文件模糊搜索（`files_fuzzy`）、大文件有界分段读取（`fs_read_range`，单次 4MB）、文档格式解析（PDF/DOCX/XLSX）、图片读取（多模态网关，`image_read` 开）、Bash 详细截断警告、原生 OpenAI function calling 工具调用。
 
 ### 3. 宿主函数（Host Functions）
@@ -755,6 +756,35 @@ mizar -export -c -export-out last.html             # 导出全局最后一次会
 ### 21. 图片读取（P-7，需多模态网关）
 `config.json` 设 `image_read: true` 后，`read` 工具遇到图片文件（png / jpg / jpeg / gif / webp / bmp，≤8MB）不再走文本，而是把图片作为**视觉附件**随下一条消息发送（LLM 层编码为 OpenAI 多模态 `content` 数组，`data:` URI）。默认关闭，避免向非多模态端点发 content 数组；单轮上限 8 张。
 
+### 22. 学习闭环：技能图谱 + 反思（H-7）
+对齐 Hermes 的 learning graph：把「学到的东西」变成看得见的图谱，并把图谱翻译成可执行的改进建议。
+
+- **图谱**（`/learn graph`）：节点 = 技能（带使用次数/分类/创建者）+ 结构化记忆条目；边 = SKILL.md frontmatter 的 `related_skills`（显式关联）+ 记忆↔技能的**中英混合词法重叠**（2-gram，阈值 ≥2 分，滤掉单字偶然重叠）。附带密度统计：孤立节点占比、分类分布、agent 创建数。
+- **反思**（`/learn reflect`）：纯启发式、不依赖 LLM，四类可执行洞察——孤岛技能 / 高频工具模式值得沉淀 / 记忆与技能脱节 / 大量技能从未使用。
+- **JSON**（`/learn json`）：给前端或其他工具消费。
+- 技能 frontmatter 新增两个字段：`related_skills: [a, b]`、`created_by: agent|user|learn`。图谱只收录「有学习信号」的技能（被使用过 或 agent/learn 创建），预置但从未用的技能不进图。
+
+```
+/learn graph      # 技能与记忆的关联图谱 + 孤立节点
+/learn reflect    # 我该补哪些关联 / 哪些技能该删 / 哪些习惯该沉淀
+```
+
+### 23. 会话全文搜索（H-1）
+`session_search` 工具 + `/search` 命令：跨全部历史会话按内容检索（此前只能 `/sessions` 看列表再手动 grep 文件）。
+
+- **SQLite FTS5 增量索引**（`~/.mizar/sessions/search.db`），`tokenize=trigram`——中文、英文都能子串命中；按文件字节偏移只索引新增行，删除的会话自动清索引。
+- 只索引读得懂的部分（用户/助手消息、摘要、工具调用参数），跳过工具长输出与压缩/分叉/子代理元数据行。
+- 查询词 <3 字符（trigram 索引不到）时自动退化为 LIKE，短词也能搜。
+- 四种用法：`{query}` 搜索 ｜ `{session_id, seq}` 看上下文 ｜ `{session_id}` 整段回看 ｜ `{}` 列出已索引会话。
+
+```
+/search hermes          # 找「之前聊过 hermes 的会话」
+/search                 # 列出已索引会话
+```
+
+### 24. 待办压缩后重注入（H-2）
+上下文压缩会把 `todo` 工具的历史结果摘要掉，模型随即「忘记」还有哪些事没做完——表现为压缩后突然说「已完成」或重复开工。现在压缩成功后立刻把**未完成的待办**重新注入消息流（只注 pending，完成项不注以免模型重做），对齐 Hermes 的 `format_for_injection`。
+
 ---
 
 ## 快速开始
@@ -851,15 +881,18 @@ mizar/
 │   ├── exporter/           # 会话导出 HTML（自包含单文件，-export/`/export`）
 │   ├── llm/                # LLM 客户端（OpenAI 兼容协议）
 │   ├── lsp/                # LSP 客户端 + 服务器
+│   ├── learninggraph/      # 技能图谱（H-7：技能/记忆节点 + 关联边 + 密度统计）
 │   ├── memory/             # 结构化长期记忆（四分类 MEMORY.md，自动注入）
 │   ├── mcp/                # MCP 客户端（stdio/HTTP）
 │   ├── needle/             # needle 协议支持
 │   ├── plugins/            # 插件加载器（扫描 .ts → 编译 → 注册工具）
 │   ├── prompts/            # Prompt 模板加载与展开
+│   ├── reflect/            # 反思引擎（H-7：孤岛技能/高频工具/记忆脱节洞察）
 │   ├── repo/               # 仓库地图（repo_map 工具）
 │   ├── schedule/           # 定时提醒
 │   ├── server/             # HTTP/RPC/WebSocket 服务器
 │   ├── session/            # 会话管理（JSONL 持久化 + 压缩记录）
+│   ├── sessionsearch/      # 会话全文搜索（H-1：FTS5 增量索引）
 │   ├── skills/             # SKILL.md 加载器（解析 frontmatter → 注入上下文）
 │   ├── trust/              # 项目信任（project_trust.json，首次进入询问）
 │   ├── utils/              # 通用工具函数
@@ -1145,8 +1178,8 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 | WASM 计算内核 | — | ✅ Zig→wasm（wazero 纯 Go） |
 | 插件 | Python + manifest | TS/JS 单文件热重载 |
 | 消息平台网关 | ✅ 22 个（telegram/discord/slack/whatsapp/…） | ❌ 定位外（可用 MCP/插件外挂） |
-| 会话全文搜索 | ✅ SQLite FTS5（4 种模式） | ❌ **可补**（依赖已在，~300 行） |
-| 学习闭环 | ✅ 自动建技能 + 记忆图谱 + 反思 | 🟡 background_review + 技能周报，无图谱 |
+| 会话全文搜索 | ✅ SQLite FTS5（4 种模式） | ✅ FTS5 增量索引 + 四模式（H-1） |
+| 学习闭环 | ✅ 自动建技能 + 记忆图谱 + 反思 | ✅ 技能图谱 + 反思（H-7）+ background_review |
 | 终端后端 | ✅ 6 种（local/docker/ssh/daytona/modal/singularity） | 🟡 仅本地 shell（docker/ssh 值得补） |
 | 多模态 | ✅ vision/image_gen/video_gen/tts(18)/asr/computer_use(18) | 🟡 图片识别 + 图片读取，其余靠 MCP |
 | 多凭据池 | ✅ 同 provider 多 key 轮换 + 模型冷却 | ❌ 仅多供应商收藏夹 |
@@ -1154,7 +1187,7 @@ Mizar 参考了 [Pi Agent](https://github.com/mariozechner/pi) 的设计理念�
 | 工具按需加载 | ✅ tool_search/describe/call 三桥接 + BM25 | ✅ tool_search（关键词匹配） |
 | 代码量 | 191k 行 Python | 76k 行 Go |
 
-**结论**：Mizar 在「极简 / 离线 / 自举（内嵌编译器 + wasm）」上更彻底；Hermes 在「生态广度（消息平台、多模态、学习闭环）」上是另一个量级。Mizar 值得借鉴的三项已写入路线图：**会话全文搜索（H-1）、todo 压缩后重注入（H-2）、memory 字符预算（H-3）**。
+**结论**：Mizar 在「极简 / 离线 / 自举（内嵌编译器 + wasm）」上更彻底；Hermes 在「生态广度（消息平台、多模态、学习闭环）」上是另一个量级。**已落地三项**：会话全文搜索（H-1）、todo 压缩后重注入（H-2）、技能图谱+反思（H-7）；仅剩 memory 字符预算细分（H-3）。
 
 完整逐项对比见 [docs/hermes-comparison.md](docs/hermes-comparison.md)。
 

@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.8.8</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.8.9</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -149,12 +149,22 @@
         <div class="card"><h3>🖼️ 图片读取（多模态）</h3><p><code>config image_read=true</code> 时，<code>read</code> 遇图片文件（png/jpg/jpeg/gif/webp/bmp，≤8MB）不再走文本，而是作为<strong>视觉附件</strong>随下一条消息发送（LLM 编码为 OpenAI 多模态 <code>content</code> 数组，<code>data:</code> URI）。默认关闭，需多模态网关；单轮上限 8 张。</p></div>
         <div class="card"><h3>🛡️ 权限门禁四模式</h3><p>对齐 Claude Code PermissionMode：<code>auto</code>（出厂默认，零破坏）/ <code>default</code>（只读放行，写类+bash 危险命令确认）/ <code>acceptEdits</code>（写类放行，仅危险命令确认）/ <code>plan</code>（只读放行，写类拒绝）。bash 走命令级危险匹配（rm -rf、mkfs、curl|sh 等），主代理与子代理共用同一门禁；<code>/permission</code> 切换并持久化。</p></div>
         <div class="card"><h3>🧵 子任务治理</h3><p>子代理并行委派 + 运行中进度推送（TUI 状态栏 + WebUI <code>/ws</code>）、句柄随会话<strong>落盘回放</strong>（跨重启可查结论）、per-subagent token 计量、只读角色工具层强制摘写、用户自定义子代理类型（<code>~/.mizar/agents/*.md</code>）、<code>/fork</code> 会话分支与用户级 hooks（<code>config.json hooks</code>）。</p></div>
+        <div class="card"><h3>🧭 学习闭环：技能图谱 + 反思 <code>/learn</code></h3><p>把「学到的东西」变成看得见的图谱（对齐 Hermes learning graph）：技能为节点（带使用次数/分类/创建者）、<code>related_skills</code> 为显式边、结构化记忆为记忆节点，记忆↔技能用<strong>中英混合 2-gram 词法重叠</strong>连边（阈值 ≥2 分，滤单字噪声）。<code>/learn reflect</code> 给出可执行洞察：孤岛技能 / 高频工具该沉淀 / 记忆与技能脱节 / 大量技能从未使用。还有 <code>/learn json</code> 供前端消费。</p></div>
+        <div class="card"><h3>🔎 会话全文搜索 <code>session_search</code></h3><p>跨全部历史会话按内容检索（此前只能 <code>/sessions</code> 看列表再手 grep 文件）。<strong>SQLite FTS5 增量索引</strong>（<code>tokenize=trigram</code>，中文英文子串都能命中），按文件字节偏移只索引新增行、删除会话自动清索引；短词（&lt;3 字符）自动退化 LIKE。四模式：<code>{query}</code> 搜索 / <code>{session_id,seq}</code> 上下文 / <code>{session_id}</code> 整段 / <code>{}</code> 列表。<code>/search</code> 命令同源。</p></div>
+        <div class="card"><h3>📌 待办压缩后重注入</h3><p>上下文压缩会把 <code>todo</code> 历史结果摘要掉，模型随即「忘记」还有多少事没做完（表现为说「已完成」或重复开工）。现在压缩成功后立刻把<strong>未完成待办</strong>重新注入消息流（只注 pending，完成项不注以免重做），对齐 Hermes 的 <code>format_for_injection</code>。</p></div>
       </div>
     </section>
 
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.8.9 · 学习闭环三件套（对齐 Hermes）</h3>
+          <p><strong>技能图谱 + 反思（<code>/learn</code>）</strong>：技能/记忆为节点、<code>related_skills</code> 与词法重叠为边，输出密度统计（孤立占比/分类分布）；<code>/learn reflect</code> 纯启发式给出四类可执行洞察（孤岛技能/高频工具该沉淀/记忆脱节/技能从未使用）。技能 frontmatter 新增 <code>related_skills</code> / <code>created_by</code>。</p>
+          <p><strong>会话全文搜索（<code>session_search</code> + <code>/search</code>）</strong>：SQLite FTS5 增量索引（trigram 中英文子串可搜），按文件字节偏移只索引新增行、删除会话自动清索引、短词退化 LIKE；搜索/上下文/整段/列表四模式。实测 105 会话 / 7575 条消息入索引。</p>
+          <p><strong>待办压缩后重注入</strong>：压缩成功后立刻把未完成待办注入消息流（只注 pending，完成项不注以免模型重做），修「压缩后遗忘待办」的真实缺陷。</p>
+          <p style="color:var(--muted);font-size:13px">完整变更见 <a href="docs/changelog.md">docs/changelog.md</a>；与 Hermes 的逐项对比见 <a href="docs/hermes-comparison.md">docs/hermes-comparison.md</a>。</p>
+        </div>
         <div class="card">
           <h3>v0.8.8 · 能力对标路线图闭环（C-7 ~ C-9 / P-5 ~ P-7）</h3>
           <p><strong>结构化长期记忆（C-7）</strong>：<code>~/.mizar/memory/MEMORY.md</code> 四分类事实清单（user/feedback/project/reference），<strong>每会话自动注入系统提示</strong>；<code>memory</code> 工具 / <code>/memory</code> 命令写入后当轮即生效，与 HMEM 语义检索插件分工互补。</p>

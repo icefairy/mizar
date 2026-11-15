@@ -1,3 +1,24 @@
+## [未发布] — 2026-11-15（夜·四）
+
+> 主题：**学习闭环三件套** —— 技能图谱+反思（H-7）、会话全文搜索（H-1）、待办压缩后重注入（H-2），均对齐 Hermes Agent。
+
+### ✨ 新增
+
+- **会话全文搜索（H-1，`internal/sessionsearch` + `session_search` 工具 + `/search`）**
+  - SQLite FTS5 增量索引（`~/.mizar/sessions/search.db`），`tokenize=trigram` 中文/英文子串均可命中；按文件字节偏移只索引新增行，删除的会话自动清索引。
+  - 只索引可读内容（user/assistant/摘要/工具调用参数），工具长输出与压缩/fork/subagent 元数据行跳过；短词（<3 字符）自动退化 LIKE。
+  - 四模式合一工具：`{query}` 搜索 / `{session_id,seq}` 上下文窗口 / `{session_id}` 整段 / `{}` 列表。
+  - 实测：105 会话 / 7575 条消息入库，`hermes`/`压缩`/`todo` 等中英文查询均正常。
+- **待办压缩后重注入（H-2）**
+  - `builtins.RenderForInjection`：只渲染 pending 待办（完成项不注，防模型重做已完成的工作）。
+  - `Agent.TodoInject` 回调，Compactor 真正压缩成功后立刻把待办注入消息流（普通 user 消息，不参与 todo 回放）。
+  - 修真实缺陷：此前压缩摘要吃掉 todo 结果后，模型会「忘记」还有多少事没做完。
+- **技能图谱 + 反思（H-7，`internal/learninggraph` + `internal/reflect` + `/learn`）**
+  - 图谱：技能为节点（使用次数/分类/创建者）、`related_skills` frontmatter 为显式边、结构化记忆为记忆节点，记忆↔技能用中英混合 2-gram 词法重叠连边（阈值 ≥2 分，滤掉单字偶然重叠）；输出密度统计（孤立节点占比/分类分布/agent 创建数）。
+  - 反思（纯启发式，不依赖 LLM）：孤岛技能、高频工具模式、记忆与技能脱节、大量技能从未使用 四类可执行洞察；另含 `DistillPrompt` 供有辅助模型时进一步蒸馏。
+  - 命令：`/learn graph`（文本树）/ `/learn reflect` / `/learn json`。
+  - 技能加载器新增 frontmatter 字段：`related_skills`、`created_by`。
+
 ## [未发布] — 2026-11-15（夜·三）
 
 > 主题：**项目信任（P-5）+ HTML 导出（P-6）+ 图片读取（P-7）**。

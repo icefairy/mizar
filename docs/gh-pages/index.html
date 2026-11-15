@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.8.8</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.8.9</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -140,12 +140,21 @@
         <div class="card"><h3>🖼️ 图片读取（多模态）</h3><p><code>image_read=true</code> 时 <code>read</code> 遇图片文件转视觉附件，LLM 编码为多模态 <code>content</code> 数组（data: URI）；默认关闭，需多模态网关。</p></div>
         <div class="card"><h3>🛡️ 权限门禁四模式</h3><p>auto / default / acceptEdits / plan，bash 命令级危险匹配，主代理与子代理共用同一门禁；<code>/permission</code> 切换并持久化。</p></div>
         <div class="card"><h3>🧵 子任务治理</h3><p>并行委派 + 进度推送（TUI/WebUI）、句柄落盘回放、per-subagent token 计量、只读角色工具层摘写、自定义子代理类型、<code>/fork</code> 分支、用户级 hooks。</p></div>
+        <div class="card"><h3>🧭 学习闭环 <code>/learn</code></h3><p>技能图谱（技能/记忆节点 + <code>related_skills</code> 边 + 词法重叠边）+ 反思（孤岛技能/高频工具/记忆脱节/技能未使用四类可执行洞察）；<code>/learn graph</code> / <code>/learn reflect</code> / <code>/learn json</code>。</p></div>
+        <div class="card"><h3>🔎 会话全文搜索 <code>session_search</code></h3><p>SQLite FTS5 增量索引（trigram，中英文子串可搜），跨全部历史会话检索；搜索/上下文/整段/列表四模式；<code>/search</code> 命令同源。</p></div>
+        <div class="card"><h3>📌 待办压缩后重注入</h3><p>压缩成功即把未完成待办重新注入消息流（只注 pending），修「压缩后遗忘待办」缺陷。</p></div>
       </div>
     </section>
 
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.8.9 · 学习闭环三件套（对齐 Hermes）</h3>
+          <p><strong>技能图谱 + 反思（<code>/learn</code>）</strong>：技能/记忆节点 + <code>related_skills</code> 与词法重叠边 + 密度统计；<code>/learn reflect</code> 四类可执行洞察。</p>
+          <p><strong>会话全文搜索（<code>session_search</code> + <code>/search</code>）</strong>：SQLite FTS5 增量索引，trigram 中英文可搜，四模式。</p>
+          <p><strong>待办压缩后重注入</strong>：压缩后把未完成待办注入消息流，防遗忘。</p>
+        </div>
         <div class="card">
           <h3>v0.8.8 · 能力对标路线图闭环（C-7 ~ C-9 / P-5 ~ P-7）</h3>
           <p><strong>结构化长期记忆（C-7）</strong>：四分类 MEMORY.md 每会话自动注入系统提示，<code>memory</code> 工具 / <code>/memory</code> 命令写入当轮即生效。</p>
@@ -201,7 +210,10 @@ chmod +x mizar
                 <li>skills/ <span class="tree-cmt"># SKILL.md 加载器</span></li>
                 <li>mcp/ <span class="tree-cmt"># MCP 客户端</span></li>
                 <li>llm/ <span class="tree-cmt"># LLM 客户端</span></li>
+                <li>learninggraph/ <span class="tree-cmt"># 技能图谱（学习闭环）</span></li>
                 <li>memory/ <span class="tree-cmt"># 结构化长期记忆（四分类 MEMORY.md）</span></li>
+                <li>reflect/ <span class="tree-cmt"># 反思引擎（孤岛技能/记忆脱节洞察）</span></li>
+                <li>sessionsearch/ <span class="tree-cmt"># 会话全文搜索（FTS5）</span></li>
                 <li>worktree/ <span class="tree-cmt"># git worktree 隔离</span></li>
                 <li>trust/ <span class="tree-cmt"># 项目信任（project_trust.json）</span></li>
                 <li>exporter/ <span class="tree-cmt"># 会话导出 HTML</span></li>
