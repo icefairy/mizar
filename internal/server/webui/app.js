@@ -13,6 +13,7 @@
   const settingsSave = $("settingsSave"), settingsMsg = $("settingsMsg"), refreshModels = $("refreshModels");
   const qkModel = $("qkModel"), qkThinking = $("qkThinking"), quickMsg = $("quickMsg");
   const brandVer = $("brandVer"), statusbar = $("statusbar"), queueMode = $("queueMode"), queueLabel = $("queueLabel");
+  const autoScrollSteps = $("autoScrollSteps");
   const queueBar = $("queueBar");
   const jumpBottom = $("jumpBottom"), composerEl = $("composer"), composerToggle = $("composerToggle"),
     composerToggleLabel = $("composerToggleLabel");
@@ -76,6 +77,30 @@
   // 默认打断，选择持久化到 localStorage。
   let interruptMode = true;
   try { interruptMode = localStorage.getItem("mizar-queue-mode") !== "1"; } catch (e) {}
+  // 工具面板自动滚动开关（默认开）：开启时新步骤自动滚到最新一条；
+  // 关掉后面板停在你当前的位置——手动翻看旧步骤时不会被新步骤拽走。
+  // 选择持久化到 localStorage（跨刷新保持），与 queueMode 同一套做法。
+  let stepsAutoScroll = true;
+  try { stepsAutoScroll = localStorage.getItem("mizar-steps-autoscroll") !== "0"; } catch (e) {}
+  function applyStepsAutoScrollToggle() {
+    if (!autoScrollSteps) return;
+    autoScrollSteps.checked = stepsAutoScroll;
+    const lbl = autoScrollSteps.parentElement;
+    if (lbl) lbl.classList.toggle("off", !stepsAutoScroll);
+  }
+  if (autoScrollSteps) {
+    autoScrollSteps.addEventListener("change", () => {
+      stepsAutoScroll = autoScrollSteps.checked;
+      try { localStorage.setItem("mizar-steps-autoscroll", stepsAutoScroll ? "1" : "0"); } catch (e) {}
+      applyStepsAutoScrollToggle();
+      // 打开时立刻滚到底，让用户马上看到效果是「已开启」
+      if (stepsAutoScroll) {
+        document.querySelectorAll(".msg.assistant .steps").forEach((sb) => { sb.scrollTop = sb.scrollHeight; });
+      }
+    });
+  }
+  applyStepsAutoScrollToggle();
+
   function isBusy() { return busyConv !== null && busyConv === curConv; }
   function applyQueueToggle() {
     if (!queueMode) return;
@@ -461,10 +486,33 @@
   // 步骤面板内部跟随到底：面板限高（~5 行）后是内部滚动，新步骤要自动滚进来，
   // 否则用户只能看到最早那几步。只在用户本来就贴着面板底部时才跟随，
   // 手动上翻看旧步骤时不被拽走。
+  // 面板内部跟随到底。
+  //
+  // 判据不只看 nearEnd：面板刚创建时 clientHeight 可能还是 0（尚未布局）、
+  // scrollTop 也是 0，nearEnd 会误判为「不在底部」而放弃跟随——首屏就此卡在顶部。
+  // 所以额外维护一个「用户是否手动上翻过」标记（userScrolledUp），
+  // 只有真的手动上翻才停止跟随；程序滚到底部时清掉标记。
+  const stepsScrollState = new WeakMap();   // stepsEl → { userUp: bool }
+  function stepsState(sb) {
+    let st = stepsScrollState.get(sb);
+    if (!st) { st = { userUp: false }; stepsScrollState.set(sb, st); }
+    return st;
+  }
+  function bindStepsScroll(sb) {
+    if (!sb || sb.__scrollBound) return;
+    sb.__scrollBound = true;
+    sb.addEventListener("scroll", () => {
+      const st = stepsState(sb);
+      const atEnd = (sb.scrollHeight - sb.scrollTop - sb.clientHeight) <= 24;
+      // 程序滚到底会触发 scroll 事件，此时 atEnd=true，自动清掉上翻标记
+      st.userUp = !atEnd;
+    }, { passive: true });
+  }
   function scrollStepsToEnd(sb) {
-    if (!sb) return;
-    const nearEnd = (sb.scrollHeight - sb.scrollTop - sb.clientHeight) <= 24;
-    if (nearEnd) sb.scrollTop = sb.scrollHeight;
+    if (!sb || !stepsAutoScroll) return;   // 用户关掉自动滚动就完全不动它
+    bindStepsScroll(sb);
+    if (stepsState(sb).userUp) return;     // 手动上翻过：尊重用户，不拽走
+    sb.scrollTop = sb.scrollHeight;
   }
   // 单行压缩：换行/多空格折叠，超长截断
   function compact(s, n) {
