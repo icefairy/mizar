@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.8.8</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -118,6 +118,7 @@
         <a class="btn primary" href="https://github.com/icefairy/mizar" target="_blank" rel="noopener">GitHub 仓库</a>
         <a class="btn" href="#quickstart">快速开始</a>
         <a class="btn" href="#features">核心特性</a>
+        <a class="btn" href="#news">最新动态</a>
       </div>
     </header>
 
@@ -131,7 +132,35 @@
         <div class="card"><h3>🖥️ 交互式 TUI</h3><p>基于 tview，支持鼠标滚动、多行编辑、Tab 补全、流式输出与等待进度指示。</p></div>
         <div class="card"><h3>⚡ 本地 bash 直执行</h3><p>输入 <code>!ls -la</code> 直接在本地跑 shell，命令与输出都纳入对话历史，模型可基于结果继续推理。</p></div>
         <div class="card"><h3>🌐 Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket 三种接入方式。</p></div>
+        <div class="card"><h3>🧠 结构化长期记忆 <code>/memory</code></h3><p><code>~/.mizar/memory/MEMORY.md</code> 四分类（user/feedback/project/reference）事实清单，<strong>每会话自动注入系统提示</strong>；<code>memory</code> 工具 / <code>/memory</code> 命令写入当轮即生效，与 HMEM 语义检索插件互补。</p></div>
+        <div class="card"><h3>🌿 git worktree 隔离</h3><p><code>worktree_create/leave/list</code> 全走 git 官方命令，实验性改动失败可整体丢弃、不自动 merge；<code>delegate_task.working_dir</code> 真正锚定子代理的 bash/read/write/grep/find/ls。</p></div>
+        <div class="card"><h3>🪶 延迟工具加载 <code>tool_search</code></h3><p><code>tool_inject_mode=index</code> 时工具 schema 按需加载，长尾工具只列索引不占满上下文；<code>tool_search</code> 按名称/关键词加载，会话内保持可用。</p></div>
+        <div class="card"><h3>🔐 项目信任 <code>/trust</code></h3><p>首次进入含项目级 <code>AGENTS.md</code> / <code>.cursorrules</code> / <code>USER.md</code> / <code>.mizar/prompts</code> 的目录询问一次，未信任跳过注入（防提示注入）；非交互按拒绝不阻塞。</p></div>
+        <div class="card"><h3>📤 会话导出 HTML <code>-export</code></h3><p>单文件自包含 HTML：无 CDN、代码高亮、工具折叠、XSS 转义，内网离线可看；<code>mizar -export -session &lt;id&gt;</code> / <code>-export -c</code> / <code>/export</code>。</p></div>
+        <div class="card"><h3>🖼️ 图片读取（多模态）</h3><p><code>image_read=true</code> 时 <code>read</code> 遇图片文件转视觉附件，LLM 编码为多模态 <code>content</code> 数组（data: URI）；默认关闭，需多模态网关。</p></div>
+        <div class="card"><h3>🛡️ 权限门禁四模式</h3><p>auto / default / acceptEdits / plan，bash 命令级危险匹配，主代理与子代理共用同一门禁；<code>/permission</code> 切换并持久化。</p></div>
+        <div class="card"><h3>🧵 子任务治理</h3><p>并行委派 + 进度推送（TUI/WebUI）、句柄落盘回放、per-subagent token 计量、只读角色工具层摘写、自定义子代理类型、<code>/fork</code> 分支、用户级 hooks。</p></div>
       </div>
+    </section>
+
+    <section id="news">
+      <h2>最新动态</h2>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.8.8 · 能力对标路线图闭环（C-7 ~ C-9 / P-5 ~ P-7）</h3>
+          <p><strong>结构化长期记忆（C-7）</strong>：四分类 MEMORY.md 每会话自动注入系统提示，<code>memory</code> 工具 / <code>/memory</code> 命令写入当轮即生效。</p>
+          <p><strong>git worktree 隔离（C-8）</strong>：三工具全走 git 官方命令，失败可整体丢弃；<code>delegate_task.working_dir</code> 真正锚定子代理工具目录。</p>
+          <p><strong>延迟工具加载（C-9）</strong>：<code>tool_inject_mode=index</code> + <code>tool_search</code> 按需加载工具 schema。</p>
+          <p><strong>项目信任（P-5）</strong>：首次进入含项目级资源的目录询问一次，未信任跳过注入。</p>
+          <p><strong>会话导出 HTML（P-6）</strong>：<code>-export</code> / <code>/export</code> 生成单文件自包含 HTML，内网离线可看。</p>
+          <p><strong>图片读取（P-7）</strong>：<code>image_read</code> 开启后 <code>read</code> 遇图片转视觉附件（需多模态网关）。</p>
+        </div>
+        <div class="card">
+          <h3>v0.7.7 · 停止/排队/提问全闭环 + 跨平台环境自适应</h3>
+          <p><code>/stop</code> 一键停止（TUI+WebUI）、等待期间消息可见、<code>ask_user_question</code> WebUI 弹窗（无超时）、Android/Termux/精简容器环境自适应。</p>
+        </div>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-top:10px">完整变更见 <a href="docs/changelog.md">docs/changelog.md</a>。</p>
     </section>
 
     <section id="quickstart">
@@ -172,6 +201,10 @@ chmod +x mizar
                 <li>skills/ <span class="tree-cmt"># SKILL.md 加载器</span></li>
                 <li>mcp/ <span class="tree-cmt"># MCP 客户端</span></li>
                 <li>llm/ <span class="tree-cmt"># LLM 客户端</span></li>
+                <li>memory/ <span class="tree-cmt"># 结构化长期记忆（四分类 MEMORY.md）</span></li>
+                <li>worktree/ <span class="tree-cmt"># git worktree 隔离</span></li>
+                <li>trust/ <span class="tree-cmt"># 项目信任（project_trust.json）</span></li>
+                <li>exporter/ <span class="tree-cmt"># 会话导出 HTML</span></li>
                 <li>shell/ <span class="tree-cmt"># 安全命令执行</span></li>
                 <li>lsp/ <span class="tree-cmt"># LSP 客户端 + 服务器</span></li>
                 <li>server/ <span class="tree-cmt"># HTTP/RPC/WebSocket</span></li>
@@ -204,6 +237,12 @@ chmod +x mizar
           <tr><td>计划模式</td><td>/plan + exit_plan_mode</td><td>/plan + TUI 审批</td></tr>
           <tr><td>会话目标</td><td>create/get/update_goal</td><td>get/create/update_goal（权限约束）</td></tr>
           <tr><td>定时提醒</td><td>schedule</td><td>schedule（after/at/every）</td></tr>
+          <tr><td>结构化记忆</td><td>—</td><td>四分类 MEMORY.md 自动注入（C-7）</td></tr>
+          <tr><td>工作树隔离</td><td>—</td><td>git worktree + working_dir 锚定（C-8）</td></tr>
+          <tr><td>延迟工具加载</td><td>—</td><td><code>tool_search</code> 按需加载（C-9）</td></tr>
+          <tr><td>项目信任</td><td>—</td><td>首次进入询问 + project_trust.json（P-5）</td></tr>
+          <tr><td>会话导出</td><td>—</td><td>单文件自包含 HTML（P-6）</td></tr>
+          <tr><td>图片读取</td><td>—</td><td>read 转视觉附件（P-7，多模态）</td></tr>
         </table>
       </div>
       <p style="color:var(--muted);font-size:13px;margin-top:8px">完整对比分析见 <a href="docs/pi-comparison.md">docs/pi-comparison.md</a>。</p>

@@ -42,6 +42,21 @@
 
 ---
 
+## v0.8.8 亮点：能力对标路线图闭环（C-7 ~ C-9 / P-5 ~ P-7）
+
+一口气补齐与 CodeBuddy / Pi 的剩余差距，路线图清空：
+
+- **结构化长期记忆（C-7）**：`~/.mizar/memory/MEMORY.md` 四分类事实清单，**每会话自动注入**系统提示；`memory` 工具 / `/memory` 命令写入当轮即生效。
+- **git worktree 隔离（C-8）**：`worktree_create/leave/list` 三工具 + `delegate_task.working_dir` **真正锚定**子代理的 bash/read/write/grep/find/ls（此前只写提示锚点、隔离形同虚设）。
+- **延迟工具加载（C-9）**：`tool_inject_mode=index` 时工具 schema 按需加载，`tool_search` 一句话捞出来，长尾工具不再占满上下文。
+- **项目信任（P-5）**：首次进入含项目级 `AGENTS.md` / `.cursorrules` / `USER.md` / `.mizar/prompts` 的目录询问一次，未信任直接跳过，防克隆仓库提示注入；`/trust` 管理。
+- **会话导出 HTML（P-6）**：`mizar -export` / `/export` 生成单文件自包含 HTML（无 CDN、代码高亮、工具折叠、XSS 转义），内网离线可看。
+- **图片读取（P-7）**：`image_read` 开启后 `read` 遇图片文件转成视觉附件随下一条消息发送（多模态网关）。
+
+配套：权限门禁四模式、子代理进度推送/落盘回放、`/fork` 分支、用户级 hooks、per-subagent token 计量等既定能力见下文详述。
+
+---
+
 ## v0.7.7 亮点：任务可控可感知 + 跨平台环境自适应
 
 ### 一、`/stop` 一键停止任务（TUI + WebUI）
@@ -344,7 +359,10 @@ Unix 有 bracketed paste，粘贴本来就是整段处理，不受影响。
 - **`delegate_task`**：子代理并行委派（`tasks[]` fan-out，role 四选一 leaf/implement/explore/review，只读角色强制摘除写工具）。运行中进度：`/subagents` 查看、TUI 状态栏与 WebUI `/ws` 实时推送（对齐 hermes delegate_tool）
 - **`skill`**：按名加载技能全文（渐进式披露，避免系统提示过长）
 - **`job_list` / `job_output` / `job_kill`**：后台任务管理（bash 支持 `run_in_background`，任务完成后自动注入通知）
-其他能力：文件模糊搜索（`files_fuzzy`）、大文件有界分段读取（`fs_read_range`，单次 4MB）、文档格式解析（PDF/DOCX/XLSX）、Bash 详细截断警告、原生 OpenAI function calling 工具调用。
+- **`memory`**：结构化长期记忆读写（add / list / remove / count，四分类 user/feedback/project/reference，写后立即注入系统提示）
+- **`worktree_create` / `worktree_leave` / `worktree_list`**：git worktree 隔离，配合 `delegate_task` 的 `working_dir` 在独立工作树里跑实验性改动
+- **`tool_search`**：延迟工具加载——`tool_inject_mode=index` 时按名称/关键词加载被推迟注入的工具 schema
+其他能力：文件模糊搜索（`files_fuzzy`）、大文件有界分段读取（`fs_read_range`，单次 4MB）、文档格式解析（PDF/DOCX/XLSX）、图片读取（多模态网关，`image_read` 开）、Bash 详细截断警告、原生 OpenAI function calling 工具调用。
 
 ### 3. 宿主函数（Host Functions）
 通过 Go 暴露给插件使用的内置能力：
@@ -677,6 +695,66 @@ Esc 取消选区）、右键粘贴都可用。若碰到旧终端把鼠标事件�
 ### 15. 100 场景验证框架
 开发 70 场景 + 运维 30 场景，支持 task / interactive / rpc 三种模式，全量日志 + Pi 对比测试。
 
+### 16. 结构化长期记忆（四分类 + 自动注入，C-7）
+对齐 CodeBuddy 的 MEMORY.md 设计：小而精、**每会话自动进入系统提示**的固定分类事实清单，与记忆插件（HMEM 语义检索）分工互补。
+
+- **存储**：`~/.mizar/memory/MEMORY.md`，四个固定章节 `## user / ## feedback / ## project / ## reference`，一行一条事实（人类可读可手改）。
+- **自动注入**：启动时渲染注入段（上限 200 条 / 8000 字节，超限截断并提示），模型无需检索即可看到已知偏好/约定。
+- **写入即生效**：`memory` 工具（`add` / `list` / `remove` / `count`）或 `/memory` 命令写入后立即刷新系统提示，新事实**当轮即可见**。
+- **容错**：未知分类归 `reference`，章节外散条目忽略，换行折叠为单行（保持「一行一事实」结构），同分类重复条目幂等。
+- **开关**：`config.json` 的 `memory_enabled`（默认开启）可关闭自动注入（工具仍可用）。
+
+```
+/memory                                   # 查看全部
+/memory add user 用户偏好结论先行           # 记一条
+/memory add project 所有 Go 代码走 gofmt
+/memory rm user 1                          # 按列表序号删
+/memory clear [类别]                        # 清空
+```
+
+### 17. git worktree 隔离（C-8）
+为实验性改动提供独立 git worktree，**大改/重构/试错失败可整体丢弃**，不污染主工作区。
+
+- 工具 `worktree_create` / `worktree_leave` / `worktree_list`，全走 git 官方命令（`add -b` / `remove [--force]` / `list --porcelain`），**只删目录不删分支、不自动 merge**；默认路径 `<repo>.worktrees/<branch>`。
+- **与 delegate_task 联动**：`working_dir` 现在**真正生效**——子代理的 `bash`/`read`/`write`/`grep`/`find`/`ls`/`repo_map` 都锚定到该目录（此前只写提示锚点、仍按进程 cwd 跑，隔离形同虚设；现由 `internal/agent/workdir_wrap.go` 按目录包装工具，仅作用于子代理，不影响主代理与并发会话）。
+
+```
+# 在隔离环境里干一段实验性改动
+worktree_create {"branch":"exp-refactor"}
+delegate_task   {"goal":"重构 X ...", "working_dir":"<上一步返回的路径>"}
+# 满意后自行 git merge；不要则
+worktree_leave  {"path":"exp-refactor","force":true}
+```
+
+### 18. 延迟工具加载（C-9）
+照抄技能渐进披露思路，工具定义也能「按需加载」，几十个工具不再每次请求都全量注入 schema。
+
+- **开关**：`config.json` 的 `tool_inject_mode`（`full` 默认 = 现行为零破坏；`index` = 按需）。
+- **index 模式**：系统提示与发给 LLM 的 tools 清单只含**核心工具**（bash/read/write/edit/grep/find/ls/respond/todo/ask_user_question/skill/委派系列/tool_search），其余工具只列「名称 + 一句话描述」的静态索引（缓存友好）。
+- **tool_search**：模型需要时先调 `tool_search {"names":["db_query"]}` 或 `{"query":"数据库"}`, 加载后本会话保持可用，下一轮即可正常调用。
+- **隔离**：已加载集合随 Agent 实例（会话）隔离，Web 多会话互不串台。
+
+### 19. 项目信任（P-5）
+克隆来的仓库可借 `AGENTS.md` / `.cursorrules` / `USER.md` / `.mizar/prompts/*.md` 注入任意指令（提示注入）。首次进入含项目级资源的目录时询问一次是否信任：
+
+- 记录在 `~/.mizar/project_trust.json`（path → trusted/denied），之后不再追问。
+- **未信任**：跳过项目级上下文文件注入与项目级 `.mizar/prompts` 加载（全局 `~/.mizar` 下的文件始终可信）。
+- **非交互环境**（管道/CI/headless）：按「拒绝」处理，不阻塞启动。
+- `/trust` 查看记录、`/trust reset [路径]` 重新询问。
+
+### 20. 会话导出 HTML（P-6）
+把整段会话导出成**单文件自包含 HTML**（内联 CSS、无外部 JS/CDN，内网离线可用）：用户/助手/工具/摘要分区渲染，工具调用与结果折叠为 `<details>`，代码块极简关键字高亮，全部文本 HTML 转义（防 XSS）。
+
+```bash
+mizar -export -session <id> -export-out sess.html   # 指定会话（支持跨作用域短 ID）
+mizar -export -c -export-out last.html             # 导出全局最后一次会话
+# 交互中：
+/export ~/session.html                             # 导出当前会话
+```
+
+### 21. 图片读取（P-7，需多模态网关）
+`config.json` 设 `image_read: true` 后，`read` 工具遇到图片文件（png / jpg / jpeg / gif / webp / bmp，≤8MB）不再走文本，而是把图片作为**视觉附件**随下一条消息发送（LLM 层编码为 OpenAI 多模态 `content` 数组，`data:` URI）。默认关闭，避免向非多模态端点发 content 数组；单轮上限 8 张。
+
 ---
 
 ## 快速开始
@@ -770,8 +848,10 @@ mizar/
 │   ├── engine/             # goja 内嵌 JS 引擎 + esbuild 编译管线
 │   ├── jobs/               # 后台任务管理（job_list / job_output / job_kill）
 │   ├── lifecycle/          # 生命周期钩子管理
+│   ├── exporter/           # 会话导出 HTML（自包含单文件，-export/`/export`）
 │   ├── llm/                # LLM 客户端（OpenAI 兼容协议）
 │   ├── lsp/                # LSP 客户端 + 服务器
+│   ├── memory/             # 结构化长期记忆（四分类 MEMORY.md，自动注入）
 │   ├── mcp/                # MCP 客户端（stdio/HTTP）
 │   ├── needle/             # needle 协议支持
 │   ├── plugins/            # 插件加载器（扫描 .ts → 编译 → 注册工具）
@@ -781,11 +861,13 @@ mizar/
 │   ├── server/             # HTTP/RPC/WebSocket 服务器
 │   ├── session/            # 会话管理（JSONL 持久化 + 压缩记录）
 │   ├── skills/             # SKILL.md 加载器（解析 frontmatter → 注入上下文）
+│   ├── trust/              # 项目信任（project_trust.json，首次进入询问）
 │   ├── utils/              # 通用工具函数
 │   ├── wasmkern/           # Zig→wasm 计算内核（wazero 纯 Go 运行时，无 cgo）
 │   │   ├── *.zig           # 内核源码
 │   │   ├── *.wasm          # 编译产物（已提交，构建不依赖 zig）
 │   │   └── wasmkern.go     # 加载/实例池/两段式调用 API
+│   ├── worktree/           # git worktree 隔离（worktree_create/leave/list）
 │   └── zigboot/            # 内嵌 Zig 工具链（/zig 释放到本地缓存，供内网现场编译）
 │       ├── zigboot.go      # 内嵌归档的定位/原子解压/状态
 │       ├── templates.go    # /zig new-mcp、/zig new-wasm 的脚手架生成

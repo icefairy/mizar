@@ -110,7 +110,7 @@
 <body>
   <div class="container">
     <header>
-      <div class="badge">AGPL v3</div><div class="badge">v0.7.7</div>
+      <div class="badge">AGPL v3</div><div class="badge">v0.8.8</div>
       <h1>开阳 <span>Mizar</span></h1>
       <div class="tagline">北斗第六星 · 双星系统 —— 主星与辅星，互为陪伴，缺一不可。</div>
       <div class="stars">⭐ 极简 · 零依赖 · 单文件 · 可自举 AI Agent 框架</div>
@@ -141,12 +141,30 @@
         <div class="card"><h3>🔍 诊断日志</h3><p>关键事件落盘 <code>~/.mizar/logs</code>（TUI/Agent/LLM/panic），三步定位「任务莫名中止/卡死」：看 RUN 边界、ESC 取消、finish_reason。</p></div>
         <div class="card"><h3>🛠️ 内嵌 Zig 工具链 <code>/zig</code></h3><p>官方 Zig 归档 <code>go:embed</code> 内嵌，<code>/zig init</code> 释放到 <code>~/.cache/mizar/zig/&lt;平台&gt;/</code>。<strong>目标机没有编译器也能现场编 C/Zig</strong>（<code>zig cc</code> 就是 C 编译器，自带各版本 glibc stub），产物是独立二进制，由 <code>bash</code> 以 <code>exec</code> 运行——<strong>不涉及 cgo，纯静态单文件部署模型不变</strong>。每个发布二进制<strong>只嵌自己那份架构</strong>（amd64 / arm64 / windows），不多背 50MB；只释放到用户缓存，<strong>绝不写 <code>/usr/local/bin</code>、不建系统软链接</strong>。</p></div>
         <div class="card"><h3>⚡ Zig→wasm 计算内核</h3><p><code>internal/wasmkern</code>：进程内跑 Zig 编译的 WebAssembly，运行时是 <strong>wazero（纯 Go，无 cgo）</strong>。内核 <code>go:embed</code> 随二进制走，惰性编译 + 编译缓存 + <code>sync.Pool</code> 实例池，增量约 2.6MB。已含 <code>count_tokens</code> / <code>bigram</code> 两个内核，宿主函数优先尝试内核、失败自动回退纯 Go。<strong>实测纯 Go 更快，所以默认仍走 Go</strong>——内核的收益是沙箱与字节码分发，不是性能。</p></div>
+        <div class="card"><h3>🧠 结构化长期记忆 <code>/memory</code></h3><p>对齐 CodeBuddy 的 MEMORY.md：<code>~/.mizar/memory/MEMORY.md</code> 四分类（user / feedback / project / reference），一行一条事实，<strong>每会话自动注入系统提示</strong>。用 <code>memory</code> 工具或 <code>/memory</code> 命令写入后当轮即生效（上限 200 条 / 8000 字节，超限截断）。与记忆插件（HMEM 语义检索）分工互补——这里面是「小而精、必见」的偏好与约定。</p></div>
+        <div class="card"><h3>🌿 git worktree 隔离</h3><p><code>worktree_create</code> / <code>worktree_leave</code> / <code>worktree_list</code> 三工具，全走 git 官方命令：为实验性改动建独立工作树，失败可整体丢弃、<strong>不污染主工作区、不自动 merge</strong>。配 <code>delegate_task</code> 的 <code>working_dir</code> <strong>真正锚定</strong>子代理的 bash/read/write/grep/find/ls（此前只写提示锚点、隔离形同虚设）。</p></div>
+        <div class="card"><h3>🪶 延迟工具加载 <code>tool_search</code></h3><p><code>tool_inject_mode=index</code> 时，系统提示与 tools 清单只含核心工具，其余只列「名称 + 一句话描述」的静态索引（缓存友好）；模型需要时 <code>tool_search {"names":[...]}</code> 或 <code>{"query":"..."}</code> 按需加载，会话内保持可用。几十个长尾工具不再每次请求都占满上下文。</p></div>
+        <div class="card"><h3>🔐 项目信任 <code>/trust</code></h3><p>克隆仓库可借 <code>AGENTS.md</code> / <code>.cursorrules</code> / <code>USER.md</code> / <code>.mizar/prompts</code> 注入任意指令。首次进入含项目级资源的目录<strong>询问一次</strong>是否信任（记录在 <code>project_trust.json</code>，非交互环境按拒绝处理不阻塞）；未信任直接跳过注入，全局 <code>~/.mizar</code> 文件始终可信。</p></div>
+        <div class="card"><h3>📤 会话导出 HTML <code>-export</code></h3><p>把整段会话导出成<strong>单文件自包含 HTML</strong>：内联 CSS、无外部 JS/CDN（内网离线可看），用户/助手/工具/摘要分区，工具调用与结果折叠为 <code>&lt;details&gt;</code>，代码块极简关键字高亮，全部文本 HTML 转义防 XSS。<code>mizar -export -session &lt;id&gt;</code> / <code>-export -c</code> / <code>/export</code>。</p></div>
+        <div class="card"><h3>🖼️ 图片读取（多模态）</h3><p><code>config image_read=true</code> 时，<code>read</code> 遇图片文件（png/jpg/jpeg/gif/webp/bmp，≤8MB）不再走文本，而是作为<strong>视觉附件</strong>随下一条消息发送（LLM 编码为 OpenAI 多模态 <code>content</code> 数组，<code>data:</code> URI）。默认关闭，需多模态网关；单轮上限 8 张。</p></div>
+        <div class="card"><h3>🛡️ 权限门禁四模式</h3><p>对齐 Claude Code PermissionMode：<code>auto</code>（出厂默认，零破坏）/ <code>default</code>（只读放行，写类+bash 危险命令确认）/ <code>acceptEdits</code>（写类放行，仅危险命令确认）/ <code>plan</code>（只读放行，写类拒绝）。bash 走命令级危险匹配（rm -rf、mkfs、curl|sh 等），主代理与子代理共用同一门禁；<code>/permission</code> 切换并持久化。</p></div>
+        <div class="card"><h3>🧵 子任务治理</h3><p>子代理并行委派 + 运行中进度推送（TUI 状态栏 + WebUI <code>/ws</code>）、句柄随会话<strong>落盘回放</strong>（跨重启可查结论）、per-subagent token 计量、只读角色工具层强制摘写、用户自定义子代理类型（<code>~/.mizar/agents/*.md</code>）、<code>/fork</code> 会话分支与用户级 hooks（<code>config.json hooks</code>）。</p></div>
       </div>
     </section>
 
     <section id="news">
       <h2>最新动态</h2>
       <div class="grid cols-2">
+        <div class="card">
+          <h3>v0.8.8 · 能力对标路线图闭环（C-7 ~ C-9 / P-5 ~ P-7）</h3>
+          <p><strong>结构化长期记忆（C-7）</strong>：<code>~/.mizar/memory/MEMORY.md</code> 四分类事实清单（user/feedback/project/reference），<strong>每会话自动注入系统提示</strong>；<code>memory</code> 工具 / <code>/memory</code> 命令写入后当轮即生效，与 HMEM 语义检索插件分工互补。</p>
+          <p><strong>git worktree 隔离（C-8）</strong>：<code>worktree_create/leave/list</code> 三工具全走 git 官方命令，实验性改动失败可整体丢弃、不自动 merge；<code>delegate_task.working_dir</code> 现在<strong>真正锚定</strong>子代理的 bash/read/write/grep/find/ls（此前只写提示锚点、隔离形同虚设）。</p>
+          <p><strong>延迟工具加载（C-9）</strong>：<code>tool_inject_mode=index</code> 时工具 schema 按需加载，<code>tool_search</code> 一句话捞出，长尾工具不再占满上下文；已加载集合按会话隔离。</p>
+          <p><strong>项目信任（P-5）</strong>：首次进入含项目级 <code>AGENTS.md</code>/<code>.cursorrules</code>/<code>USER.md</code>/<code>.mizar/prompts</code> 的目录询问一次，未信任直接跳过（防克隆仓库提示注入），非交互按拒绝不阻塞；<code>/trust</code> 管理。</p>
+          <p><strong>会话导出 HTML（P-6）</strong>：<code>mizar -export</code> / <code>/export</code> 生成单文件自包含 HTML（无 CDN、代码高亮、工具折叠、XSS 转义），内网离线可看。</p>
+          <p><strong>图片读取（P-7）</strong>：<code>image_read</code> 开启后 <code>read</code> 遇图片文件转视觉附件，LLM 编码为多模态 <code>content</code> 数组，需多模态网关。</p>
+          <p style="color:var(--muted);font-size:13px">同期已交付：权限门禁四模式、子代理进度推送/句柄落盘回放/per-subagent token 计量、用户自定义子代理类型、<code>/fork</code> 会话分支、用户级 hooks。完整变更见 <a href="docs/changelog.md">docs/changelog.md</a>。</p>
+        </div>
         <div class="card">
           <h3>v0.7.7 · 停止/排队/提问全闭环 + 跨平台环境自适应</h3>
           <p><strong><code>/stop</code> 一键停止</strong>（TUI + WebUI，别名 <code>/abort</code>/<code>/停止</code>/<code>/取消</code>）：TUI 与 ESC 同路径但无需两段式确认，同时清空待注入的纠正和排队消息（停止后不再被自动补发）；WebUI 停止后保留已输出内容并标注「⏹ 任务已停止」，不再显示红色错误。新增 <code>Agent.ClearSteer()</code>，修复「停止后残留纠正被下一个任务消费、偷偷换方向」。</p>
@@ -259,6 +277,14 @@ chmod +x mizar
 <span class="cm"># 或持久化运行：Server + 浏览器 Web UI</span>
 ./mizar --serve --addr :3003
 <span class="cm"># 浏览器打开 http://127.0.0.1:3003/web/（首次启动生成登录密码）</span>
+
+<span class="cm"># 记忆 / 隔离 / 导出（交互内）</span>
+/memory add user 用户偏好结论先行
+worktree_create {"branch":"exp"}
+/export ~/session.html
+
+<span class="cm"># 离线导出某段会话为 HTML（命令行）</span>
+./mizar -export -c -export-out last.html
       </div>
       <div class="grid cols-2" style="margin-top:14px">
         <div class="card"><h3>Server 模式</h3><p>持久运行，提供 OpenAI 兼容 / JSON-RPC 2.0 / WebSocket / 浏览器 Web UI，详见 <a href="docs/api.md">docs/api.md</a>。</p></div>
@@ -286,6 +312,10 @@ chmod +x mizar
                 <li>lifecycle/ <span class="tree-cmt"># 生命周期钩子</span></li>
                 <li>llm/ <span class="tree-cmt"># LLM 客户端</span></li>
                 <li>lsp/ <span class="tree-cmt"># LSP 客户端 + 服务器</span></li>
+                <li>memory/ <span class="tree-cmt"># 结构化长期记忆（四分类 MEMORY.md）</span></li>
+                <li>worktree/ <span class="tree-cmt"># git worktree 隔离</span></li>
+                <li>trust/ <span class="tree-cmt"># 项目信任（project_trust.json）</span></li>
+                <li>exporter/ <span class="tree-cmt"># 会话导出 HTML</span></li>
                 <li>mcp/ <span class="tree-cmt"># MCP 客户端</span></li>
                 <li>needle/ <span class="tree-cmt"># needle 协议支持</span></li>
                 <li>plugins/ <span class="tree-cmt"># 插件加载器</span></li>
@@ -326,6 +356,12 @@ chmod +x mizar
           <tr><td>会话目标</td><td>create/get/update_goal</td><td>get/create/update_goal（权限约束）</td></tr>
           <tr><td>定时提醒</td><td>schedule</td><td>schedule（after/at/every）</td></tr>
           <tr><td>内嵌工具链</td><td>—</td><td>Zig（<code>/zig init</code> 现场编译 C/Zig）</td></tr>
+          <tr><td>结构化记忆</td><td>—</td><td>四分类 MEMORY.md 自动注入（C-7）</td></tr>
+          <tr><td>工作树隔离</td><td>—</td><td>git worktree + working_dir 锚定（C-8）</td></tr>
+          <tr><td>延迟工具加载</td><td>—</td><td><code>tool_search</code> 按需加载（C-9）</td></tr>
+          <tr><td>项目信任</td><td>—</td><td>首次进入询问 + project_trust.json（P-5）</td></tr>
+          <tr><td>会话导出</td><td>—</td><td>单文件自包含 HTML（P-6）</td></tr>
+          <tr><td>图片读取</td><td>—</td><td>read 转视觉附件（P-7，多模态）</td></tr>
         </table>
       </div>
       <p style="color:var(--muted);font-size:13px;margin-top:8px">完整对比分析见 <a href="docs/pi-comparison.md">docs/pi-comparison.md</a>。</p>
