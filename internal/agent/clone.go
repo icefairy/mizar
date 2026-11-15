@@ -26,6 +26,8 @@ func (a *Agent) Clone() *Agent {
 		Soul:           a.Soul,
 		SkillsPrompt:   a.SkillsPrompt,
 		MemoryPrompt:   a.MemoryPrompt,
+		ContextAllow:   a.ContextAllow,   // P-5 项目信任放行判定（进程级策略）
+		TodoInject:     a.TodoInject,     // H-2 压缩后待办重注入（共用同一回调）
 		toolInjectMode: a.toolInjectMode, // 注入模式进程级策略；toolIndex（已加载集合）每会话独立，留空
 		PluginDir:      a.PluginDir,
 		WorkDir:        a.WorkDir,

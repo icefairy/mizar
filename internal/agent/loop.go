@@ -159,6 +159,11 @@ type Agent struct {
 	// 闸门只在存在客观未完成项（待办清单）时拦一下，注入提醒后继续跑。
 	Completeness *CompletenessGate
 
+	// TodoInject 返回「压缩后要重注入的待办段」（H-2，对齐 hermes format_for_injection）。
+	// nil = 不启用。由 main.go 注入 builtins.RenderForInjection（避免 agent 反向 import builtins）。
+	// 只在真正发生压缩后注入一次，且注入内容用 KindNormal 的 user 消息（不进 todo 回放）。
+	TodoInject func() string
+
 	// CurrentTask 最近/正在执行的任务（Run 开始时记录）。
 	// 为何需要：a.Initial 只在 Run 结束后才追加本次对话，因此运行中执行
 	// /handoff 时无从得知「当前在做什么」——而交接文档最该写的恰恰是这个。
@@ -733,6 +738,15 @@ func (a *Agent) Run(task string) (reply string, err error) {
 						if dropped > 0 {
 							a.OnCompact(summaryOf(msgs), dropped, est)
 						}
+					}
+				}
+				// H-2：压缩会摘要掉 todo 工具的历史结果，模型随即「忘记」未完成项。
+				// 压缩成功后立刻把「当前未完成待办」重新注入消息流（对齐 hermes
+				// format_for_injection）。只注 pending、完成项不注（防重做）。
+				if compacted && a.TodoInject != nil {
+					if inj := strings.TrimSpace(a.TodoInject()); inj != "" {
+						msgs = append(msgs, Message{Role: RoleUser, Content: inj})
+						a.log("%s", q.FormatLog("todo_reinject", "step=", fmt.Sprintf("%d", qc.Step), "len=", fmt.Sprintf("%d", len(inj))))
 					}
 				}
 				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Compacted: compacted, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)

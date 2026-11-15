@@ -289,3 +289,60 @@ func TestTodoBlockedByReplay(t *testing.T) {
 		t.Fatalf("回放后依赖丢失: %+v", todos)
 	}
 }
+
+func TestRenderForInjectionPendingOnly(t *testing.T) {
+	todoS.mu.Lock()
+	todoS.todos = []PiTodo{
+		{ID: 1, Text: "已完成的事", Done: true},
+		{ID: 2, Text: "未完成 A"},
+		{ID: 3, Text: "未完成 B", BlockedBy: []int{2}},
+	}
+	todoS.next = 4
+	todoS.mu.Unlock()
+	defer func() {
+		todoS.mu.Lock()
+		todoS.todos = nil
+		todoS.next = 1
+		todoS.mu.Unlock()
+	}()
+
+	out := RenderForInjection()
+	if out == "" {
+		t.Fatal("有未完成项时应返回注入段")
+	}
+	if strings.Contains(out, "已完成的事") {
+		t.Errorf("完成项不应注入（防重做）:\n%s", out)
+	}
+	if !strings.Contains(out, "未完成 A") || !strings.Contains(out, "未完成 B") {
+		t.Errorf("未完成项应注入:\n%s", out)
+	}
+	if !strings.Contains(out, "等待 #2") {
+		t.Errorf("阻塞关系应渲染:\n%s", out)
+	}
+	if !strings.Contains(out, "压缩后重注入") {
+		t.Errorf("应点明来源:\n%s", out)
+	}
+}
+
+func TestRenderForInjectionEmpty(t *testing.T) {
+	todoS.mu.Lock()
+	todoS.todos = []PiTodo{{ID: 1, Text: "done", Done: true}}
+	todoS.mu.Unlock()
+	defer func() {
+		todoS.mu.Lock()
+		todoS.todos = nil
+		todoS.mu.Unlock()
+	}()
+	if out := RenderForInjection(); out != "" {
+		t.Errorf("全部完成时应返回空（无需注入），got %q", out)
+	}
+}
+
+func TestRenderForInjectionNoTodos(t *testing.T) {
+	todoS.mu.Lock()
+	todoS.todos = nil
+	todoS.mu.Unlock()
+	if out := RenderForInjection(); out != "" {
+		t.Errorf("无待办应返回空，got %q", out)
+	}
+}

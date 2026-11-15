@@ -269,6 +269,38 @@ func RenderPiTodos() string {
 	return strings.Join(lines, "\n")
 }
 
+// RenderForInjection 渲染「压缩后重注入」的待办段（H-2，对齐 hermes format_for_injection）。
+//
+// 为什么需要：上下文压缩会把 todo 工具的历史结果摘要掉，模型随即「忘记」自己
+// 还有哪些事没做完——表现为压缩后模型说「已完成」或重复开工。hermes 的做法是
+// 每次压缩后把待办重新注入消息流（只注 pending/in-progress，完成项不注入，
+// 避免模型重做已完成的工作）。
+//
+// 返回空字符串表示无需注入（无未完成项）。
+func RenderForInjection() string {
+	todos := PiTodoList()
+	if len(todos) == 0 {
+		return ""
+	}
+	var lines []string
+	for _, t := range todos {
+		if t.Done {
+			continue // 完成项不注入：注入会让模型重做已完成的工作
+		}
+		line := fmt.Sprintf("- [ ] #%d: %s", t.ID, t.Text)
+		if wait := todoBlocking(t, todos); len(wait) > 0 {
+			line += fmt.Sprintf("（等待 %s）", idsLabel(wait))
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "【当前待办（上下文压缩后重注入，避免遗忘）】\n" +
+		strings.Join(lines, "\n") +
+		"\n（以上为本会话未完成的待办；完成一项后用 todo action=toggle 标记，全部完成后才算任务结束。）"
+}
+
 // ============================================================================
 // 工具定义
 // ============================================================================

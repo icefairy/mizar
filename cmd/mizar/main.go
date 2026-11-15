@@ -37,6 +37,7 @@ import (
 	"mizar/internal/schedule"
 	"mizar/internal/server"
 	"mizar/internal/session"
+	"mizar/internal/sessionsearch"
 	"mizar/internal/shell"
 	"mizar/internal/skills"
 	"mizar/internal/trust"
@@ -683,6 +684,17 @@ func main() {
 		}
 	}
 	st := session.New(sessAbs)
+	// 会话全文搜索（H-1）：SQLite FTS5 增量索引，放在会话根目录（跨作用域共享）。
+	// 打不开（磁盘只读/FTS5 不可用）时降级为 nil——session_search 工具不注册，
+	// 其余功能完全不受影响。
+	ssIdx, ssErr := sessionsearch.Open(filepath.Join(sessAbs, "search.db"))
+	if ssErr != nil {
+		log.Printf("会话搜索索引不可用（忽略）: %v", ssErr)
+		ssIdx = nil
+	}
+	if ssIdx != nil {
+		defer ssIdx.Close()
+	}
 	pathKey := session.EncodePathKey(wd)
 	if pathKey != "" {
 		st = st.Scoped(pathKey)
@@ -724,6 +736,9 @@ func main() {
 	// 完成度自检：模型在待办清单还有未完成项时就说「完成了」结束本轮，
 	// 这里拦一下并注入提醒继续跑（修「没做完就停，必须手打继续」）。
 	// Pending 注入而非在 agent 包里直接读 builtins，避免双向依赖。
+	// 压缩后重注入待办（H-2，对齐 hermes format_for_injection）：压缩摘要会
+	// 吃掉 todo 结果，模型随即遗忘未完成项。注入 pending 列表让主循环继续。
+	a.TodoInject = builtins.RenderForInjection
 	a.Completeness = agent.NewCompletenessGate(func() []string {
 		var pending []string
 		for _, t := range builtins.PiTodoList() {
@@ -804,6 +819,11 @@ func main() {
 			a.SetMemoryPrompt(memStore.Render())
 		}
 	}))
+	// 会话全文搜索工具（H-1）：跨会话按内容检索历史。
+	if ssIdx != nil {
+		pm.RegisterBuiltin(builtins.SessionSearchTool(ssIdx, sessAbs))
+	}
+
 	// worktree 隔离工具（C-8）：worktree_create/leave/list，为实验性改动提供
 	// 独立 git worktree（配 delegate_task 的 working_dir 使用）。以当前工作目录
 	// 作为仓库锚点；非 git 仓库时工具会在调用时返回明确错误（不影响启动）。
@@ -1799,6 +1819,64 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 			}
 			sb.WriteString("\n裁决: stdout JSON {\"decision\":\"deny|rewrite\",\"reason\":...} 或 exit 2；失败放行不阻塞主流程")
 			return sb.String(), nil
+		},
+	})
+	// 内置 /search 命令：跨会话全文搜索（H-1，session_search 工具的斜杠入口）
+	a.Commands.Register(agent.Command{
+		Name:        "search",
+		Description: "跨会话全文搜索（/search <关键词> ｜ /search 列出已索引会话）。会话内容按 FTS5 增量索引，中文/英文可搜",
+		Run: func(args string) (string, error) {
+			if ssIdx == nil {
+				return "", fmt.Errorf("会话搜索索引不可用（见启动日志）")
+			}
+			q := strings.TrimSpace(args)
+			if _, err := ssIdx.Sync(sessAbs); err != nil {
+				return "", fmt.Errorf("索引同步失败: %v", err)
+			}
+			if q == "" {
+				list, err := ssIdx.Sessions(30)
+				if err != nil {
+					return "", err
+				}
+				if len(list) == 0 {
+					return "（尚无已索引会话）", nil
+				}
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "已索引 %d 个会话（/search <关键词> 检索）：\n", len(list))
+				for _, si := range list {
+					scope := si.Scope
+					if scope == "" {
+						scope = "(平铺)"
+					}
+					short := si.SessionID
+					if len(short) > 8 {
+						short = short[:8]
+					}
+					fmt.Fprintf(&sb, "  %s  %s  %d 条  %s\n", short, scope, si.Messages, si.LastTs)
+				}
+				return strings.TrimSpace(sb.String()), nil
+			}
+			hits, err := ssIdx.Search(q, 20)
+			if err != nil {
+				return "", err
+			}
+			if len(hits) == 0 {
+				return fmt.Sprintf("未找到与「%s」相关的历史消息", q), nil
+			}
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "找到 %d 条命中：\n", len(hits))
+			for _, h := range hits {
+				role := h.Role
+				if h.Tool != "" {
+					role = "tool:" + h.Tool
+				}
+				short := h.SessionID
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				fmt.Fprintf(&sb, "  [%s#%d] (%s) %s\n", short, h.Seq, role, strings.TrimSpace(h.Snippet))
+			}
+			return strings.TrimSpace(sb.String()), nil
 		},
 	})
 	// 内置 /export 命令：把当前会话导出为自包含 HTML（P-6）
