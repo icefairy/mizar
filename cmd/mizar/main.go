@@ -27,6 +27,7 @@ import (
 	"mizar/internal/context"
 	"mizar/internal/diag"
 	"mizar/internal/engine"
+	"mizar/internal/exporter"
 	"mizar/internal/jobs"
 	"mizar/internal/llm"
 	"mizar/internal/lsp"
@@ -38,6 +39,7 @@ import (
 	"mizar/internal/session"
 	"mizar/internal/shell"
 	"mizar/internal/skills"
+	"mizar/internal/trust"
 	"mizar/internal/userhooks"
 )
 
@@ -146,25 +148,27 @@ func runtimeMCPStats() (int, int) {
 
 func main() {
 	var (
-		baseURL   = flag.String("base-url", "http://127.0.0.1:3002/v1", "OpenAI 兼容端点 (默认指向璇玑网关)")
-		apiKey    = flag.String("api-key", "", "API Key (可选)")
-		model     = flag.String("model", "deepseek-v4-flash", "模型名")
-		extDir    = flag.String("ext", "", "插件目录 (默认 ~/.mizar/extensions)")
-		skillDir  = flag.String("skills", "skills", "技能目录")
-		workDir   = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
-		sessDir   = flag.String("sessions", "~/.mizar/sessions", "会话目录 (默认 ~/.mizar/sessions，按工作路径自动分目录)")
-		sessionID = flag.String("session", "", "会话 ID (续接对话)")
-		contLast  = flag.Bool("c", false, "续接最后一次退出的会话（等同 -continue）")
-		contLast2 = flag.Bool("continue", false, "续接最后一次退出的会话（-c 的长写法）")
-		history   = flag.Int("history", 50, "会话恢复的最大历史消息数")
-		ctxWindow = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
-		noCompact = flag.Bool("no-compact", false, "禁用会话压缩")
-		noMCP     = flag.Bool("no-mcp", false, "禁用 MCP（不初始化 mcp_call 宿主函数）")
-		task      = flag.String("task", "", "任务内容 (非空则单次执行)")
-		showVer   = flag.Bool("version", false, "显示版本")
-		lspBinary = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
-		lspServer = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
-		tui       = flag.Bool("tui", true, "使用 Bubble Tea TUI 界面（默认开启，--no-tui 用经典 readline）")
+		baseURL    = flag.String("base-url", "http://127.0.0.1:3002/v1", "OpenAI 兼容端点 (默认指向璇玑网关)")
+		apiKey     = flag.String("api-key", "", "API Key (可选)")
+		model      = flag.String("model", "deepseek-v4-flash", "模型名")
+		extDir     = flag.String("ext", "", "插件目录 (默认 ~/.mizar/extensions)")
+		skillDir   = flag.String("skills", "skills", "技能目录")
+		workDir    = flag.String("workdir", "", "工作目录 (AGENTS.md 查找起点, 默认当前目录)")
+		sessDir    = flag.String("sessions", "~/.mizar/sessions", "会话目录 (默认 ~/.mizar/sessions，按工作路径自动分目录)")
+		sessionID  = flag.String("session", "", "会话 ID (续接对话)")
+		contLast   = flag.Bool("c", false, "续接最后一次退出的会话（等同 -continue）")
+		contLast2  = flag.Bool("continue", false, "续接最后一次退出的会话（-c 的长写法）")
+		history    = flag.Int("history", 50, "会话恢复的最大历史消息数")
+		ctxWindow  = flag.Int("ctx-window", 128000, "模型上下文窗口 (token，压缩触发线)")
+		noCompact  = flag.Bool("no-compact", false, "禁用会话压缩")
+		noMCP      = flag.Bool("no-mcp", false, "禁用 MCP（不初始化 mcp_call 宿主函数）")
+		task       = flag.String("task", "", "任务内容 (非空则单次执行)")
+		showVer    = flag.Bool("version", false, "显示版本")
+		exportHTML = flag.Bool("export", false, "把会话导出为自包含 HTML（配合 -session <id> 或 -c；输出到 -export-out）")
+		exportOut  = flag.String("export-out", "", "HTML 导出路径（空=stdout）")
+		lspBinary  = flag.String("lsp", "", "LSP 语言服务器路径 (如 gopls/tsserver，空=禁用 LSP)")
+		lspServer  = flag.Bool("lsp-server", false, "以 LSP server 模式运行 (stdio)")
+		tui        = flag.Bool("tui", true, "使用 Bubble Tea TUI 界面（默认开启，--no-tui 用经典 readline）")
 		// Server 模式（持久运行 daemon）
 		serve  = flag.Bool("serve", false, "启动 Server 模式（持久运行）")
 		addr   = flag.String("addr", ":3003", "Server 监听地址")
@@ -194,6 +198,11 @@ func main() {
 	if *showVer {
 		fmt.Println("mizar", versionString())
 		return
+	}
+
+	// -export：把指定会话导出为自包含 HTML（P-6），不启动交互循环。
+	if *exportHTML {
+		os.Exit(runExport(*sessionID, *contLast || *contLast2, *sessDir, *workDir, *exportOut, *model))
 	}
 
 	// 诊断日志：落盘到 ~/.mizar/logs/，用于排查「任务莫名中止/卡死」类问题。
@@ -603,7 +612,32 @@ func main() {
 	if wd == "" {
 		wd, _ = os.Getwd()
 	}
-	contextPrompt := context.LoadContextFiles(wd)
+	// 项目信任（P-5 简化版）：工作目录里的 AGENTS.md/.cursorrules/USER.md 与
+	// .mizar/prompts/*.md 属「项目级资源」，克隆来的仓库可借此注入指令。
+	// 首次进入需确认一次（交互环境询问；非交互按拒绝跳过项目资源，不阻塞）。
+	trustStore := trust.NewStore(config.ConfigDir())
+	projectTrusted, hadProjectRes := trust.Ensure(trustStore, wd, func(res []string) bool {
+		return askProjectTrust(res)
+	})
+	if hadProjectRes {
+		if projectTrusted {
+			log.Printf("项目信任: 已信任（%s），注入项目级资源", wd)
+		} else {
+			log.Printf("项目信任: 未信任（%s），跳过项目级 AGENTS.md/.cursorrules/USER.md/.mizar/prompts（/trust 管理）", wd)
+		}
+	}
+	if hadProjectRes && !projectTrusted {
+		// 只放行全局 ~/.mizar 下的文件；项目文件跳过
+		globalDir := config.ConfigDir()
+		a.ContextAllow = func(path string) bool {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return false
+			}
+			return strings.HasPrefix(abs, globalDir+string(filepath.Separator))
+		}
+	}
+	contextPrompt := context.LoadContextFilesAllowing(wd, a.ContextAllow)
 	if contextPrompt != "" {
 		log.Printf("上下文文件注入: %s", strings.Join(context.ContextFiles(wd), ", "))
 	}
@@ -611,6 +645,13 @@ func main() {
 	a.Soul = context.LoadSoul()
 	if a.Soul != "" {
 		log.Printf("SOUL.md 注入: %s", context.SoulPath())
+	}
+
+	// 图片读取（P-7，opt-in）：config image_read=true 时 read 工具把图片作为
+	// 视觉附件回传（需多模态网关）。默认关闭，避免向非多模态端点发 content 数组。
+	if cfgImg, err := config.Load(config.DefaultPath()); err == nil && cfgImg.ImageReadOn() {
+		agent.SetImageVisionEnabled(true)
+		log.Printf("图片读取已启用（read 工具对图片文件回传视觉附件）")
 	}
 
 	// 结构化长期记忆（C-7，对齐 CodeBuddy 四分类）：~/.mizar/memory/MEMORY.md，
@@ -871,7 +912,8 @@ func main() {
 	// Prompt Templates：~/.mizar/prompts/*.md + 项目 .mizar/prompts/*.md
 	promptReg := prompts.NewRegistry()
 	promptReg.AddDir(filepath.Join(config.ConfigDir(), "prompts"))
-	if projDir := findMizarDir(wd); projDir != "" {
+	// 项目级 prompts 只在项目被信任时加载（P-5：防克隆仓库注入斜杠命令）
+	if projDir := findMizarDir(wd); projDir != "" && projectTrusted {
 		promptReg.AddDir(filepath.Join(projDir, ".mizar", "prompts"))
 	}
 	promptReg.Reload()
@@ -1759,6 +1801,68 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 			return sb.String(), nil
 		},
 	})
+	// 内置 /export 命令：把当前会话导出为自包含 HTML（P-6）
+	a.Commands.Register(agent.Command{
+		Name:        "export",
+		Description: "把当前会话导出为自包含 HTML（/export [输出路径]，默认 ~/mizar-session-<id>.html）",
+		Run: func(args string) (string, error) {
+			out := strings.TrimSpace(args)
+			sid := *sessionID
+			if sid == "" {
+				return "", fmt.Errorf("当前无会话（尚未产生消息）")
+			}
+			msgs, err := st.Load(sid)
+			if err != nil {
+				return "", fmt.Errorf("读取会话失败: %v", err)
+			}
+			title := "Mizar 会话"
+			if titleCache != nil {
+				if t := titleCache.Get(sid); t != "" {
+					title = t
+				}
+			}
+			html := exporter.ToHTML(msgs, exporter.Options{Title: title, SessionID: sid})
+			if out == "" {
+				out = "~/mizar-session-" + shortSID(sid) + ".html"
+			}
+			if strings.HasPrefix(out, "~/") {
+				if home, herr := os.UserHomeDir(); herr == nil {
+					out = filepath.Join(home, strings.TrimPrefix(out, "~/"))
+				}
+			}
+			if err := os.WriteFile(out, []byte(html), 0o644); err != nil {
+				return "", fmt.Errorf("写入失败: %v", err)
+			}
+			return fmt.Sprintf("✓ 已导出 %d 条消息到 %s", len(msgs), out), nil
+		},
+	})
+	// 内置 /trust 命令：查看/管理项目信任记录（P-5 简化版）
+	a.Commands.Register(agent.Command{
+		Name:        "trust",
+		Description: "查看/管理项目信任记录（/trust 查看 ｜ /trust reset 重问当前项目 ｜ /trust path <路径> 查看指定项目）",
+		Run: func(args string) (string, error) {
+			fields := strings.Fields(strings.TrimSpace(args))
+			sub := ""
+			if len(fields) > 0 {
+				sub = strings.ToLower(fields[0])
+			}
+			switch sub {
+			case "", "list", "show":
+				return trust.Describe(trustStore), nil
+			case "reset":
+				target := wd
+				if len(fields) > 1 {
+					target = fields[1]
+				}
+				if err := trustStore.Reset(target); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("✓ 已清除 %s 的信任记录，下次启动重新询问", target), nil
+			default:
+				return "", fmt.Errorf("用法: /trust ｜ /trust reset [路径]")
+			}
+		},
+	})
 	// 内置 /memory 命令：查看/管理结构化长期记忆（C-7，~/.mizar/memory/MEMORY.md）
 	a.Commands.Register(agent.Command{
 		Name: "memory",
@@ -2440,6 +2544,14 @@ func mcpNames(servers []engine.MCPServerConf) string {
 		names = append(names, s.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+// shortSID 返回会话 id 前 8 位（展示用）。
+func shortSID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // findMizarDir 从 workDir 向上递归查找包含 .mizar/prompts/ 的项目目录。

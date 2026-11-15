@@ -121,9 +121,12 @@ type Agent struct {
 	toolInjectMode string
 	// toolIndex 会话级已加载工具集合（index 模式）。
 	toolIndex *toolIndexState
-	PluginDir string    // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
-	WorkDir   string    // 当前工作目录，注入系统提示供模型锚定搜索范围
-	Initial   []Message // 会话恢复时的历史消息（置于 task 之前）
+	PluginDir string // 插件目录（如 ~/.mizar/extensions），用于系统提示引导模型自行创建插件
+	WorkDir   string // 当前工作目录，注入系统提示供模型锚定搜索范围
+	// ContextAllow 项目级上下文文件放行判定（P-5 项目信任；nil = 全部放行）。
+	// 返回 false 时该文件（AGENTS.md/.cursorrules/USER.md）不注入系统提示。
+	ContextAllow func(path string) bool
+	Initial      []Message // 会话恢复时的历史消息（置于 task 之前）
 	// ConvID 本实例服务的 Web 会话 id（非 Web 入口为空）。
 	// 为什么要放在 Agent 上：Hooks 是进程级共享的，多个会话并发运行时
 	// 钩子无法从 Server 的全局状态里判断「这次工具调用属于哪个会话」，
@@ -465,8 +468,8 @@ func (a *Agent) buildContextSection() string {
 		sb.WriteString(a.System)
 		sb.WriteString("\n")
 	}
-	// 上下文文件（AGENTS.md / .cursorrules / USER.md）
-	if ctx := context.LoadContextFiles(a.WorkDir); ctx != "" {
+	// 上下文文件（AGENTS.md / .cursorrules / USER.md），经项目信任过滤（P-5）
+	if ctx := context.LoadContextFilesAllowing(a.WorkDir, a.ContextAllow); ctx != "" {
 		sb.WriteString(ctx)
 	}
 	// 工作目录
@@ -735,6 +738,10 @@ func (a *Agent) Run(task string) (reply string, err error) {
 				a.Hooks.fireCompactionAfter(&HookContext{RunID: string(qc.QueryID), SessionID: a.ConvID, Step: qc.Step, Task: task, Compacted: compacted, EstTokens: est, Summary: summaryOf(msgs), Messages: msgs}, a.logf)
 			}
 		}
+
+		// 图片阅读（P-7）：把本轮 read 工具读到的图片挂到最后一条 user 消息上，
+		// 由 LLM 层编码成多模态 content（无图片时零开销）。
+		msgs, _ = attachPendingImages(msgs)
 
 		// LLMRequest 挂载点（🔴 严重）
 		q.BeginOperation("llm")

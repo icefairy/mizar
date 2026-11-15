@@ -1,3 +1,21 @@
+## [未发布] — 2026-11-15（夜·三）
+
+> 主题：**项目信任（P-5）+ HTML 导出（P-6）+ 图片读取（P-7）**。
+
+### ✨ 新增
+
+- **项目信任 Project Trust（P-5 简化版，`internal/trust`）**
+  - `~/.mizar/project_trust.json` 记录 path → trusted/denied；`ProjectResources` 发现工作目录（向上查找）的 AGENTS.md/.cursorrules/USER.md 与 .mizar/prompts。
+  - 首次进入含项目级资源的目录询问一次（交互环境 y/N；非交互 headless 按拒绝处理，不阻塞启动）。
+  - 未信任：跳过项目级 AGENTS.md 注入（`context.LoadContextFilesAllowing` + `Agent.ContextAllow`）与项目级 `.mizar/prompts` 加载（防克隆仓库注入斜杠命令）。
+  - `/trust` 命令：查看记录 / `reset` 重问。
+- **会话导出 HTML（P-6，`internal/exporter`）**
+  - 单文件自包含（内联 CSS、无外部 JS/CDN，内网离线可用）；用户/助手/工具/摘要分区渲染；工具调用与结果折叠为 `<details>`；``` 代码块极简关键字高亮；全部文本 HTML 转义（防 XSS）。
+  - `mizar -export -session <id>` / `-export -c`（跨作用域短 ID 匹配）+ `-export-out`；`/export [路径]` 命令导出当前会话。
+- **图片读取（P-7，opt-in `config image_read=true`）**
+  - read 工具遇图片文件（png/jpg/jpeg/gif/webp/bmp，≤8MB）不再走文本，而是把图片入队（`agent.PushPendingImage`）；Agent 每轮 LLM 请求前把队列挂到最后一条 user 消息（`attachPendingImages`），LLM 层编码为 OpenAI 多模态 content 数组（`data:` URI）。
+  - 需多模态网关；默认关闭，避免向非多模态端点发送 content 数组。单轮上限 8 张。
+
 ## [未发布] — 2026-11-15（夜·续）
 
 > 主题：**worktree 隔离（C-8）+ 延迟工具加载（C-9）**。

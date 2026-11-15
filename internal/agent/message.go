@@ -46,6 +46,11 @@ type Message struct {
 	// ToolCallID 工具结果所属的调用 ID（KindToolResult 时用于配对）。
 	ToolCallID string `json:"toolCallId,omitempty"`
 
+	// Images 图片附件（P-7）：read 工具检测到图片文件时，把图片作为
+	// 额外 user 消息的附件注入，供多模态网关读取。仅 Role=user 且
+	// Kind=KindNormal 的消息会编码成 content 数组，其余忽略。
+	Images []ImagePart `json:"images,omitempty"`
+
 	// Timestamp 消息创建时间（RFC3339，毫秒精度）。
 	// 由 session.Store.Append 落盘时自动补写（未设置才填），
 	// 因此内存中的 Initial 内容（会被回灌给 LLM）保持干净——这里刻意不做
@@ -155,4 +160,13 @@ func (m Message) IsCutPoint() bool {
 		return false
 	}
 	return m.Role == RoleUser || m.Role == RoleAssistant
+}
+
+// ImagePart 图片附件（P-7 图片读取）。
+// 空 DataURI 时由编码层按 MIME 拼 data: URI；URL 非空则直接用 URL。
+type ImagePart struct {
+	URL  string `json:"url,omitempty"`  // 图片 URL（http/https 或 data: URI）
+	MIME string `json:"mime,omitempty"` // 图片 MIME（默认 image/jpeg）
+	Data string `json:"data,omitempty"` // base64 编码的图片字节
+	Path string `json:"path,omitempty"` // 来源文件路径（诊断用）
 }

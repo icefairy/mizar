@@ -509,6 +509,13 @@ func withTruncationNotice(wrapped, rawContent, finishReason string) string {
 //   - assistant + KindToolCall → content(前导文本) + tool_calls[]
 //   - KindToolResult            → role:"tool" + tool_call_id + 结果正文
 func encodeMessages(msgs []agent.Message) []chatMsg {
+	// P-7：消息带 Images 附件时编码为多模态 content 数组（无附件时行为不变）
+	return encodeMessagesWithImages(msgs, true)
+}
+
+// encodeMessagesWithImages 编码消息；allowImages=true 时把 user 消息的 Images
+// 附件编码为 content 数组（OpenAI 多模态格式，P-7）。
+func encodeMessagesWithImages(msgs []agent.Message, allowImages bool) []chatMsg {
 	out := make([]chatMsg, 0, len(msgs))
 	// OpenAI 严格要求 role:"tool" 必须回应前面的 tool_calls，且一个 tool_call 只能被
 	// 回应一次；反向地，发出了 tool_calls 就必须有结果，否则报 400
@@ -544,10 +551,36 @@ func encodeMessages(msgs []agent.Message) []chatMsg {
 			// 孤儿结果：降级为普通 user 消息（保留信息，避免 API 拒绝）
 			out = append(out, chatMsg{Role: agent.RoleUser, Content: toolResultBody(m.Content)})
 		default:
+			if allowImages && len(m.Images) > 0 && m.Role == agent.RoleUser {
+				out = append(out, chatMsg{Role: m.Role, Content: buildImageContent(m.Content, m.Images)})
+				continue
+			}
 			out = append(out, chatMsg{Role: m.Role, Content: m.Content})
 		}
 	}
 	return out
+}
+
+// buildImageContent 把文本 + 图片附件组装成 OpenAI 多模态 content 数组。
+func buildImageContent(text string, images []agent.ImagePart) []chatContentPart {
+	parts := make([]chatContentPart, 0, 1+len(images))
+	if text != "" {
+		parts = append(parts, chatContentPart{Type: "text", Text: text})
+	}
+	for _, img := range images {
+		url := img.URL
+		if url == "" && img.Data != "" {
+			mime := img.MIME
+			if mime == "" {
+				mime = "image/jpeg"
+			}
+			url = "data:" + mime + ";base64," + img.Data
+		}
+		if url != "" {
+			parts = append(parts, chatContentPart{Type: "image_url", ImageURL: &chatPartImageURL{URL: url}})
+		}
+	}
+	return parts
 }
 
 // takePaired 从待配对队列中取出被回应的 call id。

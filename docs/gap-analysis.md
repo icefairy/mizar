@@ -1,6 +1,7 @@
 # Mizar 能力差距分析：vs Pi Agent / CodeBuddy
 
 > 撰写日期：2026-11-14（同日更新：并入 v0.8.7/v0.8.8 子任务机制改动后的现状核对）
+> 2026-11-15 晚更新：交付 C-7/C-8/C-9/P-5/P-6/P-7（结构化记忆、worktree 隔离、延迟工具加载、项目信任、HTML 导出、图片读取）
 > 2026-11-15 晚更新：交付 C-7 结构化记忆（internal/memory 四分类 MEMORY.md 自动注入 + memory 工具/`/memory` 命令）
 > 2026-11-15 更新：交付 P-1 扩展事件拦截（ToolCallDecision）、GAP-S4 子任务句柄随会话落盘回放、P-3 thinking level xhigh/max、GAP-S1 第二层用户自定义子代理类型（~/.mizar/agents/*.md）——四项已移出缺口清单，见路线图尾部
 > 对比对象：Pi Agent（`@earendil-works/pi-coding-agent`，对照 `docs/pi-comparison.md` 快照 + CHANGELOG 0.85→1.4.x 已移植项）、CodeBuddy Code（Claude Code 系 CLI）
@@ -111,9 +112,9 @@ per-subagent token 计量：子代理 OnLLMStream 置为 usage 累加器（loop 
 | P-2 | ~~分支树会话~~ | `/tree` `/fork` `/clone`，JSONL + 分支摘要，交互回溯 | ✅ 简化版已实现（2026-11-15）：`/fork`（全量）/ `/fork <n>`（保留前 n 条）从当前上下文派生新 session ID 重放前缀，血缘记 `{"type":"fork"}` 元数据行（`ForkParent` 可查），标题带 "(fork)" 标记；todo 依赖随前缀回放。无 `/tree` 可视化与分支内回溯 | 已补齐简化版，`/tree` 按需再做 |
 | P-3 | ~~thinking level 完整档位~~ | off/minimal/low/medium/high/xhigh/max | ✅ 已实现（2026-11-15）：auto/off/low/medium/high/xhigh/max，xhigh/max 透传 reasoning_effort（需网关支持） | 已补齐 |
 | P-4 | **模型轮换/多 provider** | Ctrl+P / `/scoped-models` / models.json 多模型切换 | `/model` 单切换；子任务已可按任务指定模型（Model 字段生效），但主对话仍单模型 | 🟡 结合 GAP-S1 自定义类型（per-type model），价值大于 UI 级轮换 |
-| P-5 | **Project Trust** | 项目级资源加载确认 + trust.json | 无 | 🔵 简化版：首次加载项目级 config/技能时 TUI 确认一次 |
-| P-6 | **export HTML** | `--export` + highlight.js 归档 | 无 | 🔵 Server 模式已有 `/rpc` 数据出口，HTML 导出优先级低 |
-| P-7 | **图片读取** | read 工具 MIME 检测转 image 附件 | read 只出文本 | 🔵 多模态网关可用时再做 |
+| P-5 | ~~Project Trust~~ | 项目级资源加载确认 + trust.json | ✅ 已实现（2026-11-15 简化版）：`internal/trust` + project_trust.json；首次进入含项目级 AGENTS.md/.cursorrules/USER.md/.mizar/prompts 的目录询问一次（非交互按拒绝），未信任则跳过注入；`/trust` 管理 | 已补齐简化版 |
+| P-6 | ~~export HTML~~ | `--export` + highlight.js 归档 | ✅ 已实现（2026-11-15）：`internal/exporter` 自包含 HTML（内联 CSS + 极简关键字高亮，离线可用）；`-export -session <id>` / `-export -c` / `/export` 命令 | 已补齐（无 CDN，内网可用） |
+| P-7 | ~~图片读取~~ | read 工具 MIME 检测转 image 附件 | ✅ 已实现（2026-11-15，opt-in）：`config image_read=true` 时 read 遇图片文件入队，Agent 每轮挂到最后一条 user 消息，LLM 层编码为多模态 content 数组 | 已补齐（需多模态网关） |
 
 **已优于 Pi、不引入**（详见 pi-comparison.md 第六节）：技能索引注入原生实现、系统提示词强冻结、禁用走工具层不破缓存、MCP 客户端 + WS 桥、bash 默认超时、技能统计/周报/自动沉淀、CacheStats、Prompt Templates。
 
@@ -208,9 +209,8 @@ model: 主模型    # 可省略，继承父级
 
 | 优先级 | 项 | 工作量 | 对应缺口 |
 |---|---|---|---|
-| 🔵 P3 | Project Trust 简化版 / export HTML / 图片读取 | 各~80 行 | P-5/6/7 |
 
-> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）；**用户级 hooks（C-6，config.json hooks 段 shell 命令响应工具事件）与 per-subagent token 计量（GAP-S5，流式 usage 累加进句柄）**（2026-11-15 晚交付）；**结构化记忆四分类 + MEMORY.md 自动注入索引（C-7，`internal/memory` 包 + memory 工具 + `/memory` 命令 + Agent.MemoryPrompt volatile 段）**（2026-11-15 晚交付）；**worktree 隔离（C-8，`internal/worktree` + worktree_create/leave/list 工具 + delegate_task working_dir 工具锚定）**（2026-11-15 晚交付）；**延迟工具加载（C-9，`config tool_inject_mode=index` + tool_search 按需加载 + ActiveTools 只发核心+已加载）**（2026-11-15 晚交付）。
+> 已完成移出路线图：role 生效 + 行为预设、只读角色工具白名单强制（explore/review 摘除 edit/write）、排队/执行超时分离、steer_subagent 注册、委派时机指引（DelegationGuide）、按任务换模型、有限嵌套委派（v0.8.7/v0.8.8 交付）；todo 依赖 blocked_by + 自动解锁（C-2）、`/subagents` 内部命令、委派工具参数宽容剥壳、原生 `sleep(ms)` 宿主函数注册修复、子任务进度缓冲与查询（OnStep → Progress → get_subagent//subagents）、OnProgress 推送（TUI 状态栏 + WebUI /ws 广播）、权限门禁 PermissionMode 四模式 + 子代理继承（GAP-S2/C-5，2026-11-14 晚交付）；**扩展事件拦截 ToolCallDecision（P-1）、子任务句柄随会话落盘回放（GAP-S4）、thinking level xhigh/max（P-3）、用户自定义子代理类型 ~/.mizar/agents/*.md（GAP-S1 第二层/C-1）**（2026-11-15 交付）；**/fork 会话分支派生（P-2 简化版，含 interactive/TUI 会话 ID 指针同步——顺带修复 /session 切换后落盘仍写旧文件的既有错位）**（2026-11-15 交付）；**用户级 hooks（C-6，config.json hooks 段 shell 命令响应工具事件）与 per-subagent token 计量（GAP-S5，流式 usage 累加进句柄）**（2026-11-15 晚交付）；**结构化记忆四分类 + MEMORY.md 自动注入索引（C-7，`internal/memory` 包 + memory 工具 + `/memory` 命令 + Agent.MemoryPrompt volatile 段）**（2026-11-15 晚交付）；**worktree 隔离（C-8，`internal/worktree` + worktree_create/leave/list 工具 + delegate_task working_dir 工具锚定）**（2026-11-15 晚交付）；**延迟工具加载（C-9，`config tool_inject_mode=index` + tool_search 按需加载 + ActiveTools 只发核心+已加载）**（2026-11-15 晚交付）；**Project Trust 简化版（P-5，`internal/trust` + project_trust.json + `/trust`）、export HTML（P-6，`internal/exporter` 自包含 + `-export`/`/export`）、图片读取（P-7，`config image_read` + read 入队 + LLM 多模态编码）**（2026-11-15 晚交付）。
 
 ---
 
@@ -229,6 +229,9 @@ model: 主模型    # 可省略，继承父级
 | `internal/builtins/worktree_tool.go` | worktree_create/leave/list 工具 |
 | `internal/agent/workdir_wrap.go` | working_dir 工具锚定（C-8 配套：bash 前置 cd，路径类工具拼相对路径） |
 | `internal/agent/tool_index.go` | 延迟工具加载（C-9：ActiveTools/延迟索引/tool_search/会话级已加载集合） |
+| `internal/trust/trust.go` | 项目信任（P-5：project_trust.json 判定/ProjectResources/Ensure） |
+| `internal/exporter/exporter.go` | 会话导出 HTML（P-6：自包含文档/代码高亮/工具折叠块/HTML 转义） |
+| `internal/agent/image_sink.go` | 图片读取（P-7：待注入队列/ImageMIME/attachPendingImages） |
 | `internal/builtins/memory_tool.go` | memory 工具（C-7：add/list/remove/count，写后刷新注入） |
 | `cmd/mizar/main.go:716-723` | 五个委派工具注册 + DelegationGuide 注入 |
 | `internal/llm/openai.go` | `WithModel`（modelDeriver 的实现侧）+ thinking 档位（P-3 xhigh/max） |

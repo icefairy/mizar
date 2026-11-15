@@ -1,6 +1,7 @@
 package builtins
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"mizar/internal/agent"
 	"mizar/internal/caps"
 	"mizar/internal/plugins"
 	"mizar/internal/utils"
@@ -199,6 +201,19 @@ func toolRead() plugins.Tool {
 			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
 				return "", fmt.Errorf("read: args {path} required")
 			}
+			// 图片读取（P-7）：多模态网关可用时，图片文件作为视觉附件随下一条
+			// 消息发送（不入 tool result 文本），返回一句说明即可。
+			if mime := agent.ImageMIME(p.Path); mime != "" && agent.ImageVisionEnabled() {
+				if fi, serr := os.Stat(p.Path); serr == nil && !fi.IsDir() && fi.Size() <= agent.MaxImageBytes {
+					if b, rerr := os.ReadFile(p.Path); rerr == nil {
+						if agent.PushPendingImage(agent.PendingImage{Path: p.Path, MIME: mime, Base64: base64.StdEncoding.EncodeToString(b)}) {
+							return fmt.Sprintf("🖼 已读取图片 %s（%s, %d 字节），作为视觉附件随下一条消息发送", p.Path, mime, len(b)), nil
+						}
+						return "", fmt.Errorf("read: 本轮图片附件已达上限，请分多轮读取")
+					}
+				}
+			}
+
 			// 大小预检：>10MB 拒绝，防 OOM
 			fi, err := os.Stat(p.Path)
 			if err != nil {

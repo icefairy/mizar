@@ -630,3 +630,33 @@ func TestUserAgent_Clear(t *testing.T) {
 		t.Fatalf("UserAgent() after clear = %q", o.UserAgent())
 	}
 }
+
+func TestEncodeMessagesWithImages(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: agent.RoleUser, Content: "看这张图", Images: []agent.ImagePart{
+			{MIME: "image/png", Data: "QUJD"},
+		}},
+	}
+	out := encodeMessages(msgs)
+	if len(out) != 1 {
+		t.Fatalf("len=%d", len(out))
+	}
+	parts, ok := out[0].Content.([]chatContentPart)
+	if !ok {
+		t.Fatalf("应编码为多模态数组，实际 %T", out[0].Content)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[1].Type != "image_url" {
+		t.Fatalf("parts=%+v", parts)
+	}
+	if !strings.HasPrefix(parts[1].ImageURL.URL, "data:image/png;base64,QUJD") {
+		t.Errorf("data URI 错误: %s", parts[1].ImageURL.URL)
+	}
+}
+
+func TestEncodeMessagesNoImagesUnchanged(t *testing.T) {
+	msgs := []agent.Message{{Role: agent.RoleUser, Content: "纯文本"}}
+	out := encodeMessages(msgs)
+	if _, ok := out[0].Content.(string); !ok {
+		t.Errorf("无图片应保持 string, 实际 %T", out[0].Content)
+	}
+}

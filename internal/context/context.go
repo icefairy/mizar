@@ -83,6 +83,37 @@ func Load(workDir string) string {
 	return LoadContextFiles(workDir)
 }
 
+// LoadContextFilesAllowing 与 LoadContextFiles 相同，但每个局部文件需经 allow 放行
+// （allow 为 nil 时等同 LoadContextFiles）。全局 ~/.mizar/AGENTS.md 始终放行。
+// 用于项目信任（P-5）：未信任的项目跳过其 AGENTS.md/.cursorrules/USER.md。
+func LoadContextFilesAllowing(workDir string, allow func(path string) bool) string {
+	if allow == nil {
+		return LoadContextFiles(workDir)
+	}
+	labels := map[string]string{
+		"AGENTS.md":    "全局",
+		".cursorrules": "项目配置",
+		"USER.md":      "用户档案",
+	}
+	var sb strings.Builder
+	global := filepath.Join(config.ConfigDir(), "AGENTS.md")
+	if fileExists(global) {
+		appendFile(&sb, global, "全局 AGENTS.md")
+	}
+	for _, name := range []string{"AGENTS.md", ".cursorrules", "USER.md"} {
+		if local := findUpwards(workDir, name); local != "" {
+			if local == global {
+				continue
+			}
+			if !allow(local) {
+				continue
+			}
+			appendFile(&sb, local, labels[name])
+		}
+	}
+	return sb.String()
+}
+
 // LoadContextFiles 读取所有上下文文件（含全局/局部 AGENTS.md、.cursorrules、USER.md）
 // 并相加渲染。SOUL.md 需单独调用 LoadSoul()。
 // 返回渲染后的提示文本；无文件时返回空字符串。
