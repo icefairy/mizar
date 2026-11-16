@@ -2502,8 +2502,25 @@ func (m *tuiModel) submitInput(s string) {
 // 以前提醒是 fmt.Printf 到 stdout，直接盖在 tcell 画出的界面上，永远擦不掉。
 func (m *tuiModel) deliverReminderHook() {
 	tuiDeliverReminder = func(prompt string) {
+		// 定时提醒不只是打一行字：要「唤醒 agent」——
+		// - 空闲：提醒内容作为新一轮任务启动（自主循环的关键一环）
+		// - 任务运行中：steer 进当前循环（下一次 LLM 调用前注入），
+		//   与用户在任务中打字的行为一致
+		// - 取消中：steer 无意义，入队等任务结束后自动发送
+		// 以上操作都改非线程安全状态，必须投递回事件循环线程。
 		m.app.QueueUpdateDraw(func() {
-			m.addChatLine(chatLine{role: "err", content: "⏰ 【定时提醒】" + prompt, ts: time.Now()})
+			wake := "⏰ 【定时提醒】" + prompt
+			if m.canceling.Load() {
+				m.queue = append(m.queue, wake)
+				m.renderQueue()
+				return
+			}
+			m.addChatLine(chatLine{role: "err", content: wake, ts: time.Now()})
+			if m.loading {
+				m.agent.Steer(wake + "\n（提醒到期，请处理上述事项）")
+				return
+			}
+			m.startTask(wake)
 		})
 	}
 	// 子任务进度推送（GAP-S3 收尾）：OnStep 进度行 → 状态栏最近一步显示。

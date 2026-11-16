@@ -982,7 +982,12 @@ func main() {
 			tuiDeliverReminder(prompt)
 			return
 		}
-		fmt.Printf("\n⏰ 【定时提醒】%s\n", prompt)
+		fmt.Printf("\n⏰ 【定时提醒】%s\n（已写入会话历史，下一条消息模型可见）\n", prompt)
+		// 非 TUI（readline/一次性任务）：readline 阻塞在 Prompt 上无法被
+		// 打断，无法像 TUI 那样直接唤醒。退而求其次：把提醒写进 Initial
+		// 历史，模型下一轮对话能「看见」这条到期提醒，自主循环仍成立。
+		a.Initial = append(a.Initial, agent.Message{Role: agent.RoleUser,
+			Content: "⏰ 【定时提醒】" + prompt})
 	})
 	// 注册 goal + schedule 工具
 	for _, t := range builtins.GoalTools(goalSvc) {
