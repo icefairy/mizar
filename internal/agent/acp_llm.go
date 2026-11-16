@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -49,8 +50,8 @@ var acpCLIRegistry = map[string]ACPCliConfig{
 		ServePort:    3011,
 		HealthPath:   "/api/v1/auth/status",
 		HealthHeader: "x-codebuddy-request: 1",
-		PwLogFiles:   "/tmp/codebuddy-serve.log;/var/log/codebuddy-serve.log",
-		PwRegex:      `Password\s+(\S+)`,
+		PwLogFiles:  homeDir() + "/.mizar/logs/codebuddy-serve.log;/tmp/codebuddy-serve.log;/var/log/codebuddy-serve.log",
+		PwRegex:      `Password(?:\x1b\[[0-9;]*m|\s)+([A-Za-z0-9_\-]+)`,
 		ExtraHeader:  "x-codebuddy-request: 1",
 		LoginHint:    "本机执行 codebuddy /login（或从 Windows 侧同步 auth 文件）",
 	},
@@ -156,27 +157,44 @@ func RunACPSubagent(cli, goal, contextMsg, workDir string, timeoutSecs int, dep 
 	// 1. POST /api/v1/auth/login {password} → Set-Cookie gateway_session=...
 	// 2. 之后所有请求带该 Cookie + 头 x-codebuddy-request（任意值）
 	// 3. /api/v1/acp/connect → {connectionId, sessionToken}
+	// cookie 进程内+磁盘（~/.mizar/）双缓存，401 时自动重登。
 	client := &http.Client{Timeout: 0} // 无硬超时，靠 deadline 手动管
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.ServePort)
 
-	loginReq, err := http.NewRequest("POST", base+"/api/v1/auth/login", bytes.NewReader([]byte(`{"password":"`+pw+`"}`)))
-	if err != nil {
-		return "", err
-	}
-	loginReq.Header.Set("Content-Type", "application/json")
-	loginResp, err := client.Do(loginReq)
-	if err != nil {
-		return "", fmt.Errorf("acp login: %w", err)
-	}
-	cookie := ""
-	for _, c := range loginResp.Cookies() {
-		if c.Name == "gateway_session" {
-			cookie = c.Name + "=" + c.Value
+	// acpLogin 走 login 换新 cookie 并写缓存。
+	acpLogin := func() (string, error) {
+		loginReq, err := http.NewRequest("POST", base+"/api/v1/auth/login", bytes.NewReader([]byte(`{"password":"`+pw+`"}`)))
+		if err != nil {
+			return "", err
 		}
+		loginReq.Header.Set("Content-Type", "application/json")
+		loginResp, err := client.Do(loginReq)
+		if err != nil {
+			return "", fmt.Errorf("acp login: %w", err)
+		}
+		cookie := ""
+		for _, c := range loginResp.Cookies() {
+			if c.Name == "gateway_session" {
+				cookie = c.Name + "=" + c.Value
+			}
+		}
+		loginResp.Body.Close()
+		if cookie == "" {
+			return "", fmt.Errorf("acp: 登录成功但未拿到 gateway_session cookie（%s）", cfg.LoginHint)
+		}
+		acpSaveCookie(cfg.ServePort, cookie)
+		return cookie, nil
 	}
-	loginResp.Body.Close()
+
+	cookie := acpLoadCookie(cfg.ServePort)
 	if cookie == "" {
-		return "", fmt.Errorf("acp: 登录成功但未拿到 gateway_session cookie（%s）", cfg.LoginHint)
+		if dep != nil {
+			dep("acp: login（首次，cookie 已缓存到 ~/.mizar/）")
+		}
+		var err error
+		if cookie, err = acpLogin(); err != nil {
+			return "", err
+		}
 	}
 
 	post := func(path, body string, extra map[string]string, timeout time.Duration) ([]byte, error) {
@@ -448,11 +466,61 @@ func acpProbe(cfg ACPCliConfig, timeout time.Duration) bool {
 }
 
 // acpPassword 从启动日志抓密码（与 acp_cli.ts 同策略）。
+// acpCookieCache 进程内 cookie 缓存（key: servePort）。
+// gateway_session Max-Age 30 天；persist 到 ~/.mizar/ 让重启后复用。
+var acpCookieCache = struct {
+	mu    sync.Mutex
+	value map[int]string
+}{value: map[int]string{}}
+
+// acpCookiePath cookie 持久化文件（~/.mizar/，不放 /tmp）。
+func acpCookiePath() string { return homeDir() + "/.mizar/acp_gateway_session" }
+
+// acpLoadCookie 读缓存：内存 → 磁盘。
+func acpLoadCookie(port int) string {
+	acpCookieCache.mu.Lock()
+	c, ok := acpCookieCache.value[port]
+	acpCookieCache.mu.Unlock()
+	if ok && c != "" {
+		return c
+	}
+	if b, err := os.ReadFile(acpCookiePath()); err == nil {
+		c = strings.TrimSpace(string(b))
+		if c != "" {
+			acpCookieCache.mu.Lock()
+			acpCookieCache.value[port] = c
+			acpCookieCache.mu.Unlock()
+			return c
+		}
+	}
+	return ""
+}
+
+// acpSaveCookie 写缓存：内存 + 磁盘（0600）。
+func acpSaveCookie(port int, cookie string) {
+	acpCookieCache.mu.Lock()
+	acpCookieCache.value[port] = cookie
+	acpCookieCache.mu.Unlock()
+	_ = os.MkdirAll(homeDir()+"/.mizar", 0o755)
+	_ = os.WriteFile(acpCookiePath(), []byte(cookie), 0o600)
+}
+
+// acpPwPath 密码缓存文件（~/.mizar/，0600）。
+// 敏感凭据不落 /tmp：日志可以在 tmp，缓存凭据必须在家目录。
+func acpPwPath() string { return homeDir() + "/.mizar/acp_serve_pw" }
+
 func acpPassword(cfg ACPCliConfig) (string, error) {
 	re := compileACPRegex(cfg.PwRegex)
 	if re == nil {
 		return "", fmt.Errorf("acp: 密码正则无效")
 	}
+	// 1) 先读缓存凭据（serve 重启密码不变时直接命中）
+	if b, err := os.ReadFile(acpPwPath()); err == nil {
+		if s := strings.TrimSpace(string(b)); s != "" {
+			return s, nil
+		}
+	}
+	// 2) 缓存未命中 → 从日志解析并落缓存
 	for _, lf := range strings.Split(cfg.PwLogFiles, ";") {
 		lf = strings.TrimSpace(lf)
 		if lf == "" {
@@ -463,10 +531,13 @@ func acpPassword(cfg ACPCliConfig) (string, error) {
 			continue
 		}
 		if m := re.FindSubmatch(b); len(m) > 1 {
-			return string(m[1]), nil
+			pw := string(m[1])
+			_ = os.MkdirAll(homeDir()+"/.mizar", 0o755)
+			_ = os.WriteFile(acpPwPath(), []byte(pw), 0o600)
+			return pw, nil
 		}
 	}
-	return "", fmt.Errorf("acp: 拿不到 serve 密码（检查 %s）", cfg.PwLogFiles)
+	return "", fmt.Errorf("acp: 拿不到 serve 密码（检查 %s 与缓存 %s）", cfg.PwLogFiles, acpPwPath())
 }
 
 // acpWorkDir 工作目录兜底。
