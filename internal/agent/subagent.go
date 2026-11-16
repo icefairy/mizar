@@ -476,6 +476,35 @@ func (sm *SubagentManager) runSubagentInner(h *SubagentHandle, req SubagentLaunc
 		})
 	}
 
+	// ACP CLI 子代理（model="acp:<cli>"）：官方 CLI 自带工具协议，
+	// 不走 mizar agent 循环（两套工具协议强桥接只会扯皮），
+	// 直接把任务交给 CLI 的 ACP 会话独立执行，最终文本作为 Result。
+	// 与外部 CLI 平级对待：同一个 delegate_task 入口、同一套句柄/
+	// 进度/超时/回灌，只是执行引擎不同。
+	if strings.HasPrefix(req.Model, "acp:") {
+		cli := strings.TrimPrefix(req.Model, "acp:")
+		dep := func(step string) {
+			sm.mu.Lock()
+			h.progress = append(h.progress, step)
+			if len(h.progress) > maxSubagentProgress {
+				h.progress = h.progress[len(h.progress)-maxSubagentProgress:]
+			}
+			f := sm.onProgress
+			sm.mu.Unlock()
+			if f != nil && h.State == SubagentRunning {
+				f(h.ID, step)
+			}
+		}
+		reply, err := RunACPSubagent(cli, req.Goal, req.Context, req.WorkingDir, req.TimeoutSecs, dep)
+		if err != nil {
+			sm.setState(h.ID, SubagentFailed, reply, err.Error())
+		} else {
+			sm.setState(h.ID, SubagentSucceeded, reply, "")
+			sm.notify(h, reply)
+		}
+		return
+	}
+
 	// 子任务可指定模型：parentLLM 若实现 modelDeriver 就派生一个只换 Model 的
 	// 新实例；否则忽略 req.Model 用主模型（并在句柄标注，避免"以为换了其实没换"）。
 	// 自定义类型可带类型默认 model（GAP-S1 第二层）：req.Model 未指定时生效，
