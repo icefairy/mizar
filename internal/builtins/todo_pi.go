@@ -327,13 +327,61 @@ func todoTool() plugins.Tool {
 			"never leave finished items pending—the session cannot close while any todo is still incomplete. " +
 			"State survives session restarts and is shown by the /todos command.",
 		Run: func(args string) (string, error) {
+			// 宽容解析：先剥 {"args": ...} / {"arguments": ...} / {"params": ...}
+			// 包装壳（Description 无 Args: 模式时调用方可能套壳传参），
+			// 再按扁平结构取字段；id 兼容 number/string（LLM 常给 "1"）。
 			var p struct {
-				Action    string `json:"action"`
-				Text      string `json:"text"`
-				ID        int    `json:"id"`
-				BlockedBy []int  `json:"blocked_by"`
+				Action    string
+				Text      string
+				ID        int
+				BlockedBy []int
 			}
-			if err := json.Unmarshal([]byte(args), &p); err != nil {
+			decode := func(raw string) bool {
+				var m map[string]any
+				if err := json.Unmarshal([]byte(raw), &m); err != nil {
+					return false
+				}
+				inner := m
+				for _, key := range []string{"args", "arguments", "params"} {
+					if v, ok := inner[key]; ok && len(inner) <= 2 {
+						switch x := v.(type) {
+						case string:
+							var mi map[string]any
+							if json.Unmarshal([]byte(x), &mi) == nil {
+								inner = mi
+								continue
+							}
+						case map[string]any:
+							inner = x
+							continue
+						}
+					}
+					break
+				}
+				if s, ok := inner["action"].(string); ok {
+					p.Action = s
+				}
+				if s, ok := inner["text"].(string); ok {
+					p.Text = s
+				}
+				switch v := inner["id"].(type) {
+				case float64:
+					p.ID = int(v)
+				case string:
+					if n, err := strconv.Atoi(v); err == nil {
+						p.ID = n
+					}
+				}
+				if arr, ok := inner["blocked_by"].([]any); ok {
+					for _, x := range arr {
+						if f, ok := x.(float64); ok {
+							p.BlockedBy = append(p.BlockedBy, int(f))
+						}
+					}
+				}
+				return p.Action != ""
+			}
+			if !decode(args) {
 				return "", fmt.Errorf("todo: args must be JSON: {\"action\":\"list|add|toggle|clear\", ...}")
 			}
 			todoS.mu.Lock()
