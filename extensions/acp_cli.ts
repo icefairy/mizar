@@ -1,5 +1,6 @@
 // acp_cli.ts —— 官方 CLI 合规接入（ACP: Agent Client Protocol）
 //
+// 场景：网关侧已移除厂商账号池（codebuddy/qoder/cline），合规化改走官方 CLI。
 // 本插件管理本机官方 CLI 的 serve 进程，通过官方暴露的 ACP over HTTP SSE
 // 接口完成对话。凭据完全由官方 CLI 自管（过期 401 时提示 /login），
 // 本插件不做指纹伪装、不碰令牌。
@@ -110,6 +111,132 @@ function servePassword(cliKey: string, cfg: any): string | null {
   return null;
 }
 
+// ============ 模型映射与就近匹配 ============
+// 本地上游网关(Mizar)的模型 ID 与目标 CLI(codebuddy)的模型 ID 大部分不同名。
+// 通过「权威别名表」+「族名就近匹配」把 Mizar 选中的模型映射到 CLI 真实可用的模型。
+
+/** codebuddy 等目标 CLI 的可用模型清单（入格即可；与 Mizar 侧同名优先直接走） */
+const CLI_MODELS: any = {
+  // Mizar/织女星网关侧 ID ——> CLI 侧 ID
+  "glm-5.3-flash":      "glm-5.3-flash",
+  "glm-5.2-flash":      "glm-5.3-flash",   // 不存在则就近
+  "glm-5.3":            "glm-5.3",
+  "deepseek-v4-flash":  "deepseek-v4.1-flash",
+  "deepseek-v4.1-flash":"deepseek-v4.1-flash",
+  "deepseek-v4-pro":    "deepseek-v4-pro",
+  "flash":              "hy4flash",
+  "lite":               "hy4flash-free",   // 便宜的模糊名
+  "dsflash":            "deepseek-v4.1-flash",
+  "agnes-3.0-flash":    "space-bunny",     // 无对应→fallback 便宜档
+  "sensenova-6.8-flash":"deepseek-v4.1-flash",
+  "spark-x2.6":         "minimax-m3.1-flash",
+  "qwen3.8:27b":        "hy4std",
+  "vision":             "",                // 多模态: 走 CLI 默认(不改 model)
+  "bge-m3":             "",                // embedding, 不走 LLM
+  "rerankv2m3":         "",                // rerank, 不走 LLM
+};
+
+/** session/new 时从 config option 探测到的 CLI 真实模型清单（懒加载缓存） */
+let cliModelOptions: string[] | null = null;
+
+/** 从 session/new 的 config_option_update 里把 model 的 options 抓出来存缓存 */
+function recordCliModels(configOptions: any): void {
+  try {
+    const arr = Array.isArray(configOptions) ? configOptions : [];
+    for (const co of arr) {
+      if (co && co.id === "model" && Array.isArray(co.options)) {
+        cliModelOptions = co.options.map((o: any) => String(o.value || o.id)).filter(Boolean);
+        return;
+      }
+    }
+  } catch {}
+}
+
+/** Mizar 模型 ID → CLI 模型 ID。命中: 别名表 > 同名 > 族名就近 > 空(=不动,用 CLI 默认) */
+function mapModel(mizarModel: string): string {
+  const m = (mizarModel || "").trim().toLowerCase();
+  if (!m) return "";
+  // 1) 权威别名表
+  if (CLI_MODELS[m] !== undefined) return CLI_MODELS[m];
+  // 2) 同名匹配
+  const known = cliModelOptions && cliModelOptions.length ? cliModelOptions : Object.values(CLI_MODELS).filter(Boolean) as string[];
+  if (known.includes(m)) return m;
+  // 3) 族名就近：按型号族(glm/deepseek/kimi/minimax/...)挑最接近的
+  const fam = m.replace("flash", "").replace("pro", "").replace(/-/g, "").slice(0, 5);
+  for (const k of known) {
+    const kf = k.replace("flash", "").replace("pro", "").replace(/-/g, "").slice(0, 5);
+    if (kf === fam) return k;
+  }
+  // 4) 前缀宽松再试
+  for (const k of known) { if (k.startsWith(fam.slice(0, 3))) return k; }
+  return ""; // 未知: 用 CLI 默认
+}
+
+/** Mizar thinking_level → CLI effort 档位，并按 CLI 支持的档位 clamp，规避 hy3 式静默回退 */
+function mapEffort(level: string, cliOptions: string[] | null): string {
+  const l = (level || "").toLowerCase();
+  if (!l) return "";
+  const sem = [ "lowest","low","minimal","medium","balanced","high","default","xhigh","max" ];
+  const map: any = { lowest:"low",low:"low",minimal:"low",medium:"medium",balanced:"medium",
+    high:"high",default:"high",xhigh:"xhigh",max:"max", off:"low", auto:"enabled", on:"enabled" };
+  let want = map[l] || l;
+  // 若 CLI 不透出档位(未知)，回退到 Mizar 语义最近档
+  if (!cliOptions || !cliOptions.length) {
+    // 语义排序: 取最近的可用
+    const order = [ "low","enabled","high","max","medium","xhigh" ];
+    return order.includes(want) ? want : "high";
+  }
+  if (cliOptions.includes(want)) return want;
+  // clamp：在 CLI 支持的档位里挑语义最近
+  const rank: any = { low:0, enabled:0, medium:1, high:2, xhigh:3, max:4 };
+  const wantRank = rank[want] ?? 2;
+  let best = cliOptions[0], bestDiff = 1e9;
+  for (const o of cliOptions) {
+    const r = rank[o] ?? 0;
+    const d = Math.abs(r - wantRank);
+    if (d < bestDiff) { bestDiff = d; best = o; }
+  }
+  return best || "high";
+}
+
+/** 从 ~/.mizar/config.json 读当前模型与思考等级 */
+function currentModelEffort(): { model: string; effort: string } {
+  const cfgRaw = shell_exec("cat ~/.mizar/config.json 2>/dev/null; true");
+  try {
+    const o = JSON.parse(cfgRaw);
+    return {
+      model: String(o.model || ""),
+      effort: String(o.thinking_level || "").toLowerCase(),
+    };
+  } catch { return { model: "", effort: "" }; }
+}
+
+/** 按 ACP 协议设置模型与思考等级。缺省取 Mizar 当前配置（~/.mizar/config.json）。 */
+function applyModel(connId: string, tok: string, pw: string, sessionId: string, model: string, effort: string): void {
+  const hdr = JSON.stringify({ "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+    Authorization: "Bearer " + pw, "acp-connection-id": connId,
+    "acp-session-token": tok, "x-codebuddy-request": "1" });
+  const B = serveBase(3011) + "/api/v1/acp";
+  // 透传时先做模型映射：Mizar ID → CLI ID（映射不进则不动 model，用 CLI 默认）
+  const cliModel = mapModel(model);
+  if (cliModel) {
+    http_request("POST", B,
+      JSON.stringify({ jsonrpc: "2.0", id: 13, method: "session/set_model",
+        params: { sessionId: sessionId, modelId: cliModel } }), hdr);
+  }
+  // 思考等级：CLI 的 thought_level select 支持 low/high/max/enabled，映射后 clamp
+  if (effort) {
+    const tlOptions = ["low","high","max","enabled"]; // 从 config 探测改写，这里用已知档位
+    const cliEffort = mapEffort(effort, tlOptions);
+    if (cliEffort) {
+      http_request("POST", B,
+        JSON.stringify({ jsonrpc: "2.0", id: 14, method: "session/set_config_option",
+          params: { sessionId: sessionId, configId: "thought_level", value: cliEffort } }), hdr);
+    }
+  }
+}
+
 /** 确保 serve 在跑：探活→watchdog start→兜底直拉。返回 null=OK */
 function ensureServe(cliKey: string, cfg: any): string | null {
   if (probeHealth(cfg) === "200") return null; // 在跑
@@ -215,7 +342,7 @@ function collectTexts(pr: any): string {
 /**
  * 用官方 CLI / Mizar 本体完成一次对话。
  * 何时用：需要官方 CLI 背书的大模型算力（合规路径）或 Mizar 自身模型算力时。
- * 参数: {prompt: string, cli?: string(注册表 key，默认当前 defaultCli),
+ * 参数: {prompt: string, cli?: string, model?: string, effort?: string,
  *        cwd?: string 工作目录(默认 SERVE_CWD)，serve 类 CLI 忽略 cwd}
  */
 export function tool_acp_chat(args: string): string {
@@ -268,6 +395,17 @@ export function tool_acp_chat(args: string): string {
   if (sn.error) return "session/new 失败: " + JSON.stringify(sn.error).slice(0, 300) +
     "（若为 401 类错误：" + cfg.loginHint + "）";
   const sessionId = (sn.result && sn.result.sessionId) || "";
+
+  // 从 session/new 的 config 项里探测 CLI 真实模型清单，供模型映射/就近匹配使用
+  recordCliModels((sn.result && sn.result.configOptions) || null);
+
+  // 透传模型与思考等级到本次会话（缺省取 Mizar 当前所选）
+  let wantModel = String(p.model || "");
+  let wantEffort = String(p.effort || "");
+  const cur = currentModelEffort();
+  if (!wantModel && cur.model) wantModel = cur.model;
+  if (!wantEffort && cur.effort) wantEffort = cur.effort;
+  applyModel(connId, tok, pw, sessionId, wantModel, wantEffort);
 
   const texts: string[] = [];
   const pr = rpcCollect(cfg, connId, tok, pw, "session/prompt",
