@@ -152,8 +152,32 @@ func RunACPSubagent(cli, goal, contextMsg, workDir string, timeoutSecs int, dep 
 		return "", err
 	}
 
+	// codebuddy --serve 认证协议（2026-11 实测）：
+	// 1. POST /api/v1/auth/login {password} → Set-Cookie gateway_session=...
+	// 2. 之后所有请求带该 Cookie + 头 x-codebuddy-request（任意值）
+	// 3. /api/v1/acp/connect → {connectionId, sessionToken}
 	client := &http.Client{Timeout: 0} // 无硬超时，靠 deadline 手动管
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.ServePort)
+
+	loginReq, err := http.NewRequest("POST", base+"/api/v1/auth/login", bytes.NewReader([]byte(`{"password":"`+pw+`"}`)))
+	if err != nil {
+		return "", err
+	}
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginResp, err := client.Do(loginReq)
+	if err != nil {
+		return "", fmt.Errorf("acp login: %w", err)
+	}
+	cookie := ""
+	for _, c := range loginResp.Cookies() {
+		if c.Name == "gateway_session" {
+			cookie = c.Name + "=" + c.Value
+		}
+	}
+	loginResp.Body.Close()
+	if cookie == "" {
+		return "", fmt.Errorf("acp: 登录成功但未拿到 gateway_session cookie（%s）", cfg.LoginHint)
+	}
 
 	post := func(path, body string, extra map[string]string, timeout time.Duration) ([]byte, error) {
 		req, err := http.NewRequest("POST", base+path, bytes.NewReader([]byte(body)))
@@ -162,7 +186,8 @@ func RunACPSubagent(cli, goal, contextMsg, workDir string, timeoutSecs int, dep 
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set("Authorization", "Bearer "+pw)
+		req.Header.Set("Cookie", cookie)
+		req.Header.Set("x-codebuddy-request", "1")
 		for _, h := range strings.Split(cfg.ExtraHeader, ";") {
 			h = strings.TrimSpace(h)
 			if h == "" {
@@ -289,7 +314,8 @@ func RunACPSubagent(cli, goal, contextMsg, workDir string, timeoutSecs int, dep 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+pw)
+	req.Header.Set("Cookie", cookie)
+	req.Header.Set("x-codebuddy-request", "1")
 	for _, h := range strings.Split(cfg.ExtraHeader, ";") {
 		h = strings.TrimSpace(h)
 		if h == "" {
