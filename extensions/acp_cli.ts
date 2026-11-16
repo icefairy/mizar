@@ -1,82 +1,139 @@
 // acp_cli.ts —— 官方 CLI 合规接入（ACP: Agent Client Protocol）
 //
 // 场景：网关侧已移除厂商账号池（codebuddy/qoder/cline），合规化改走官方 CLI。
-// 本插件管理本机 codebuddy --serve 进程，通过官方暴露的 ACP over HTTP SSE
-// 接口（/api/v1/acp/connect → /api/v1/acp JSON-RPC）完成一次对话。
+// 本插件管理本机官方 CLI 的 serve 进程，通过官方暴露的 ACP over HTTP SSE
+// 接口完成对话。凭据完全由官方 CLI 自管（过期 401 时提示 /login），
+// 本插件不做指纹伪装、不碰令牌。
 //
-// 协议实测（codebuddy 2.180.0）：
+// 支持多种官方 CLI：见下方 CLI_REGISTRY（新增 CLI 在此登记即可）。
+//
+// 协议形态（codebuddy 2.180.0 实测）：
 //   1. codebuddy --serve --port <p> --host 127.0.0.1 --auth password
 //      --permission-mode bypassPermissions
 //      ⚠ serve 启动目录即会话工作目录（session/new 的 cwd 不被采纳）；
-//      ⚠ permission-mode 必须免审批（bypassPermissions），否则 CLI 弹工具
-//      审批对话框挂起，ACP 客户端只能收到 timeout。
-//      启动日志打印随机密码；HTTP 头需 x-codebuddy-request: 1 + Authorization: Bearer <pw>
+//      ⚠ permission-mode 必须免审批，否则 CLI 弹审批对话框挂起 → 客户端 timeout
 //   2. POST /api/v1/acp/connect {} → {connectionId, sessionToken}
 //      （连接令牌生命周期很短，prompt 必须紧跟 connect/new）
 //   3. POST /api/v1/acp （JSON-RPC over streamable-http，SSE 响应）
-//      头：acp-connection-id, X-ACP-Session-Token, Accept: application/json, text/event-stream
 //      方法：initialize → session/new（需 mcpServers:[]）→ session/prompt
 //      回复内容在流式通知 session/update（agent_message_chunk），不在最终 result
-//
-// 凭据完全由官方 CLI 自管（过期 401 时提示 /login），本插件不碰令牌。
 
-const SERVE_PORT = 3011;
+// ============ CLI 注册表：新增官方 CLI 在此登记 ============
+// kind: serve=HTTP serve 常驻（需探活/守护），oneshot=单次调用（每次冷启动）
+const CLI_REGISTRY: any = {
+  codebuddy: {
+    name: "CodeBuddy CLI",
+    kind: "serve",
+    bin: "codebuddy",
+    servePort: 3011,
+    serveArgs: "--serve --host 127.0.0.1 --auth password --permission-mode bypassPermissions",
+    healthPath: "/api/v1/auth/status",
+    healthHeader: "x-codebuddy-request: 1",
+    pwLogFiles: ["/tmp/codebuddy-serve.log", "/var/log/codebuddy-serve.log"],
+    pwRegex: "Password\\s+(\\S+)",
+    serveCmdEnv: "x-codebuddy-request",
+    oneshotArgs: "-p {prompt}",
+    loginHint: "本机执行 codebuddy /login（或从 Windows 侧同步 auth 文件）",
+    default: true, // acp_chat 未指定 cli 时用它
+  },
+  // 新增示例（AC over stdio 的 CLI 适配见 acp_watchdog 同目录计划）：
+  // claude: {
+  //   name: "Claude Code CLI", kind: "oneshot", bin: "claude",
+  //   oneshotArgs: "-p {prompt}", loginHint: "claude /login",
+  // },
+};
+
+function defaultCliName(): string {
+  for (const k in CLI_REGISTRY) if (CLI_REGISTRY[k].default) return k;
+  for (const k in CLI_REGISTRY) return k; // 兜底第一个
+  return "";
+}
+
+function resolveCli(name: string): any {
+  if (name && CLI_REGISTRY[name]) return { key: name, cfg: CLI_REGISTRY[name] };
+  const d = defaultCliName();
+  if (d && CLI_REGISTRY[d]) return { key: d, cfg: CLI_REGISTRY[d] };
+  return null;
+}
+
 const SERVE_CWD = "/data/codes/mizar"; // serve 的工作目录 = 会话默认目录
 const STATE_FILE = "/tmp/mizar-acp-cli.json";
 
-function serveBase(): string {
-  return "http://127.0.0.1:" + SERVE_PORT;
+function stateKey(cliKey: string): string {
+  // 每个独立的 CLI/端口 缓存独立状态
+  return STATE_FILE.replace(/\.json$/, "-" + cliKey + ".json");
 }
 
-/** 读取 serve 密码（serve 由 supervisor 常驻管理；异常时可自动兜底拉起） */
-function ensureServe(): { base: string; password: string } | string {
-  // 先探活：serve 在跑则直接用缓存密码
-  const alive = shell_exec(
-    "curl -s -m 3 -o /dev/null -w '%{http_code}' -H 'x-codebuddy-request: 1' " +
-    "http://127.0.0.1:" + SERVE_PORT + "/api/v1/auth/status 2>/dev/null",
+function serveBase(port: number): string {
+  return "http://127.0.0.1:" + port;
+}
+
+// ============ serve 常驻类 CLI：探活/取密码/自愈 ============
+
+function probeHealth(cfg: any): string {
+  return shell_exec(
+    "curl -s -m 3 -o /dev/null -w '%{http_code}' -H '" + cfg.healthHeader + "' " +
+    serveBase(cfg.servePort) + cfg.healthPath + " 2>/dev/null; true",
   ).trim();
-  if (alive === "200") {
-    const st = shell_exec("cat " + STATE_FILE + " 2>/dev/null");
-    if (st) {
-      try {
-        const o = JSON.parse(st);
-        if (o.password) return { base: serveBase(), password: o.password };
-      } catch {}
-    }
-    // 在跑但没缓存密码：从启动日志补抓
-    const log0 = fs_read("/tmp/codebuddy-serve.log") || fs_read("/var/log/codebuddy-serve.log") || "";
-    const m0 = log0.match(/Password\s+(\S+)/);
-    if (m0) {
-      fs_write(STATE_FILE, JSON.stringify({ password: m0[1] }));
-      return { base: serveBase(), password: m0[1] };
-    }
-    return "serve 在运行但拿不到密码（请检查 /var/log/codebuddy-serve.log）";
-  }
-  // 探活失败：先试 supervisor（常驻首选），再兜底前台拉起
-  shell_exec(
-    "supervisorctl start codebuddy-serve 2>/dev/null; " +
-    "sleep 3; curl -s -m 3 -o /dev/null -w '%{http_code}' -H 'x-codebuddy-request: 1' " +
-    "http://127.0.0.1:" + SERVE_PORT + "/api/v1/auth/status 2>/dev/null",
-  );
-  const log = fs_read("/tmp/codebuddy-serve.log") || fs_read("/var/log/codebuddy-serve.log") || "";
-  const m = log.match(/Password\s+(\S+)/);
-  if (!m) return "codebuddy --serve 启动失败或未抓到密码，见 /tmp/codebuddy-serve.log";
-  fs_write(STATE_FILE, JSON.stringify({ password: m[1] }));
-  return { base: serveBase(), password: m[1] };
 }
 
-function acpHeaders(connId: string, tok: string, pw: string): string {
+/** 读缓存的密码；丢失则从启动日志补抓 */
+function servePassword(cliKey: string, cfg: any): string | null {
+  const stf = stateKey(cliKey);
+  const st = shell_exec("cat " + stf + " 2>/dev/null; true");
+  if (st) {
+    try {
+      const o = JSON.parse(st);
+      if (o.password) return o.password;
+    } catch {}
+  }
+  for (const lf of cfg.pwLogFiles) {
+    const log = fs_read(lf) || "";
+    const m = log.match(new RegExp(cfg.pwRegex));
+    if (m) {
+      fs_write(stf, JSON.stringify({ password: m[1] }));
+      return m[1];
+    }
+  }
+  return null;
+}
+
+/** 确保 serve 在跑：探活→watchdog start→兜底直拉。返回 null=OK */
+function ensureServe(cliKey: string, cfg: any): string | null {
+  if (probeHealth(cfg) === "200") return null; // 在跑
+  // 1) Zig 守护器（首选：脱离进程组，拷文件即跑）
+  const wd = "/data/codes/mizar/extensions/acp_watchdog";
+  shell_exec("cd " + SERVE_CWD + " && " + wd + " start >/dev/null 2>&1 || true");
+  // 2) 兜底直拉（无 watchdog 二进制的机器）
+  if (probeHealth(cfg) !== "200") {
+    shell_exec(
+      "cd " + SERVE_CWD + " && setsid nohup " + cfg.bin + " " + cfg.serveArgs +
+      " --port " + cfg.servePort + " >/tmp/" + cliKey + "-serve.log 2>&1 < /dev/null & sleep 6 || true",
+    );
+  }
+  // 3) 等就绪（CLI 冷启动可能 ~10s）
+  for (let i = 0; i < 6; i++) {
+    if (probeHealth(cfg) === "200") break;
+    shell_exec("sleep 3");
+  }
+  return null;
+}
+
+// ============ ACP over HTTP 通用链路 ============
+
+function acpHeaders(cfg: any, connId: string, tok: string, pw: string): string {
   return JSON.stringify({
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
-    "x-codebuddy-request": "1",
     Authorization: "Bearer " + pw,
     "acp-connection-id": connId,
     "X-ACP-Session-Token": tok,
+    // codebuddy 特有：请求头标记
+    ...((cfg.serveCmdEnv ? JSON.parse('{"' + cfg.serveCmdEnv + '": "1"}') : {})),
   });
 }
 
-/** 从 SSE 响应里抠出 data: 行中 id 匹配的 JSON-RPC result/error，并收集流式通知文本 */
+/** 从 SSE 响应里抠出 id 匹配的 JSON-RPC result/error，并收集流式通知文本 */
 function parseSSE(resp: string, id: number, collect: string[] | null): any {
   const lines = resp.split("\n");
   let final: any = { error: { code: -1, message: "no jsonrpc response for id " + id } };
@@ -84,7 +141,6 @@ function parseSSE(resp: string, id: number, collect: string[] | null): any {
     if (ln.indexOf("data: ") !== 0) continue;
     try {
       const j = JSON.parse(ln.slice(6));
-      // 流式更新：session/update 通知里带 agent 消息
       if (j.method === "session/update" && collect) {
         const upd = j.params && j.params.update;
         if (upd && (upd.sessionUpdate === "agent_message" ||
@@ -99,7 +155,6 @@ function parseSSE(resp: string, id: number, collect: string[] | null): any {
       if (j.id === id) final = j;
     } catch {}
   }
-  // 非 SSE（直接 JSON）也兼容
   try {
     const j = JSON.parse(resp);
     if (j.id === id) final = j;
@@ -108,86 +163,90 @@ function parseSSE(resp: string, id: number, collect: string[] | null): any {
 }
 
 function rpc(
-  connId: string,
-  tok: string,
-  pw: string,
-  method: string,
-  params: any,
-  id: number,
-): any {
-  return rpcCollect(connId, tok, pw, method, params, id, null);
-}
-
-function rpcCollect(
-  connId: string,
-  tok: string,
-  pw: string,
-  method: string,
-  params: any,
-  id: number,
-  collect: string[] | null,
+  cfg: any, connId: string, tok: string, pw: string,
+  method: string, params: any, id: number,
 ): any {
   const resp = http_request(
     "POST",
-    serveBase() + "/api/v1/acp",
+    serveBase(cfg.servePort) + "/api/v1/acp",
     JSON.stringify({ jsonrpc: "2.0", id: id, method: method, params: params }),
-    acpHeaders(connId, tok, pw),
+    acpHeaders(cfg, connId, tok, pw),
+  );
+  return parseSSE(resp, id, null);
+}
+
+function rpcCollect(
+  cfg: any, connId: string, tok: string, pw: string,
+  method: string, params: any, id: number, collect: string[] | null,
+): any {
+  const resp = http_request(
+    "POST",
+    serveBase(cfg.servePort) + "/api/v1/acp",
+    JSON.stringify({ jsonrpc: "2.0", id: id, method: method, params: params }),
+    acpHeaders(cfg, connId, tok, pw),
   );
   return parseSSE(resp, id, collect);
 }
 
 /**
- * 用官方 CodeBuddy CLI 完成一次对话（ACP 会话：connect → initialize → session/new → prompt）。
+ * 用官方 CLI 完成一次对话（ACP 会话：connect → initialize → session/new → prompt）。
  * 何时用：需要官方 CLI 背书的大模型算力（合规路径）时。
- * 参数: {prompt: string 消息, cwd?: string 工作目录(默认 /tmp), sessionCwd?: 同义}
+ * 参数: {prompt: string, cli?: string(注册表 key，默认 codebuddy),
+ *        cwd?: string 工作目录(默认 SERVE_CWD)，serve 类 CLI 忽略 cwd}
  */
 export function tool_acp_chat(args: string): string {
   let p: any = {};
   try { p = JSON.parse(args); } catch { p = { prompt: args }; }
   const prompt = String(p.prompt || args || "");
   if (!prompt) return "缺少 prompt";
-  const cwd = String(p.cwd || "/tmp");
+  const r = resolveCli(String(p.cli || ""));
+  if (!r) return "未知 CLI：" + String(p.cli) + "（可用：" + Object.keys(CLI_REGISTRY).join(", ") + "）";
+  const cfg = r.cfg;
 
-  const srv = ensureServe();
-  if (typeof srv === "string") return srv;
+  // oneshot 类：直接单次调用
+  if (cfg.kind === "oneshot") {
+    const cmd = cfg.bin + " " + String(cfg.oneshotArgs).replace("{prompt}", JSON.stringify(prompt).slice(1, -1));
+    const out = shell_exec(cmd + " 2>&1").trim();
+    return out || "（CLI 无输出）";
+  }
+
+  // serve 类：ACP 全链路
+  const e = ensureServe(r.key, cfg);
+  if (e) return e;
+  const pw = servePassword(r.key, cfg);
+  if (!pw) return "serve 在运行但拿不到密码（检查 " + cfg.pwLogFiles.join(" / ") + "）";
+
   const H = JSON.stringify({
     "Content-Type": "application/json",
-    "x-codebuddy-request": "1",
-    Authorization: "Bearer " + srv.password,
+    Authorization: "Bearer " + pw,
+    ...(cfg.serveCmdEnv ? JSON.parse('{"' + cfg.serveCmdEnv + '": "1"}') : {}),
   });
 
-  // 1. connect
-  const cresp = http_request("POST", srv.base + "/api/v1/acp/connect", "{}", H);
+  const cresp = http_request("POST", serveBase(cfg.servePort) + "/api/v1/acp/connect", "{}", H);
   let conn: any;
   try { conn = JSON.parse(cresp); } catch { return "connect 失败: " + cresp.slice(0, 300); }
   if (!conn.connectionId) return "connect 失败: " + cresp.slice(0, 300);
   const connId = conn.connectionId, tok = conn.sessionToken;
 
-  // 2. initialize
-  const init = rpc(connId, tok, srv.password, "initialize",
+  const init = rpc(cfg, connId, tok, pw, "initialize",
     { protocolVersion: 1, clientCapabilities: {} }, 1);
   if (init.error) return "initialize 失败: " + JSON.stringify(init.error).slice(0, 300);
 
-  // 3. session/new
-  const sn = rpc(connId, tok, srv.password, "session/new",
-    { cwd: cwd, mcpServers: [] }, 2);
+  const sn = rpc(cfg, connId, tok, pw, "session/new",
+    { cwd: String(p.cwd || SERVE_CWD), mcpServers: [] }, 2);
   if (sn.error) return "session/new 失败: " + JSON.stringify(sn.error).slice(0, 300) +
-    "（若为 401 类错误，请到本机执行 codebuddy /login）";
+    "（若为 401 类错误：" + cfg.loginHint + "）";
   const sessionId = (sn.result && sn.result.sessionId) || "";
 
-  // 4. session/prompt：收集流式 agent_message
-  //    ⚠ permission-mode 必须选免审批（bypassPermissions），否则 CLI 侧
-  //    弹出工具审批对话框挂起，ACP 客户端只能收到 timeout。
   const texts: string[] = [];
-  const pr = rpcCollect(connId, tok, srv.password, "session/prompt",
+  const pr = rpcCollect(cfg, connId, tok, pw, "session/prompt",
     {
       sessionId: sessionId,
       prompt: [{ type: "text", text: prompt }],
-      _meta: { "codebuddy.ai/permissionMode": "bypassPermissions" },
     }, 3, texts);
   if (pr.error) return "prompt 失败: " + JSON.stringify(pr.error).slice(0, 500);
 
-  const r = pr.result || {};
+  const res = pr.result || {};
   if (!texts.length) {
     const walk = (o: any) => {
       if (!o || typeof o !== "object") return;
@@ -195,14 +254,43 @@ export function tool_acp_chat(args: string): string {
       if (o.type === "text" && typeof o.text === "string") texts.push(o.text);
       for (const k in o) walk(o[k]);
     };
-    walk(r);
+    walk(res);
   }
   const out = texts.join("\n").trim();
-  return out || JSON.stringify(r).slice(0, 2000);
+  return out || JSON.stringify(res).slice(0, 2000);
 }
 
-/** 查看/关闭 serve 状态 */
-export function tool_acp_status(_args: string): string {
-  const running = shell_exec("pgrep -f 'codebuddy --serve' >/dev/null 2>&1 && echo yes || echo no").trim();
-  return "codebuddy --serve 运行中: " + running + "（端口 " + SERVE_PORT + "）";
+/**
+ * 查看/管理当前使用的外部 CLI。
+ * 何时用：确认接入了哪些官方 CLI、serve 是否在跑、CLI 版本；增删注册表编辑本文件 CLI_REGISTRY。
+ * 参数: {} 状态总览；{"action":"list"} 同；{"cli":"codebuddy"} 指定详情
+ */
+export function tool_acp_status(args: string): string {
+  let p: any = {};
+  try { p = JSON.parse(args || "{}"); } catch { p = {}; }
+  const lines: string[] = ["== Mizar 外部 CLI 注册表（acp_cli）=="];
+  for (const k in CLI_REGISTRY) {
+    const cfg = CLI_REGISTRY[k];
+    const dflt = (k === defaultCliName()) ? " [默认]" : "";
+    lines.push("\n[" + k + "]" + dflt + "  " + cfg.name);
+    lines.push("  kind: " + cfg.kind + "  bin: " + cfg.bin);
+    if (cfg.kind === "serve") {
+      const code = probeHealth(cfg);
+      const alive = code === "200" ? "✅ 在跑" : (code === "000" ? "❌ 未运行" : "⚠ HTTP " + code);
+      lines.push("  serve: " + serveBase(cfg.servePort) + " → " + alive);
+      const wd = shell_exec("test -x /data/codes/mizar/extensions/acp_watchdog && echo yes || echo no; true").trim();
+      const wdStat = shell_exec("/data/codes/mizar/extensions/acp_watchdog status 2>/dev/null; true").trim();
+      lines.push("  watchdog: " + (wd === "yes" ? "已安装（" + wdStat + "）" : "未安装"));
+      const pw = servePassword(k, cfg);
+      lines.push("  凭据: " + (pw ? "缓存有效" : "无缓存（首次对话时从日志抓取）"));
+    } else {
+      const v = shell_exec(cfg.bin + " --version 2>/dev/null | head -1").trim();
+      lines.push("  版本: " + (v || "未安装/无版本输出"));
+  }
+    lines.push("  登录提示: " + cfg.loginHint);
+  }
+  const sel = String(p.cli || "");
+  if (sel) lines.push("\n当前请求 CLI: " + (resolveCli(sel) ? sel + " ✅ 已注册" : sel + " ❌ 未注册"));
+  lines.push("\n新增 CLI：编辑 acp_cli.ts 的 CLI_REGISTRY 登记 serve/oneshot 条目即可。");
+  return lines.join("\n");
 }
