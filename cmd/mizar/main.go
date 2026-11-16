@@ -622,14 +622,22 @@ func main() {
 	for f, e := range skFailed {
 		log.Printf("技能失败: %s: %v", f, e)
 	}
+	// AGENTS.md 自动读取（全局 ~/.mizar/AGENTS.md + 局部向上查找，相加注入）
+	wd := *workDir
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
 	// 技能注入：默认索引模式（缓存友好，正文 read 按需加载）；配置 full = 全量正文
+	// CurrentProject：项目技能（project-<目录名>）只对当前项目注入，防止把
+	// 其它项目的项目技能带进新会话（模型读到会误认工作目录）。
+	skOpt := skills.RelevanceOptions{CurrentProject: filepath.Base(wd)}
 	skMode := "index"
 	skPrompt := ""
 	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.SkillInjectIsIndex() {
 		// 系统提示只放「常驻 + 按名序前 N」——刻意不放全部：
 		// 技能会随项目数量增长，全量注入会把上下文吃光。
 		// 与本次任务相关的那些在 Run 里按任务文本补一段（Agent.SkillRelevant）。
-		skPrompt = skm.RenderRelevant("", skills.RelevanceOptions{})
+		skPrompt = skm.RenderRelevant("", skOpt)
 	} else {
 		skMode = "full"
 		skPrompt = skm.RenderAll()
@@ -643,12 +651,7 @@ func main() {
 		if cfg, err := config.Load(config.DefaultPath()); err == nil && !cfg.SkillInjectIsIndex() {
 			return "" // full 模式已经全量注入，不重复
 		}
-		return skm.RenderRelevant(task, skills.RelevanceOptions{})
-	}
-	// AGENTS.md 自动读取（全局 ~/.mizar/AGENTS.md + 局部向上查找，相加注入）
-	wd := *workDir
-	if wd == "" {
-		wd, _ = os.Getwd()
+		return skm.RenderRelevant(task, skOpt)
 	}
 	// 项目信任（P-5 简化版）：工作目录里的 AGENTS.md/.cursorrules/USER.md 与
 	// .mizar/prompts/*.md 属「项目级资源」，克隆来的仓库可借此注入指令。
@@ -701,27 +704,6 @@ func main() {
 		log.Printf("图片读取已启用（read 工具对图片文件回传视觉附件）")
 	}
 
-	// 结构化长期记忆（C-7，对齐 CodeBuddy 四分类）：~/.mizar/memory/MEMORY.md，
-	// 每次会话自动注入系统提示；memory 工具可增删改。与 memory 插件（HMEM 语义
-	// 检索）互补——这里是小而精、必见的事实清单。
-	memStore := memory.NewStore(filepath.Join(config.ConfigDir(), "memory"))
-	memInject := true
-	if cfgMem, err := config.Load(config.DefaultPath()); err == nil {
-		memInject = cfgMem.MemoryOn()
-	}
-	if err := memStore.Load(); err != nil {
-		log.Printf("结构化记忆加载失败（忽略）: %v", err)
-	} else if cnt, _ := memStore.Count(); cnt > 0 {
-		if memInject {
-			log.Printf("结构化记忆注入: %d 条（%s）", cnt, memStore.Path())
-		} else {
-			log.Printf("结构化记忆已加载 %d 条，但自动注入被关闭（config.json memory_enabled=false）", cnt)
-		}
-	}
-	if memInject {
-		a.MemoryPrompt = memStore.Render()
-	}
-
 	// 会话存储（模仿 pi Agent：按工作路径自动分目录，路径记忆）
 	sessAbs := *sessDir
 	if strings.HasPrefix(sessAbs, "~/") {
@@ -730,6 +712,59 @@ func main() {
 		}
 	}
 	st := session.New(sessAbs)
+
+	// 结构化长期记忆（C-7，对齐 CodeBuddy 四分类）：全局部分在
+	// ~/.mizar/memory/MEMORY.md（user/feedback/reference）；project 分类按
+	// 工作路径分文件，落在 ~/.mizar/sessions/<路径key>/MEMORY.md——与该项目
+	// 的会话同目录（仿 sessions 结构）。跨项目注入 project 条目会让模型误认
+	// 当前项目（2026-11-16 实测），故分文件注入。
+	memStore := memory.NewStore(filepath.Join(config.ConfigDir(), "memory"))
+	memInject := true
+	if cfgMem, err := config.Load(config.DefaultPath()); err == nil {
+		memInject = cfgMem.MemoryOn()
+	}
+	// 项目记忆存储（pathKey 为空=拿不到工作目录，退回全局文件，保持旧行为）
+	pathKey := session.EncodePathKey(wd)
+	var projMem *memory.Store
+	if pathKey != "" {
+		projMem = memory.NewStorePath(filepath.Join(sessAbs, pathKey, "MEMORY.md"), true)
+		if err := projMem.Load(); err != nil {
+			log.Printf("项目记忆加载失败（忽略）: %v", err)
+		}
+	}
+	refreshMemPrompt := func() {
+		if !memInject {
+			return
+		}
+		prompt := memStore.Render()
+		if projMem != nil {
+			prompt += projMem.Render()
+		}
+		a.SetMemoryPrompt(prompt)
+	}
+	if err := memStore.Load(); err != nil {
+		log.Printf("结构化记忆加载失败（忽略）: %v", err)
+	}
+	if cnt, _ := memStore.Count(); cnt > 0 {
+		if memInject {
+			log.Printf("结构化记忆注入: %d 条（%s）", cnt, memStore.Path())
+		} else {
+			log.Printf("结构化记忆已加载 %d 条，但自动注入被关闭（config.json memory_enabled=false）", cnt)
+		}
+	}
+	if projMem != nil {
+		if cnt, _ := projMem.Count(); cnt > 0 && memInject {
+			log.Printf("项目记忆注入: %d 条（%s）", cnt, projMem.Path())
+		}
+	}
+	if memInject {
+		prompt := memStore.Render()
+		if projMem != nil {
+			prompt += projMem.Render()
+		}
+		a.MemoryPrompt = prompt
+	}
+
 	// 会话全文搜索（H-1）：SQLite FTS5 增量索引，放在会话根目录（跨作用域共享）。
 	// 打不开（磁盘只读/FTS5 不可用）时降级为 nil——session_search 工具不注册，
 	// 其余功能完全不受影响。
@@ -741,7 +776,6 @@ func main() {
 	if ssIdx != nil {
 		defer ssIdx.Close()
 	}
-	pathKey := session.EncodePathKey(wd)
 	if pathKey != "" {
 		st = st.Scoped(pathKey)
 		log.Printf("路径记忆: 会话目录 %s/%s", sessAbs, pathKey)
@@ -862,10 +896,17 @@ func main() {
 			if !memInject {
 				return nil // 记忆自动注入被关闭时不写，避免用户看不到却占存储
 			}
-			if err := memStore.Add(memory.CategoryProject, entry); err != nil {
+			// 复盘产出的都是项目事实 → 只写项目记忆文件，不碰全局 MEMORY.md
+			var err error
+			if projMem != nil {
+				err = projMem.Add(memory.CategoryProject, entry)
+			} else {
+				err = memStore.Add(memory.CategoryProject, entry)
+			}
+			if err != nil {
 				return err
 			}
-			a.SetMemoryPrompt(memStore.Render()) // 写入即生效
+			refreshMemPrompt() // 写入即生效
 			return nil
 		},
 		OnReview: func(summary string) {
@@ -906,11 +947,8 @@ func main() {
 	pm.RegisterBuiltin(builtins.SkillSearchTool(skm))
 
 	// 结构化长期记忆工具（C-7）：写入后刷新注入段，使新事实当轮即可见。
-	pm.RegisterBuiltin(builtins.MemoryTool(memStore, func() {
-		if memInject {
-			a.SetMemoryPrompt(memStore.Render())
-		}
-	}))
+	// project 分类路由到项目记忆文件；全局写入谨慎（见工具描述）。
+	pm.RegisterBuiltin(builtins.MemoryTool(memStore, projMem, refreshMemPrompt))
 	// 会话全文搜索工具（H-1）：跨会话按内容检索历史。
 	if ssIdx != nil {
 		pm.RegisterBuiltin(builtins.SessionSearchTool(ssIdx, sessAbs))
@@ -2121,10 +2159,20 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 					return "", err
 				}
 				var sb strings.Builder
-				fmt.Fprintf(&sb, "结构化记忆（%s）：\n", memStore.Path())
+				fmt.Fprintf(&sb, "结构化记忆（全局 %s", memStore.Path())
+				if projMem != nil {
+					fmt.Fprintf(&sb, "；项目 %s", projMem.Path())
+				}
+				sb.WriteString("）：\n")
 				total := 0
 				for _, cat := range memory.Categories() {
 					items := m[cat]
+					// project 分类展示项目记忆文件的内容
+					if cat == memory.CategoryProject && projMem != nil {
+						if pm, err := projMem.List(cat); err == nil {
+							items = pm[cat]
+						}
+					}
 					if len(items) == 0 {
 						continue
 					}
@@ -2136,7 +2184,7 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				}
 				if total == 0 {
 					return "（结构化记忆为空）\n用 /memory add <类别> <内容> 或让模型调用 memory 工具记录；" +
-						"\n类别: user/feedback/project/reference。每次会话自动注入系统提示。", nil
+						"\n类别: user/feedback/project/reference。project 按项目路径分文件，其余进全局（写入需谨慎）。", nil
 				}
 				sb.WriteString("\n（修改后用 /memory 核对；模型也可通过 memory 工具读写）")
 				return sb.String(), nil
@@ -2146,11 +2194,15 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				}
 				cat := memory.NormalizeCategory(fields[1])
 				text := strings.TrimSpace(strings.TrimPrefix(args, fields[0]+" "+fields[1]))
-				if err := memStore.Add(cat, text); err != nil {
+				t := memStore
+				if cat == memory.CategoryProject && projMem != nil {
+					t = projMem
+				}
+				if err := t.Add(cat, text); err != nil {
 					return "", err
 				}
-				a.SetMemoryPrompt(memStore.Render())
-				return fmt.Sprintf("✓ 已记入 %s 分类（当轮起注入系统提示）", cat), nil
+				refreshMemPrompt()
+				return fmt.Sprintf("✓ 已记入 %s 分类（%s；当轮起注入系统提示）", cat, t.Path()), nil
 			case "rm", "remove", "delete":
 				if len(fields) < 3 {
 					return "", fmt.Errorf("用法: /memory rm <类别> <序号>（序号取自 /memory 列表）")
@@ -2159,14 +2211,18 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				if err != nil {
 					return "", fmt.Errorf("序号必须是数字: %q", fields[2])
 				}
-				ok, err := memStore.Remove(fields[1], idx)
+				t := memStore
+				if memory.NormalizeCategory(fields[1]) == memory.CategoryProject && projMem != nil {
+					t = projMem
+				}
+				ok, err := t.Remove(fields[1], idx)
 				if err != nil {
 					return "", err
 				}
 				if !ok {
 					return "", fmt.Errorf("删除失败")
 				}
-				a.SetMemoryPrompt(memStore.Render())
+				refreshMemPrompt()
 				return "✓ 已删除", nil
 			case "clear":
 				target := ""
@@ -2176,7 +2232,12 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				if err := memStore.Clear(target); err != nil {
 					return "", err
 				}
-				a.SetMemoryPrompt(memStore.Render())
+				if projMem != nil && (target == "" || memory.NormalizeCategory(target) == memory.CategoryProject) {
+					if err := projMem.Clear(target); err != nil {
+						return "", err
+					}
+				}
+				refreshMemPrompt()
 				if target == "" {
 					return "✓ 已清空全部结构化记忆", nil
 				}

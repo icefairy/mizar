@@ -142,6 +142,46 @@ func TestStoreRenderTruncation(t *testing.T) {
 	}
 }
 
+// TestGlobalRenderSkipsProject 回归（2026-11-16）：全局 MEMORY.md 的 project
+// 条目不得注入——跨项目注入会让模型误认当前项目（曾因全局记忆全是 hmem-go
+// 条目，WebUI 新会话跑去探索 hmem-go）。
+func TestGlobalRenderSkipsProject(t *testing.T) {
+	st := NewStore(t.TempDir())
+	_ = st.Add(CategoryProject, "hmem-go 由 supervisor 管理")
+	_ = st.Add(CategoryUser, "偏好结论先行")
+	out := st.Render()
+	if strings.Contains(out, "hmem-go") || strings.Contains(out, "### project") {
+		t.Errorf("全局 Render 不该包含 project 条目:\n%s", out)
+	}
+	if !strings.Contains(out, "偏好结论先行") {
+		t.Errorf("user 条目应保留:\n%s", out)
+	}
+}
+
+// TestProjectStoreRoundTrip 项目记忆存储（按路径分文件）：只承载/渲染 project 段。
+func TestProjectStoreRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := NewStorePath(filepath.Join(dir, "--data-codes-mizar--", "MEMORY.md"), true)
+	_ = p.Add(CategoryProject, "mizar 的构建命令是 go build ./...")
+	_ = p.Add(CategoryUser, "不该写进项目文件")
+	// 落盘重开（模拟下次会话加载）
+	p2 := NewStorePath(filepath.Join(dir, "--data-codes-mizar--", "MEMORY.md"), true)
+	if err := p2.Load(); err != nil {
+		t.Fatal(err)
+	}
+	out := p2.Render()
+	if !strings.Contains(out, "go build") || !strings.Contains(out, "### project") {
+		t.Errorf("项目 Render 应含 project 条目:\n%s", out)
+	}
+	if strings.Contains(out, "不该写进项目文件") || strings.Contains(out, "### user") {
+		t.Errorf("项目文件不该承载 user 分类:\n%s", out)
+	}
+	m, _ := p2.List("")
+	if len(m[CategoryProject]) != 1 || len(m[CategoryUser]) != 0 {
+		t.Errorf("List 应只有 project 一条: %v", m)
+	}
+}
+
 func TestParseIgnoresScatteredEntries(t *testing.T) {
 	content := "# MEMORY\n- 散落条目\n## user\n- 合法\n"
 	m := parse(content)

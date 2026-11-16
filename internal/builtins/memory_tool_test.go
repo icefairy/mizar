@@ -11,7 +11,7 @@ import (
 func TestMemoryToolAddListRemove(t *testing.T) {
 	st := memory.NewStore(t.TempDir())
 	changed := 0
-	tool := MemoryTool(st, func() { changed++ })
+	tool := MemoryTool(st, nil, func() { changed++ })
 
 	// add
 	out, err := tool.Run(`{"action":"add","category":"user","text":"偏好结论先行"}`)
@@ -57,7 +57,7 @@ func TestMemoryToolAddListRemove(t *testing.T) {
 
 func TestMemoryToolErrors(t *testing.T) {
 	st := memory.NewStore(t.TempDir())
-	tool := MemoryTool(st, nil)
+	tool := MemoryTool(st, nil, nil)
 
 	if _, err := tool.Run(`{"action":"add"}`); err == nil {
 		t.Error("add 缺 text 应报错")
@@ -74,13 +74,13 @@ func TestMemoryToolErrors(t *testing.T) {
 }
 
 func TestMemoryToolNilStore(t *testing.T) {
-	if tool := MemoryTool(nil, nil); tool.Name != "" {
+	if tool := MemoryTool(nil, nil, nil); tool.Name != "" {
 		t.Error("nil store 应返回空工具")
 	}
 }
 
 func TestMemoryToolDescriptionMentionsArgs(t *testing.T) {
-	tool := MemoryTool(memory.NewStore(t.TempDir()), nil)
+	tool := MemoryTool(memory.NewStore(t.TempDir()), nil, nil)
 	var _ = json.Valid
 	if !strings.Contains(tool.Description, "action") {
 		t.Error("工具描述应含 action 参数说明")

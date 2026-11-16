@@ -27,6 +27,38 @@ type RelevanceOptions struct {
 	// 用「反向开关」而不是 IncludeAlways：bool 零值是 false，若用正向开关，
 	// 调用方不传就变成「排除常驻技能」——与直觉相反。
 	ExcludeAlways bool
+	// CurrentProject 当前项目目录名（WorkDir 的 basename，如 "mizar"）。
+	// 项目技能（名字带 project- 前缀，见 background_review.ProjectSkillPrefix）
+	// 若与当前项目不符且任务文本没提到该项目名，则只按**强信号**（名字/触发词/
+	// 分类）召回——描述里的泛词（"项目/代码/Go"）对任何中文任务都能刷分，
+	// 曾把别的项目的项目技能带进新会话，模型读到技能正文就误认工作目录
+	// （2026-11-16 实测 bug）。
+	CurrentProject string
+}
+
+// projectSkillPrefix 项目技能名前缀（与 agent.ProjectSkillPrefix 保持一致）。
+const projectSkillPrefix = "project-"
+
+// isProjectSkill 报告某技能是否是项目技能。
+func isProjectSkill(s Skill) bool {
+	return strings.HasPrefix(s.Name, projectSkillPrefix)
+}
+
+// projectKeyword 取项目技能对应的项目关键词（project-hmem-go → hmem-go）。
+func projectKeyword(s Skill) string {
+	return strings.TrimPrefix(s.Name, projectSkillPrefix)
+}
+
+// projectSkillAllowed 项目技能是否允许注入：当前项目匹配，或任务文本提到了它。
+func projectSkillAllowed(s Skill, currentProject, taskLower string) bool {
+	kw := projectKeyword(s)
+	if kw == "" {
+		return true // 名字只有前缀没法判定，保守放行
+	}
+	if currentProject != "" && strings.EqualFold(kw, currentProject) {
+		return true
+	}
+	return taskLower != "" && strings.Contains(taskLower, strings.ToLower(kw))
 }
 
 const defaultMaxInjectedSkills = 8
@@ -39,18 +71,24 @@ const defaultMaxInjectedSkills = 8
 //   - 分类名出现在任务里：+3
 //   - 描述里的词与任务词重叠：+1 each（最多 +3）
 func (s *Skill) Score(taskLower string, taskTokens map[string]bool) int {
+	strong, desc := s.scoreParts(taskLower, taskTokens)
+	return strong + desc
+}
+
+// scoreParts 把得分拆成「强信号」（名字/触发词/分类）与「弱信号」（描述重叠，
+// 已按描述 token 数归一化并截到 0~3）。项目技能的跨项目过滤只认强信号。
+func (s *Skill) scoreParts(taskLower string, taskTokens map[string]bool) (strong, desc int) {
 	if taskLower == "" {
-		return 0
+		return 0, 0
 	}
-	score := 0
 	// ① 技能名直接出现（最强信号）。中文任务里名字也可能是中文，用分词判断更稳。
 	name := strings.ToLower(s.Name)
 	if name != "" {
 		if strings.Contains(taskLower, name) {
-			score += 6
+			strong += 6
 		} else if nameTokens := tokenize(name); overlapCount(nameTokens, taskTokens) >= len(nameTokens)*2/3 && len(nameTokens) > 0 {
 			// 名字的 token 大部分都在任务里（处理「名字是 project-xxx、任务写 xxx」之类）
-			score += 3
+			strong += 3
 		}
 	}
 	// ② 触发词（次强）。逐个用 token 重叠判断，中文触发词也能命中。
@@ -60,18 +98,18 @@ func (s *Skill) Score(taskLower string, taskTokens map[string]bool) int {
 			continue
 		}
 		if strings.Contains(taskLower, tl) {
-			score += 4
+			strong += 4
 			continue
 		}
 		tt := tokenize(tl)
 		if len(tt) > 0 && overlapCount(tt, taskTokens)*2 >= len(tt) {
 			// 触发词有一半以上 token 命中
-			score += 2
+			strong += 2
 		}
 	}
 	// ③ 分类
 	if s.Category != "" && strings.Contains(taskLower, strings.ToLower(s.Category)) {
-		score += 3
+		strong += 3
 	}
 	// ④ 描述重叠（弱信号，**归一化**：按描述 token 数折算，避免长描述靠堆词刷分）
 	if len(s.DescTokens) > 0 {
@@ -79,14 +117,13 @@ func (s *Skill) Score(taskLower string, taskTokens map[string]bool) int {
 		if ov > 0 {
 			// 重叠率 → 0~3 分（bigram+unigram 会把同一短语重复计数，0.5 已算高度相关）
 			ratio := float64(ov) / float64(len(s.DescTokens))
-			bonus := int(ratio*6 + 0.5)
-			if bonus > 3 {
-				bonus = 3
+			desc = int(ratio*6 + 0.5)
+			if desc > 3 {
+				desc = 3
 			}
-			score += bonus
 		}
 	}
-	return score
+	return strong, desc
 }
 
 // Relevant 按任务文本挑选要注入的技能。
@@ -122,18 +159,28 @@ func (m *Manager) Relevant(task string, opt RelevanceOptions) ([]Skill, int) {
 	}
 
 	if taskLower == "" {
-		// 无任务文本：按名字顺序取前 N（与旧行为一致，可预期）
+		// 无任务文本：按名字顺序取前 N（与旧行为一致，可预期）。
+		// 项目技能只放行**当前项目**的那条——项目技能是「在某项目干过活之后
+		// 自动生成的归纳」，会话开在哪个项目就该恢复哪个项目的记忆；其它项目
+		// 的塞进来只会让模型误认工作目录。有任务文本后再按相关性召回其余。
 		remaining := maxN - len(picked)
 		if remaining < 0 {
 			remaining = 0
 		}
-		for i := 0; i < len(rest) && i < remaining; i++ {
+		shown := 0
+		for i := 0; i < len(rest) && shown < remaining; i++ {
+			if isProjectSkill(rest[i]) && !projectSkillAllowed(rest[i], opt.CurrentProject, "") {
+				continue
+			}
 			picked = append(picked, rest[i])
+			shown++
 		}
-		return picked, len(rest) - min(len(rest), remaining)
+		return picked, len(rest) - shown
 	}
 
-	// 有任务文本：按相关度排序，高于阈值才注入
+	// 有任务文本：按相关度排序，高于阈值才注入。
+	// 其它项目的项目技能不参与打分——泛词描述（"项目/代码/Go"）几乎对任何
+	// 中文任务都能刷出重叠分。
 	type scored struct {
 		s Skill
 		n int
@@ -141,6 +188,12 @@ func (m *Manager) Relevant(task string, opt RelevanceOptions) ([]Skill, int) {
 	var cands []scored
 	for _, s := range rest {
 		n := s.Score(taskLower, tokens)
+		if isProjectSkill(s) && !projectSkillAllowed(s, opt.CurrentProject, taskLower) {
+			// 别的项目的项目技能：描述泛词不可信，只认强信号（名字/触发词/分类）
+			if strong, _ := s.scoreParts(taskLower, tokens); strong == 0 {
+				continue
+			}
+		}
 		if n > 0 {
 			cands = append(cands, scored{s: s, n: n})
 		}

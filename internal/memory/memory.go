@@ -71,6 +71,11 @@ type Store struct {
 	mu   sync.Mutex
 	dir  string
 	path string
+	// projectOnly 项目记忆模式：文件只承载 project 分类，注入/渲染只含 project 段。
+	// 全局存储（false）的注入则**跳过** project 分类——project 条目按工作路径
+	// 分文件（见 NewStorePath），跨项目注入会让模型误认当前项目
+	// （2026-11-16 实测：WebUI 新会话因全局记忆里全是 hmem-go 条目而跑去探索 hmem-go）。
+	projectOnly bool
 	// entries 按分类保序（追加顺序）。
 	entries map[string][]string
 }
@@ -81,6 +86,21 @@ func NewStore(dir string) *Store {
 		dir:     dir,
 		path:    filepath.Join(dir, indexName),
 		entries: make(map[string][]string),
+	}
+}
+
+// NewStorePath 用指定的 MEMORY.md 文件路径创建存储。
+//
+// 项目记忆用：project 分类按工作路径分文件，落在
+// ~/.mizar/sessions/<路径key>/MEMORY.md（与该项目的会话同目录，复用
+// session.EncodePathKey 的路径编码）。projectOnly=true 时该文件只承载
+// project 分类，注入时只渲染 project 段。
+func NewStorePath(path string, projectOnly bool) *Store {
+	return &Store{
+		dir:        filepath.Dir(path),
+		path:       path,
+		projectOnly: projectOnly,
+		entries:    make(map[string][]string),
 	}
 }
 
@@ -139,11 +159,14 @@ func parse(content string) map[string][]string {
 	return entries
 }
 
-// render 生成 MEMORY.md 全文。
+// render 生成 MEMORY.md 全文。projectOnly 模式只写 project 段。
 func (s *Store) renderLocked() string {
 	var sb strings.Builder
 	sb.WriteString(fileHeader)
 	for _, c := range Categories() {
+		if s.projectOnly && c != CategoryProject {
+			continue
+		}
 		sb.WriteString("\n## " + c + "\n")
 		for _, item := range s.entries[c] {
 			sb.WriteString(entryPrefix + item + "\n")
@@ -251,9 +274,14 @@ func (s *Store) Count() (int, error) {
 	return n, nil
 }
 
-// Render 生成注入系统提示的文本段；无条目时返回空字符串。
+// Render 生成注入系统提示的文本段；无可注入条目时返回空字符串。
 //
 // 注入有上限：最多 MaxInjectEntries 条、MaxInjectBytes 字节，超限截断并给提示。
+//
+// project 分类的注入规则（2026-11-16）：
+//   - projectOnly 存储（项目记忆，按路径分文件）：只渲染 project 段；
+//   - 全局存储：**跳过** project 段——project 条目属于某个具体项目，
+//     全量注入会让模型误认当前项目。旧数据仍在文件里，可用 memory 工具查看。
 func (s *Store) Render() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -262,6 +290,9 @@ func (s *Store) Render() string {
 	}
 	total := 0
 	for _, c := range Categories() {
+		if s.projectOnly != (c == CategoryProject) {
+			continue // 全局存储跳过 project；项目存储跳过其余三类
+		}
 		total += len(s.entries[c])
 	}
 	if total == 0 {
@@ -269,12 +300,20 @@ func (s *Store) Render() string {
 	}
 	var sb strings.Builder
 	sb.WriteString("\n## 结构化记忆（MEMORY.md）\n")
-	sb.WriteString("以下为跨会话保留的长期事实，按类别组织。请据此调整行为，不必再次询问用户；" +
-		"可用 memory 工具补充/修正（文件: " + s.path + "）。\n")
+	if s.projectOnly {
+		sb.WriteString("以下为当前项目的跨会话记忆（按项目路径分文件），请据此调整行为，不必再次询问用户；" +
+			"可用 memory 工具补充/修正（文件: " + s.path + "）。\n")
+	} else {
+		sb.WriteString("以下为跨会话保留的长期事实，按类别组织。请据此调整行为，不必再次询问用户；" +
+			"可用 memory 工具补充/修正（文件: " + s.path + "）。\n")
+	}
 	used := 0
 	emitted := 0
 	truncated := false
 	for _, c := range Categories() {
+		if s.projectOnly != (c == CategoryProject) {
+			continue
+		}
 		list := s.entries[c]
 		if len(list) == 0 {
 			continue

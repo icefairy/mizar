@@ -175,3 +175,41 @@ func TestTokenizeCJK(t *testing.T) {
 		t.Errorf("英文单字母不该入索引: %v", toks)
 	}
 }
+
+// TestProjectSkillScopedToCurrentProject 回归（2026-11-16）：
+// 其它项目的项目技能不得进入新会话——空任务回退把它注入后，模型读到技能
+// 正文（"项目在 /data/codes/xxx"）就误认工作目录。项目技能只在两种情况下
+// 出现：会话开在该项目里（CurrentProject 匹配），或任务文本提到该项目。
+func TestProjectSkillScopedToCurrentProject(t *testing.T) {
+	m := loadTestManager(t)
+
+	has := func(picked []Skill, name string) bool {
+		for _, s := range picked {
+			if s.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 空任务（新会话首条消息之前）：只放当前项目的项目技能。
+	picked, _ := m.Relevant("", RelevanceOptions{CurrentProject: "mizar"})
+	if !has(picked, "project-mizar") {
+		t.Errorf("当前项目 mizar 的项目技能应注入，got %v", namesOf(picked))
+	}
+	if has(picked, "project-feihe") {
+		t.Errorf("其它项目的项目技能不该注入，got %v", namesOf(picked))
+	}
+
+	// 泛词任务（描述重叠但无强信号）：不该召回别的项目。
+	picked, _ = m.Relevant("帮我看看这个项目的构建报错", RelevanceOptions{CurrentProject: "mizar"})
+	if has(picked, "project-feihe") {
+		t.Errorf("泛词任务不该召回 feihe，got %v", namesOf(picked))
+	}
+
+	// 任务明确提到项目名：可以召回（跨项目聊也算命中）。
+	picked, _ = m.Relevant("feihe 项目的输入法怎么配置", RelevanceOptions{CurrentProject: "mizar"})
+	if !has(picked, "project-feihe") {
+		t.Errorf("任务提到 feihe 应召回，got %v", namesOf(picked))
+	}
+}
