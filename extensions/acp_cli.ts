@@ -1,6 +1,5 @@
 // acp_cli.ts —— 官方 CLI 合规接入（ACP: Agent Client Protocol）
 //
-// 场景：网关侧已移除厂商账号池（codebuddy/qoder/cline），合规化改走官方 CLI。
 // 本插件管理本机官方 CLI 的 serve 进程，通过官方暴露的 ACP over HTTP SSE
 // 接口完成对话。凭据完全由官方 CLI 自管（过期 401 时提示 /login），
 // 本插件不做指纹伪装、不碰令牌。
