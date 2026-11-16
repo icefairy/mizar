@@ -823,7 +823,8 @@ func main() {
 		var pending []string
 		for _, t := range builtins.PiTodoList() {
 			if !t.Done {
-				pending = append(pending, t.Text)
+				// 带上 id：提醒里直接给出可执行的 toggle 目标，弱模型不必再查 list
+				pending = append(pending, fmt.Sprintf("#%d %s", t.ID, t.Text))
 			}
 		}
 		return pending

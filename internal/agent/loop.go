@@ -432,7 +432,7 @@ const replyFormatSection = `
 
 ## 多步骤任务先列待办
 任务需要 3 步以上、或会跨多轮工具调用时，**先用 todo 工具把步骤写下来**（action=add），
-每完成一步就 toggle 掉；收尾前用 action=list 核对一遍。
+**每完成一步就立即 toggle 掉**（action=toggle id=N，不要拖到最后统一标记，容易漏）；收尾前用 action=list 核对一遍。
 为什么必须这样做：系统会在你调用 respond 收尾时核对待办清单，只要还有未完成项，
 这次收尾会被拦下并提醒你继续——“干到一半就说做完了”是最常见的失败模式。
 `

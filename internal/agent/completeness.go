@@ -61,7 +61,8 @@ func (g *CompletenessGate) NudgeText(pending []string) string {
 	for _, p := range pending {
 		s += fmt.Sprintf("- %s\n", p)
 	}
-	s += "请继续执行下一步工具调用；确实全部完成时，先调用 todo 把对应项标记为完成，" +
-		"再用 respond 交付结果。"
+	s += "请继续执行下一步工具调用。每完成一项，立即调用 todo 工具标记（用清单里的 #编号）：\n" +
+		"  {\"action\":\"toggle\",\"id\":<编号>}\n" +
+		"直到 action=list 不再有未完成项，再用 respond 交付结果。"
 	return s
 }

@@ -96,8 +96,9 @@ func TestCompletenessGateNudgeLimit(t *testing.T) {
 // 提醒文本必须点明「还有哪些未完成」，否则模型无从续起。
 func TestCompletenessNudgeTextListsPending(t *testing.T) {
 	g := NewCompletenessGate(nil)
-	text := g.NudgeText([]string{"实现登录", "写测试"})
-	for _, want := range []string{"实现登录", "写测试", "未完成"} {
+	text := g.NudgeText([]string{"#1 实现登录", "#2 写测试"})
+	// 必须给出可直接执行的 toggle 示例与编号，否则弱模型还得先查 list
+	for _, want := range []string{"实现登录", "写测试", "未完成", "toggle", "#1"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("提醒文本缺少 %q: %s", want, text)
 		}

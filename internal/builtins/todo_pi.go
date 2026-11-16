@@ -323,6 +323,8 @@ func todoTool() plugins.Tool {
 			"Args example: {\"action\":\"add\",\"text\":\"run tests\",\"blocked_by\":[1]} or {\"action\":\"toggle\",\"id\":1} or {\"action\":\"list\"} or {\"action\":\"clear\"}. " +
 			"Completing a blocker automatically reports unlocked dependents; blocked todos show（等待 #n）in list. " +
 			"Before delegate_task: record serial dependencies here, then fan out only the independent tasks. " +
+			"IMPORTANT: after finishing each item, immediately call toggle with its id ({\"action\":\"toggle\",\"id\":N}); " +
+			"never leave finished items pending—the session cannot close while any todo is still incomplete. " +
 			"State survives session restarts and is shown by the /todos command.",
 		Run: func(args string) (string, error) {
 			var p struct {
