@@ -670,11 +670,12 @@ func (a *Agent) Run(task string) (reply string, err error) {
 	// 时间感知：历史消息可能隔了几天（用户随时回来继续）。
 	// ① 每轮都告知当前实时时间，避免模型用旧上下文推断“现在”；
 	// ② 距上一条消息超过阈值时插一条时间提示，显式打破“上下文连贯”的错觉。
-	// 两者都作为增量追加在 system 之后 / 历史之前，不污染 Initial（调用方后续仍会追加消息），
-	// 也保留 system 前缀缓存（只动其后的内容）。
-	if tc := TimeContext(nowTimestamp()); tc != "" {
-		msgs = append(msgs, Message{Role: RoleSystem, Content: tc})
-	}
+	//
+	// 位置是性能红线：时间戳精确到秒、每轮都变。放进 system（或历史之前任何位置）
+	// 会把它后面所有 token 的 KV 前缀缓存全部作废——system 十几 KB + 整段历史每轮
+	// 重算，前缀缓存命中率归零（vLLM APC / DeepSeek context cache 都按最长公共前缀算）。
+	// 所以时间只挂在「本轮 user 消息的尾部」：system 与历史逐字节不变，缓存才能命中。
+	clock := TimeContext(nowTimestamp())
 	if notice := HistoryTimeNotice(a.Initial, TimeNow()); notice != "" {
 		msgs = append(msgs, Message{Role: RoleUser, Kind: KindSummary, Content: "【时间提示】" + notice})
 	}
@@ -693,7 +694,16 @@ func (a *Agent) Run(task string) (reply string, err error) {
 	// histLen 记录「会话消息」在 msgs 中的结束位置（前缀 + Initial 之后），
 	// 供压缩回调把切点换算成会话消息条数。
 	histEnd := len(msgs)
-	msgs = append(msgs, Message{Role: RoleUser, Content: task})
+	turnMsg := Message{Role: RoleUser, Content: task}
+	if clock != "" {
+		// 时间挂在正文尾部（同一轮内是最后一段），保证前面每个字节都能命中前缀缓存。
+		if t := strings.TrimSpace(task); t != "" {
+			turnMsg.Content = t + "\n\n" + clock
+		} else {
+			turnMsg.Content = clock
+		}
+	}
+	msgs = append(msgs, turnMsg)
 	// 子代理对话留档：Run 返回前把本次消息流交给调用方（delegate continue 用）。
 	// 注意 defer 捕获的是变量 msgs 本身——后续 msgs = fin.Msgs 的重赋值它能看见。
 	if a.OnTranscript != nil {

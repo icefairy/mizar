@@ -42,9 +42,9 @@ func TestHooksLLMRequestCanModifyMessages(t *testing.T) {
 		ctx.Messages = append(ctx.Messages, Message{Role: RoleUser, Content: "注入的上下文"})
 		return nil
 	})
-	var got int
+	var got []Message
 	llm := &scriptLLM{fn: func(msgs []Message) (string, error) {
-		got = len(msgs)
+		got = append([]Message(nil), msgs...)
 		return `{"action":"reply","text":"ok"}`, nil
 	}}
 	pm := testManager(t)
@@ -55,10 +55,19 @@ func TestHooksLLMRequestCanModifyMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// system + 时间感知 system + task + 注入 = 4
-	// （第二条 system 是 Run 注入的「当前实时时间」，见 loop.go 时间感知段）
-	if got != 4 {
-		t.Fatalf("llm saw %d messages, want 4 (hook injection)", got)
+	// system + task（user，尾部带当前时间）+ Hook 注入 = 3
+	if len(got) != 3 {
+		t.Fatalf("llm saw %d messages, want 3 (hook injection): %+v", len(got), got)
+	}
+	// 关键断言：注入的内容真的进了模型输入（而不是只改了个副本）
+	found := false
+	for _, m := range got {
+		if m.Content == "注入的上下文" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Hook 注入的消息没到模型: %+v", got)
 	}
 }
 

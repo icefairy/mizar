@@ -110,7 +110,7 @@ func TestRunInjectsTimeContext(t *testing.T) {
 
 	var hasTimeCtx, hasGapNotice bool
 	for _, m := range got {
-		if m.Role == RoleSystem && strings.Contains(m.Content, "当前实时时间") {
+		if strings.Contains(m.Content, "当前实时时间") {
 			hasTimeCtx = true
 		}
 		if strings.Contains(m.Content, "【时间提示】") {
@@ -123,12 +123,82 @@ func TestRunInjectsTimeContext(t *testing.T) {
 	if !hasGapNotice {
 		t.Fatalf("缺少时间间隔提示: %+v", got)
 	}
-	// 注入必须发生在历史之前（提示紧跟在 system 之后，历史保持原序）
+	// 时间戳必须只出现在最后一条（本轮 user 消息尾部）——放进 system 或历史之前
+	// 会把它之后所有 token 的前缀缓存作废，等于每轮全量重算。
 	if len(got) < 5 {
 		t.Fatalf("消息数异常: %d", len(got))
 	}
-	if !strings.Contains(got[2].Content, "【时间提示】") {
-		t.Fatalf("时间提示位置不对: idx2=%q", got[2].Content)
+	for i, m := range got[:len(got)-1] {
+		if strings.Contains(m.Content, "当前实时时间") {
+			t.Fatalf("时间戳出现在第 %d 条（%s），必须在最后一条 user 消息里: %q", i, m.Role, m.Content[:80])
+		}
+	}
+	if !strings.Contains(got[len(got)-1].Content, "当前实时时间") {
+		t.Fatalf("最后一条不是带时间的 user 消息: %q", got[len(got)-1].Content)
+	}
+	if got[len(got)-1].Role != RoleUser {
+		t.Fatalf("带时间的消息角色 = %s，应为 user", got[len(got)-1].Role)
+	}
+	// 间隔提示仍在历史之前（system 之后紧邻）
+	if !strings.Contains(got[1].Content, "【时间提示】") {
+		t.Fatalf("时间提示位置不对: idx1=%q", got[1].Content)
+	}
+}
+
+// 前缀缓存不变式：两轮之间（除最后一条 user 消息外）消息必须逐字节相同。
+// 时间戳每秒都变，只要它漏进 system/历史，缓存命中率就归零。
+func TestRunKeepsCacheablePrefixStable(t *testing.T) {
+	var runs [][]Message
+	llm := &scriptLLM{fn: func(msgs []Message) (string, error) {
+		runs = append(runs, append([]Message(nil), msgs...))
+		return `{"action":"reply","text":"ok"}`, nil
+	}}
+	a := New(llm, testManager(t))
+	a.Hooks = NewHooks()
+
+	old := TimeNow
+	defer func() { TimeNow = old }()
+	oldTS := nowTimestamp
+	defer func() { nowTimestamp = oldTS }()
+	t1 := time.Date(2026, 11, 18, 10, 0, 0, 0, time.Local)
+	TimeNow = func() time.Time { return t1 }
+	nowTimestamp = func() string { return t1.Format(time.RFC3339) }
+
+	if _, err := a.Run("第一轮"); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟第二轮：把上一轮结果塞回历史，时间前进 1 分钟
+	if len(runs) == 0 {
+		t.Fatal("没有捕获到 LLM 请求")
+	}
+	a.Initial = []Message{
+		{Role: RoleUser, Content: "第一轮"},
+		{Role: RoleAssistant, Content: "ok"},
+	}
+	TimeNow = func() time.Time { return t1.Add(time.Minute) }
+	nowTimestamp = func() string { return t1.Add(time.Minute).Format(time.RFC3339) }
+	if _, err := a.Run("第二轮"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("捕获请求数 = %d，应为 2", len(runs))
+	}
+	// 第二轮的「system + 历史」前缀必须与第一轮完全一致，逐条比对
+	n := len(runs[0]) - 1 // 去掉第一轮最后那条带时间的 user 消息
+	for i := 0; i < n; i++ {
+		if i >= len(runs[1]) {
+			t.Fatalf("第二轮消息数偏少: %d vs %d", len(runs[1]), len(runs[0]))
+		}
+		if runs[0][i].Role != runs[1][i].Role || runs[0][i].Content != runs[1][i].Content {
+			t.Fatalf("第 %d 条前缀发生变化（缓存会失效）：\n第一轮 %.80q\n第二轮 %.80q",
+				i, runs[0][i].Content, runs[1][i].Content)
+		}
+	}
+	// 时间戳各不相同，且都在尾部
+	last0 := runs[0][len(runs[0])-1].Content
+	last1 := runs[1][len(runs[1])-1].Content
+	if !strings.Contains(last0, "10:00:00") || !strings.Contains(last1, "10:01:00") {
+		t.Fatalf("尾部时间不对：%q / %q", last0, last1)
 	}
 }
 

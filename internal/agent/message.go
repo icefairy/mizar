@@ -59,7 +59,8 @@ type Message struct {
 }
 
 // nowTimestamp 返回当前时间的 RFC3339 毫秒串（本地时区）。
-func nowTimestamp() string { return time.Now().Format("2006-01-02T15:04:05.000-07:00") }
+// 声明为变量以便测试固化时间（前缀缓存测试要断言两轮时间戳不同）。
+var nowTimestamp = func() string { return time.Now().Format("2006-01-02T15:04:05.000-07:00") }
 
 // TimeNow 当前时间取数口（测试可替换）。
 var TimeNow = time.Now
