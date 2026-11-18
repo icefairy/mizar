@@ -516,6 +516,10 @@ func encodeMessages(msgs []agent.Message) []chatMsg {
 // encodeMessagesWithImages 编码消息；allowImages=true 时把 user 消息的 Images
 // 附件编码为 content 数组（OpenAI 多模态格式，P-7）。
 func encodeMessagesWithImages(msgs []agent.Message, allowImages bool) []chatMsg {
+	// 出口闸门：严格上游（vLLM）只允许第 0 条是 system，出现第二条即 400。
+	// 主循环已经合并过一次，这里再兜一层——插件 ai_chat、子代理、WebUI 对话
+	// 等任何路径拼出来的消息，最终都必须满足「有且仅有一条 system 且在首位」。
+	msgs = agent.MergeSystemMessages(msgs)
 	out := make([]chatMsg, 0, len(msgs))
 	// OpenAI 严格要求 role:"tool" 必须回应前面的 tool_calls，且一个 tool_call 只能被
 	// 回应一次；反向地，发出了 tool_calls 就必须有结果，否则报 400
@@ -1149,7 +1153,7 @@ func buildAIChatMessages(req AIChatRequest) []chatMsg {
 		}
 	}
 	if !hasMedia {
-		return msgs
+		return mergeSystemChatMsgs(msgs)
 	}
 	// 先完整构建 media parts（text + images + video），再一次性挂到消息上，
 	// 避免切片在 append 扩容后与已存储 content 失去共享。
@@ -1183,7 +1187,40 @@ func buildAIChatMessages(req AIChatRequest) []chatMsg {
 	} else {
 		msgs = append(msgs, chatMsg{Role: "user", Content: parts})
 	}
-	return msgs
+	return mergeSystemChatMsgs(msgs)
+}
+
+// mergeSystemChatMsgs 与 agent.MergeSystemMessages 同规则，但作用于已编码的 chatMsg。
+// 插件 ai_chat / ai_chat_stream 路径自己拼列表（system + 调用方 messages），
+// 调用方可能塞进额外的 system，这里收口成「唯一且首位」。
+func mergeSystemChatMsgs(msgs []chatMsg) []chatMsg {
+	count := 0
+	var texts []string
+	for _, m := range msgs {
+		if m.Role != "system" {
+			continue
+		}
+		count++
+		if s, ok := m.Content.(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				texts = append(texts, s)
+			}
+		}
+	}
+	if count == 0 || (count == 1 && msgs[0].Role == "system") {
+		return msgs
+	}
+	out := make([]chatMsg, 0, len(msgs)-count+1)
+	if len(texts) > 0 {
+		out = append(out, chatMsg{Role: "system", Content: strings.Join(texts, "\n\n")})
+	}
+	for _, m := range msgs {
+		if m.Role == "system" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // Chat 实现 agent.LLM 接口。不发送 tools 参数，模型需从 system prompt 解析工具。

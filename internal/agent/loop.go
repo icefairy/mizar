@@ -686,6 +686,10 @@ func (a *Agent) Run(task string) (reply string, err error) {
 		}
 	}
 	msgs = append(msgs, a.Initial...)
+	// 注意：这里**不做** system 合并。内部序列保留多条 system（主提示词/时间上下文/
+	// 技能/压缩摘要），因为 Hook 注入、时间提示位置等语义都依赖它们各自独立存在。
+	// 合并发生在出口——llm.encodeMessagesWithImages 里统一收口，保证真正发出去的
+	// 请求「有且仅有一条 system 且在第一条」（严格 vLLM 的硬约束）。
 	// histLen 记录「会话消息」在 msgs 中的结束位置（前缀 + Initial 之后），
 	// 供压缩回调把切点换算成会话消息条数。
 	histEnd := len(msgs)

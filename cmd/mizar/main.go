@@ -51,7 +51,7 @@ import (
 	"mizar/internal/userhooks"
 )
 
-var version = "v0.8.9"
+var version = "v0.8.10"
 
 // 进程内工具调用计数（供 /learn reflect 的「高频工具」洞察；不持久化）。
 var (

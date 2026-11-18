@@ -170,3 +170,58 @@ type ImagePart struct {
 	Data string `json:"data,omitempty"` // base64 编码的图片字节
 	Path string `json:"path,omitempty"` // 来源文件路径（诊断用）
 }
+
+// systemMergeSep 多条 system 合并时的分隔符：空行分段，模型读起来是一份文档。
+const systemMergeSep = "\n\n"
+
+// MergeSystemMessages 保证消息序列里「有且仅有一条 system，且位于第一条」。
+//
+// 为什么必须做：严格的 OpenAI 兼容上游（vLLM 等）只允许第 0 条消息是 system，
+// 第 1 条再出现 system 就直接 400：
+//
+//	"System message must be at the beginning of the conversation (found at index 1)"
+//
+// 而 mizar 会天然产生多条 system——主提示词、每轮实时时间（TimeContext）、
+// 按任务相关性注入的技能（SkillRelevant），历史里还可能留着压缩摘要
+// （Role=system + Kind=KindSummary）。璇玑网关会把这堆揉平，所以以前没暴露；
+// 离线内网直连 vLLM 就整个 Agent 模式都用不了。
+//
+// 规则：
+//   - 所有 RoleSystem 的内容按原顺序用空行拼成一条，放到 index 0；
+//   - 其余消息保持原有相对顺序（工具调用/结果的配对不受影响，只是少了条 system）；
+//   - 本来就合规（无 system，或只有一条且在首位）时原样返回，不产生新切片。
+//
+// 幂等：对结果再调用一次不会有任何变化。
+func MergeSystemMessages(msgs []Message) []Message {
+	count := 0
+	var sb strings.Builder
+	for _, m := range msgs {
+		if m.Role != RoleSystem {
+			continue
+		}
+		count++
+		c := strings.TrimSpace(m.Content)
+		if c == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString(systemMergeSep)
+		}
+		sb.WriteString(c)
+	}
+	// 无 system，或已合规（唯一且首位）→ 原样返回
+	if count == 0 || (count == 1 && msgs[0].Role == RoleSystem) {
+		return msgs
+	}
+	out := make([]Message, 0, len(msgs)-count+1)
+	if sb.Len() > 0 {
+		out = append(out, Message{Role: RoleSystem, Content: sb.String()})
+	}
+	for _, m := range msgs {
+		if m.Role == RoleSystem {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
