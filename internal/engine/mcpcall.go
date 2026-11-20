@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +14,7 @@ import (
 
 // MCPCallFn 调用外部 MCP server 的工具：
 // mcp_call(server, tool, argsJSON) -> 结果文本。
-// server 为 MCP 配置中的服务器名（见 config.mcp_servers）。
+// server 为 MCP 配置中的服务器名（见 ~/.mizar/mcp.json 的 mcp_servers）。
 // argsJSON 可为空字符串（无参数）。
 type MCPCallFn func(server, tool, argsJSON string) (string, error)
 
@@ -28,6 +29,79 @@ type MCPServerConf struct {
 	URL     string   `json:"url,omitempty"`
 	// Timeout 单次调用超时（秒），默认 30。
 	Timeout int `json:"timeout,omitempty"`
+}
+
+// UnmarshalJSON 宽容解析单条 MCP 配置。手写配置时下面两种写法都很常见，
+// 若按严格类型解析会抛出错误并连累整份配置文件：
+//   - timeout 写成字符串（"30" / "30s" / "2m"）
+//   - args 写成以空格分隔的字符串
+func (s *MCPServerConf) UnmarshalJSON(data []byte) error {
+	type alias struct {
+		Name    string          `json:"name"`
+		Command string          `json:"command"`
+		Args    json.RawMessage `json:"args"`
+		URL     string          `json:"url"`
+		Timeout json.RawMessage `json:"timeout"`
+	}
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	s.Name, s.Command, s.URL = a.Name, a.Command, a.URL
+	s.Args, s.Timeout = nil, 0
+	if len(a.Args) > 0 && string(a.Args) != "null" {
+		var arr []string
+		if err := json.Unmarshal(a.Args, &arr); err == nil {
+			s.Args = arr
+		} else {
+			var str string
+			if err := json.Unmarshal(a.Args, &str); err != nil {
+				return fmt.Errorf("mcp server %q 的 args 需为字符串数组或空格分隔的字符串", a.Name)
+			}
+			s.Args = strings.Fields(str)
+		}
+	}
+	if len(a.Timeout) > 0 && string(a.Timeout) != "null" {
+		n, err := parseTimeoutSeconds(a.Timeout)
+		if err != nil {
+			return fmt.Errorf("mcp server %q: %w", a.Name, err)
+		}
+		s.Timeout = n
+	}
+	return nil
+}
+
+// parseTimeoutSeconds 解析 timeout：数字按秒；字符串支持 "30"、"30s"、"2m"、"1h"。
+func parseTimeoutSeconds(raw json.RawMessage) (int, error) {
+	var num float64
+	if err := json.Unmarshal(raw, &num); err == nil {
+		if num < 0 {
+			return 0, fmt.Errorf("timeout 不能为负数: %v", num)
+		}
+		return int(num), nil
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err != nil {
+		return 0, fmt.Errorf("timeout 需为秒数或时长字符串（如 30 / \"30s\"）")
+	}
+	str = strings.TrimSpace(strings.ToLower(str))
+	if str == "" {
+		return 0, nil
+	}
+	mult := time.Second
+	switch str[len(str)-1] {
+	case 's':
+		str = strings.TrimSpace(str[:len(str)-1])
+	case 'm':
+		str, mult = strings.TrimSpace(str[:len(str)-1]), time.Minute
+	case 'h':
+		str, mult = strings.TrimSpace(str[:len(str)-1]), time.Hour
+	}
+	f, err := strconv.ParseFloat(str, 64)
+	if err != nil || f < 0 {
+		return 0, fmt.Errorf("timeout 无法解析: %q", str)
+	}
+	return int(f * float64(mult) / float64(time.Second)), nil
 }
 
 // MCPRegistry 持有已初始化的 MCP server 连接（惰性创建）。
@@ -120,7 +194,7 @@ func (r *MCPRegistry) Connected(name string) bool {
 func (r *MCPRegistry) CallFn() MCPCallFn {
 	return func(server, tool, argsJSON string) (string, error) {
 		if r == nil || len(r.conf) == 0 {
-			return "", fmt.Errorf("mcp_call: 未配置任何 MCP server（config.json 的 mcp_servers）")
+			return "", fmt.Errorf("mcp_call: 未配置任何 MCP server（~/.mizar/mcp.json 的 mcp_servers）")
 		}
 		var args map[string]any
 		if strings.TrimSpace(argsJSON) != "" {

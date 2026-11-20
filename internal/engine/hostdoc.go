@@ -108,7 +108,7 @@ SQL 数组一个事务执行，任一失败整体回滚。返回 {"rowsAffected"
 
 	// ---- 外部能力 ----
 	{Name: "mcp_call", Brief: "调用外部 MCP server 工具", Full: `mcp_call(server, tool, argsJSON) -> string
-调用配置的 MCP server 工具。server 须在 config.json mcp_servers 里配置（stdio 命令或 HTTP URL）。
+调用配置的 MCP server 工具。server 须在 ~/.mizar/mcp.json 里配置（stdio 命令或 HTTP URL）。
 覆盖 db_query 白名单外的长尾能力（Redis/Kafka/MongoDB/ClickHouse 等）。
 示例: mcp_call("redis", "get", json_encode({key: "foo"}))`},
 	{Name: "hook_on", Brief: "注册生命周期回调", Full: `hook_on(event, callback) -> void

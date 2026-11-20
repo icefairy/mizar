@@ -41,9 +41,12 @@ func maskAPIKey(k string) string {
 
 // handleWebProviders GET(列表) / POST(增删切换) /web/api/providers
 func (s *Server) handleWebProviders(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(config.DefaultPath())
+	// 解析失败必须中止：以前这里回退成空配置，后续 POST 一保存就把用户
+	// 原有的 providers / mcp / hooks 等整份覆盖掉。
+	cfg, err := config.LoadForWrite(config.DefaultPath())
 	if err != nil {
-		cfg = &config.Config{}
+		errJSON(w, http.StatusInternalServerError, "配置读取失败: "+err.Error())
+		return
 	}
 	switch r.Method {
 	case http.MethodGet:

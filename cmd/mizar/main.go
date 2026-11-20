@@ -51,7 +51,7 @@ import (
 	"mizar/internal/userhooks"
 )
 
-var version = "v0.8.11"
+var version = "v0.8.12"
 
 // 进程内工具调用计数（供 /learn reflect 的「高频工具」洞察；不持久化）。
 var (
@@ -102,11 +102,11 @@ var startupHint string
 
 // mcpListText 生成「/mcp list」输出：已配置的 server 清单 + 各 server 当前是否已连接。
 // 连接是惰性的（首次 mcp_call 才握手），故同时展示「配置」与「已连」两项状态。
-func mcpListText(cfg *config.Config) string {
+func mcpListText(servers []engine.MCPServerConf, source string) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("MCP servers：配置 %d 个（来源 %s）\n", len(cfg.MCPServers), config.DefaultPath()))
-	if len(cfg.MCPServers) == 0 {
-		sb.WriteString("  （未配置，使用 /mcp add <name> <url|command> 添加）\n")
+	sb.WriteString(fmt.Sprintf("MCP servers：配置 %d 个（来源 %s）\n", len(servers), source))
+	if len(servers) == 0 {
+		sb.WriteString(fmt.Sprintf("  （未配置，使用 /mcp add <name> <url|command> 添加，或直接编辑 %s）\n", config.MCPPath()))
 		sb.WriteString("\n用法:\n")
 		sb.WriteString("  /mcp list                       列出已配置的 server\n")
 		sb.WriteString("  /mcp add <name> <url>           添加 HTTP server\n")
@@ -116,7 +116,7 @@ func mcpListText(cfg *config.Config) string {
 		sb.WriteString("  /mcp reload                     重新加载配置\n")
 		return sb.String()
 	}
-	for _, s := range cfg.MCPServers {
+	for _, s := range servers {
 		transport := "stdio"
 		addr := s.Command
 		if s.URL != "" {
@@ -302,7 +302,17 @@ func main() {
 	}
 
 	// 自动加载 ~/.mizar/config.json（显式 flag 优先）
-	if cfg, err := config.Load(config.DefaultPath()); err == nil && cfg.BaseURL != "" {
+	cfg, cfgErr := config.Load(config.DefaultPath())
+	if cfgErr != nil {
+		// 整份文件解析失败：渠道配置读不出来，必须显式告警；
+		// 否则会静默退回默认网关，看起来就像「渠道配置被破坏了」。
+		log.Printf("⚠ 配置解析失败，已回退默认渠道（请修好 %s）: %v", config.DefaultPath(), cfgErr)
+	} else {
+		for _, w := range cfg.Warnings {
+			log.Printf("⚠ 配置字段解析失败，已跳过该字段（其余配置仍生效）: %s", w)
+		}
+	}
+	if cfgErr == nil && cfg.BaseURL != "" {
 		explicit := map[string]bool{}
 		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 		if !explicit["base-url"] {
@@ -394,13 +404,14 @@ func main() {
 	mcpReg := engine.NewMCPRegistry(nil)
 	if *noMCP {
 		log.Printf("已禁用 MCP（--no-mcp）: mcp_call 不可用")
-	} else if cfg, err := config.Load(config.DefaultPath()); err == nil && len(cfg.MCPServers) > 0 {
-		mcpReg = engine.NewMCPRegistry(cfg.MCPServers)
-		log.Printf("MCP server 配置 %d 个: %s", len(cfg.MCPServers), mcpNames(cfg.MCPServers))
-	} else if err != nil {
-		log.Printf("MCP 配置读取失败（mcp_call 不可用）: %v", err)
+	} else if servers, src, err := config.LoadMCPServers(); err != nil {
+		// MCP 独立配置文件坏了只影响 MCP，不再牵连 LLM 渠道配置。
+		log.Printf("MCP 配置读取失败（%s，mcp_call 不可用）: %v", src, err)
+	} else if len(servers) > 0 {
+		mcpReg = engine.NewMCPRegistry(servers)
+		log.Printf("MCP server 配置 %d 个（来源 %s）: %s", len(servers), src, mcpNames(servers))
 	} else {
-		log.Printf("未配置 MCP server（mcp_call 不可用，config.json 加 mcp_servers 启用）")
+		log.Printf("未配置 MCP server（mcp_call 不可用；%s 或 /mcp add 启用）", config.MCPPath())
 	}
 	defer mcpReg.Close()
 	host.MCPCall = mcpReg.CallFn()
@@ -1149,8 +1160,11 @@ func main() {
 		func(name string) (string, error) {
 			old := client.Model
 			client.Model = name
-			// 持久化到 config.json
-			cfg, _ := config.Load(config.DefaultPath())
+			// 持久化到 config.json（配置损坏时中止，避免把整份配置覆盖掉）
+			cfg, err := config.LoadForWrite(config.DefaultPath())
+			if err != nil {
+				return "", fmt.Errorf("模型已切换为 %s，但配置无法写回: %w", name, err)
+			}
 			cfg.BaseURL = client.BaseURL
 			cfg.Model = client.Model
 			cfg.APIKey = client.APIKey
@@ -1188,8 +1202,11 @@ func main() {
 			}
 			old := client.APIKey
 			client.APIKey = args
-			// 持久化（并同步当前生效 provider 收藏项）
-			cfg, _ := config.Load(config.DefaultPath())
+			// 持久化（并同步当前生效 provider 收藏项）；配置损坏时拒绝写回
+			cfg, err := config.LoadForWrite(config.DefaultPath())
+			if err != nil {
+				return "", fmt.Errorf("API Key 已在内存生效，但配置无法写回: %w", err)
+			}
 			cfg.BaseURL = client.BaseURL
 			cfg.Model = client.Model
 			cfg.APIKey = client.APIKey
@@ -1277,9 +1294,8 @@ func main() {
 				}
 				return strings.TrimSpace(sb.String()), nil
 			case "stats":
-				cfg, _ := config.Load(config.DefaultPath())
 				topN := 10
-				if cfg != nil {
+				if cfg, err := config.Load(config.DefaultPath()); err == nil {
 					topN = cfg.SkillStatsTop()
 				}
 				return stats.Report(topN), nil
@@ -1625,7 +1641,10 @@ func main() {
 		Name:        "color",
 		Description: "查看/设置聊天颜色（/color 查看 ｜ /color user <颜色> ｜ /color ai <颜色> ｜ /color reset 恢复默认）",
 		Run: func(args string) (string, error) {
-			cfg, _ := config.Load(config.DefaultPath())
+			cfg, err := config.Load(config.DefaultPath())
+			if err != nil {
+				return "", fmt.Errorf("读取配置失败: %v", err)
+			}
 			userColor := cfg.UserColor
 			aiColor := cfg.AiColor
 			if userColor == "" {
@@ -1711,8 +1730,11 @@ func main() {
 					switch s {
 					case "cycle":
 						newLevel := client.ToggleThinking()
-						// 持久化
-						cfg, _ := config.Load(config.DefaultPath())
+						// 持久化（配置损坏时中止，避免整份覆盖）
+						cfg, err := config.LoadForWrite(config.DefaultPath())
+						if err != nil {
+							return fmt.Sprintf("✓ 思考等级已切换: %s（未持久化: %v）", newLevel, err), nil
+						}
 						cfg.ThinkingLevel = newLevel
 						if err := config.Save(config.DefaultPath(), cfg); err != nil {
 							log.Printf("/think 持久化失败: %v", err)
@@ -1720,7 +1742,10 @@ func main() {
 						return fmt.Sprintf("✓ 思考等级已切换: %s", newLevel), nil
 					default:
 						client.SetThinking(s)
-						cfg, _ := config.Load(config.DefaultPath())
+						cfg, err := config.LoadForWrite(config.DefaultPath())
+						if err != nil {
+							return fmt.Sprintf("✓ 思考等级已设置为: %s（未持久化: %v）", s, err), nil
+						}
 						cfg.ThinkingLevel = s
 						if err := config.Save(config.DefaultPath(), cfg); err != nil {
 							log.Printf("/think 持久化失败: %v", err)
@@ -1822,7 +1847,10 @@ func main() {
 		Description: "查看/修改运行配置（/config 查看 ｜ /config max_steps 30 ｜ /config user_agent MyApp/1.0）",
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
-			cfg, _ := config.Load(config.DefaultPath())
+			cfg, err := config.Load(config.DefaultPath())
+			if err != nil {
+				return "", fmt.Errorf("读取配置失败: %v", err)
+			}
 			if args == "" {
 				// 查看当前生效配置（内存中的 a.MaxSteps 优先，因为可能被 Run 兜底改写）
 				ms := a.MaxSteps
@@ -1945,7 +1973,10 @@ func main() {
 			}
 			if m, ok := agent.ParsePermissionMode(args); ok {
 				a.Permission.SetMode(m)
-				cfg, _ := config.Load(config.DefaultPath())
+				cfg, err := config.LoadForWrite(config.DefaultPath())
+				if err != nil {
+					return fmt.Sprintf("✓ 模式已切换为 %s（内存生效），但配置无法写回: %v", m, err), nil
+				}
 				cfg.PermissionMode = string(m)
 				if err := config.Save(config.DefaultPath(), cfg); err != nil {
 					return fmt.Sprintf("✓ 模式已切换为 %s（内存生效），但持久化失败: %v", m, err), nil
@@ -2316,7 +2347,10 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 		Name:        "save",
 		Description: "将当前配置保存到 ~/.mizar/config.json",
 		Run: func(args string) (string, error) {
-			cfg, _ := config.Load(config.DefaultPath())
+			cfg, err := config.LoadForWrite(config.DefaultPath())
+			if err != nil {
+				return "", fmt.Errorf("配置无法写回: %w", err)
+			}
 			cfg.BaseURL = client.BaseURL
 			cfg.Model = client.Model
 			cfg.APIKey = client.APIKey
@@ -2334,19 +2368,20 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 		Name:        "mcp",
 		Description: "MCP server 管理（/mcp list 列出现状 ｜ /mcp add <name> <url|command> [args...] ｜ /mcp remove <name> ｜ /mcp test <name> ｜ /mcp reload）",
 		Run: func(args string) (string, error) {
-			cfg, err := config.Load(config.DefaultPath())
+			// MCP 配置独立在 ~/.mizar/mcp.json（旧版回退 config.json 的 mcp_servers）。
+			servers, src, err := config.LoadMCPServers()
 			if err != nil {
-				return "", fmt.Errorf("读取配置失败: %v", err)
+				return "", fmt.Errorf("读取 MCP 配置失败: %v", err)
 			}
 			args = strings.TrimSpace(args)
 			if args == "" {
-				return mcpListText(cfg), nil
+				return mcpListText(servers, src), nil
 			}
 			fields := strings.Fields(args)
 			cmd := fields[0]
 			switch cmd {
 			case "list", "ls", "status":
-				return mcpListText(cfg), nil
+				return mcpListText(servers, src), nil
 			case "add":
 				if len(fields) < 3 {
 					return "", fmt.Errorf("用法: /mcp add <name> <url|command> [args...]\n示例:\n  /mcp add myserver http://127.0.0.1:3001/mcp\n  /mcp add sqlite npx -y @modelcontextprotocol/server-sqlite")
@@ -2365,20 +2400,21 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				}
 				// 检查是否已存在
 				found := false
-				for i := range cfg.MCPServers {
-					if cfg.MCPServers[i].Name == name {
-						cfg.MCPServers[i] = serverConf
+				for i := range servers {
+					if servers[i].Name == name {
+						servers[i] = serverConf
 						found = true
 						break
 					}
 				}
 				if !found {
-					cfg.MCPServers = append(cfg.MCPServers, serverConf)
+					servers = append(servers, serverConf)
 				}
-				if err := config.Save(config.DefaultPath(), cfg); err != nil {
-					return "", fmt.Errorf("保存失败: %v", err)
+				path, err := persistMCPServers(servers)
+				if err != nil {
+					return "", err
 				}
-				return fmt.Sprintf("✓ MCP server %q 已添加/更新", name), nil
+				return fmt.Sprintf("✓ MCP server %q 已添加/更新（%s，已生效）", name, path), nil
 
 			case "remove":
 				if len(fields) < 2 {
@@ -2387,7 +2423,7 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				name := fields[1]
 				var remain []engine.MCPServerConf
 				removed := false
-				for _, s := range cfg.MCPServers {
+				for _, s := range servers {
 					if s.Name == name {
 						removed = true
 					} else {
@@ -2395,13 +2431,13 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 					}
 				}
 				if !removed {
-					return "", fmt.Errorf("未找到 server %q（可用: %s）", name, mcpNames(cfg.MCPServers))
+					return "", fmt.Errorf("未找到 server %q（可用: %s）", name, mcpNames(servers))
 				}
-				cfg.MCPServers = remain
-				if err := config.Save(config.DefaultPath(), cfg); err != nil {
-					return "", fmt.Errorf("保存失败: %v", err)
+				path, err := persistMCPServers(remain)
+				if err != nil {
+					return "", err
 				}
-				return fmt.Sprintf("✓ 已移除 MCP server %q", name), nil
+				return fmt.Sprintf("✓ 已移除 MCP server %q（%s，已生效）", name, path), nil
 
 			case "test":
 				if len(fields) < 2 {
@@ -2409,14 +2445,14 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				}
 				name := fields[1]
 				var found *engine.MCPServerConf
-				for i := range cfg.MCPServers {
-					if cfg.MCPServers[i].Name == name {
-						found = &cfg.MCPServers[i]
+				for i := range servers {
+					if servers[i].Name == name {
+						found = &servers[i]
 						break
 					}
 				}
 				if found == nil {
-					return "", fmt.Errorf("未找到 server %q（可用: %s）", name, mcpNames(cfg.MCPServers))
+					return "", fmt.Errorf("未找到 server %q（可用: %s）", name, mcpNames(servers))
 				}
 				timeout := 30 * time.Second
 				if found.Timeout > 0 {
@@ -2443,13 +2479,12 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 				// 重新从配置文件加载，并真正重建运行时连接：
 				// 关闭旧的 stdio 子进程，下次 mcp_call 按新配置重新握手。
 				// 这是 Zig 二进制「热更新」的落地方式：覆盖可执行文件后执行本命令即可。
-				newCfg, err := config.Load(config.DefaultPath())
+				newServers, newSrc, err := config.LoadMCPServers()
 				if err != nil {
-					return "", fmt.Errorf("读取配置失败: %v", err)
+					return "", fmt.Errorf("读取 MCP 配置失败（%s）: %v", newSrc, err)
 				}
-				cfg.MCPServers = newCfg.MCPServers
-				mcpReg.Reload(newCfg.MCPServers)
-				return fmt.Sprintf("✓ MCP 配置已重新加载并重建连接（%d 个 server: %s）", len(cfg.MCPServers), mcpNames(cfg.MCPServers)), nil
+				mcpReg.Reload(newServers)
+				return fmt.Sprintf("✓ MCP 配置已重新加载并重建连接（%s，%d 个 server: %s）", newSrc, len(newServers), mcpNames(newServers)), nil
 
 			default:
 				return "", fmt.Errorf("未知子命令 %q，支持: list/add/remove/test/reload（输入 /mcp 查看帮助）", cmd)
@@ -2624,7 +2659,12 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 		}
 		// Web UI：启用 + 登录鉴权（密码优先取配置，空则随机生成并写回）
 		webCfg := &config.WebConfig{}
-		diskCfg, _ := config.Load(config.DefaultPath())
+		diskCfg, diskErr := config.Load(config.DefaultPath())
+		if diskErr != nil {
+			// 配置坏了就别写回：否则会把整份配置覆盖成只剩 web 段。
+			log.Printf("Web 配置读取失败，本次不写回密码（请修好 %s）: %v", config.DefaultPath(), diskErr)
+			diskCfg = nil
+		}
 		if diskCfg != nil && diskCfg.Web != nil {
 			webCfg = diskCfg.Web
 		}
@@ -2636,10 +2676,7 @@ exit 2 = 拒绝（stderr 作为原因）；其它非零/超时 = 记日志放行
 		if webCfg.Username == "" {
 			webCfg.Username = "admin"
 		}
-		if genPwd {
-			if diskCfg == nil {
-				diskCfg = &config.Config{}
-			}
+		if genPwd && diskCfg != nil {
 			diskCfg.Web = webCfg
 			if err := config.Save(config.DefaultPath(), diskCfg); err != nil {
 				log.Printf("Web UI 密码写回配置失败: %v", err)
@@ -2876,6 +2913,23 @@ func mcpNames(servers []engine.MCPServerConf) string {
 		names = append(names, s.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+// persistMCPServers 把列表写回 ~/.mizar/mcp.json，并让运行时立即生效：
+// 顺带把 config.json 里旧位置的 mcp_servers 迁移过来并清空，避免两份配置打架。
+func persistMCPServers(servers []engine.MCPServerConf) (string, error) {
+	path, err := config.SaveMCPServers(servers)
+	if err != nil {
+		return "", fmt.Errorf("保存 %s 失败: %w", path, err)
+	}
+	migrated := config.ClearLegacyMCPServers()
+	if runtimeMCPRegistry != nil {
+		runtimeMCPRegistry.Reload(servers)
+	}
+	if migrated {
+		return path + "（已迁移 config.json 里旧的 mcp_servers 并清空）", nil
+	}
+	return path, nil
 }
 
 // renderSkillsPrompt 按当前注入模式（index/full）重新渲染技能提示段。

@@ -94,10 +94,10 @@ zig build-exe server.zig -OReleaseFast -target aarch64-linux -femit-bin=myserver
 /mcp add myserver /abs/path/myserver
 ```
 
-等价于在 `~/.mizar/config.json` 写：
+等价于在 `~/.mizar/mcp.json` 写：
 
 ```json
-"mcp_servers": [{"name": "myserver", "command": "/abs/path/myserver"}]
+{"mcp_servers": [{"name": "myserver", "command": "/abs/path/myserver"}]}
 ```
 
 ### 4. 插件里调用

@@ -374,7 +374,7 @@ Unix 有 bracketed paste，粘贴本来就是整段处理，不受影响。
 - **中文分词**：`seg_cut` / `seg_pos`
 - **纯函数**：`time` / `uuid` / `base64` / `sha256` / `path` / `url`
 - **Token 计数**：`count_tokens`
-- **MCP 调用**：`mcp_call` 调用外部 MCP 服务器
+- **MCP 调用**：`mcp_call` 调用外部 MCP 服务器（配置在独立的 `~/.mizar/mcp.json`）
 
 ### 4. 插件系统
 - **热重载**：修改 `.ts` / `.js` 文件后自动生效，无需重启
@@ -806,8 +806,10 @@ chmod +x mizar
   # /config                        查看当前配置（max_steps / context_window / user_agent）
   # /config user_agent MyApp/1.0   自定义 User-Agent，立即生效并持久化到配置
   # /mcp list                      列出已配置的 MCP server 及其连接状态（别名 /mcp ls）
-  # /mcp add <name> <url|command>  添加 MCP server（http 或 stdio）
+  # /mcp add <name> <url|command>  添加 MCP server（http 或 stdio，写入 ~/.mizar/mcp.json）
   # /mcp test <name>               测试连接并列出工具
+  # /mcp reload                    改完 mcp.json 后重载（重建连接，无需重启）
+  # MCP 配置独立存放: ~/.mizar/mcp.json（写错也不影响 config.json 的渠道配置）
   # /templates                     列出可用 prompt 模板及其可填占位符（$1 / ${1:-默认} / ${@} …）
   # /template <name> [args]        展开模板（直接在对话里输入 /<name> [args] 亦可）
   # 鼠标拖选即复制（双击选整行，Esc 取消；Shift+拖拽用终端原生选择）

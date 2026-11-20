@@ -51,9 +51,11 @@ func applyProvider(client *llm.OpenAI, a *agent.Agent, ctxWindow *int, p config.
 // saveProviderConfig 将当前 client 状态 + providers 收藏夹落盘。
 // active 为当前生效 provider 名（空=不在收藏夹中）。
 func saveProviderConfig(client *llm.OpenAI, ctxWindow *int, active string) error {
-	cfg, err := config.Load(config.DefaultPath())
+	// 必须用 LoadForWrite：配置解析失败时若拿空配置写回，会把用户原有的
+	// providers/mcp/hooks 等整份覆盖掉（表现为「渠道配置被破坏」）。
+	cfg, err := config.LoadForWrite(config.DefaultPath())
 	if err != nil {
-		cfg = &config.Config{}
+		return fmt.Errorf("配置无法写回（%s）: %w", config.DefaultPath(), err)
 	}
 	cfg.BaseURL = client.BaseURL
 	cfg.APIKey = client.APIKey
@@ -126,9 +128,9 @@ func newProviderCommand(client *llm.OpenAI, a *agent.Agent, ctxWindow *int) agen
 		Timeout:     0,
 		Run: func(args string) (string, error) {
 			args = strings.TrimSpace(args)
-			cfg, err := config.Load(config.DefaultPath())
+			cfg, err := config.LoadForWrite(config.DefaultPath())
 			if err != nil {
-				cfg = &config.Config{}
+				return "", fmt.Errorf("读取/写回配置失败（请先修好 %s）: %w", config.DefaultPath(), err)
 			}
 			fields := strings.Fields(args)
 			// 无参数：列出

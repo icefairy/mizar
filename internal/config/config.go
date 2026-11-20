@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -55,8 +56,8 @@ type Config struct {
 	// DiagLog 诊断日志开关（落盘到 ~/.mizar/logs/，默认 nil = 开启）。
 	// 用于排查「任务莫名中止/卡死/退出」类无法复现的问题；设 0 可关闭。
 	DiagLog *bool `json:"diag_log,omitempty"`
-	// MCPServers 外部 MCP server 列表（mcp_call 宿主函数用）。
-	// 每项: name + (command/args | url)。覆盖内置 db_query 之外的长尾能力。
+	// MCPServers (deprecated) 旧版 MCP 配置位置，仅作向后兼容读取。
+	// 新配置请写 ~/.mizar/mcp.json（见 LoadMCPServers）；/mcp 写入时会迁移并清空本字段。
 	MCPServers []engine.MCPServerConf `json:"mcp_servers,omitempty"`
 	// Web Web UI 配置（-serve 模式下提供网页界面 + 登录鉴权）。
 	Web *WebConfig `json:"web,omitempty"`
@@ -79,6 +80,10 @@ type Config struct {
 	// Hooks 用户级 hooks（C-6，internal/userhooks）：shell 命令响应工具事件，
 	// pre_tool_use 可 deny/rewrite（exit 2 或 stdout JSON {"decision":...}）。
 	Hooks *userhooks.Config `json:"hooks,omitempty"`
+	// Warnings 本次加载中「个别字段解析失败」的记录（不落盘）。
+	// 例如某字段类型写错：其余配置照常生效，这里记下被跳过的字段，
+	// 由启动流程打印出来，避免「配置静默失效」。
+	Warnings []string `json:"-"`
 }
 
 // Provider 一个已记住的 LLM 供应商配置。
@@ -287,11 +292,13 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, err
 	}
-	c := &Config{}
-	if err := json.Unmarshal(data, c); err != nil {
+	c, warns, err := decodeConfig(data)
+	if err != nil {
 		return nil, fmt.Errorf("解析配置 %s: %w", path, err)
 	}
-	if c.upgradeLegacy() {
+	c.Warnings = warns
+	// 有字段解析失败时不自动写回：写回会把用户写错的那段直接抹掉。
+	if len(warns) == 0 && c.upgradeLegacy() {
 		// 备份一次原文件（不覆盖已有备份，避免把用户最早的格式丢掉）
 		bak := path + ".bak"
 		if _, err := os.Stat(bak); os.IsNotExist(err) {
@@ -301,6 +308,55 @@ func Load(path string) (*Config, error) {
 			// 升级写回失败不阻断使用：内存里的配置已经可用
 			return c, nil
 		}
+	}
+	return c, nil
+}
+
+// decodeConfig 逐字段解析配置：某个字段写错（类型不符）时只跳过该字段并记一条
+// warning，其余字段照常生效 —— 不能因为 mcp_servers 之类写错就把 base_url/
+// api_key/model 一起丢掉（那会让 LLM 渠道静默回退到默认值）。
+func decodeConfig(data []byte) (*Config, []string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, nil, err
+	}
+	c := &Config{}
+	var warns []string
+	v := reflect.ValueOf(c).Elem()
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		rawField, ok := raw[name]
+		if !ok || len(rawField) == 0 || string(rawField) == "null" {
+			continue
+		}
+		if err := json.Unmarshal(rawField, v.Field(i).Addr().Interface()); err != nil {
+			warns = append(warns, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+	return c, warns, nil
+}
+
+// LoadForWrite 读取配置用于「读-改-写」。
+//
+// 写回配置的调用方必须用它（而不是 Load 后忽略错误）：文件整体无法解析时返回
+// 错误，避免拿一份空配置写回、把用户原有的 providers / mcp / hooks 等全部覆盖掉。
+// 个别字段解析失败（Warnings 非空）同样拒绝写回——写回会丢掉那些字段的内容。
+func LoadForWrite(path string) (*Config, error) {
+	c, err := Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		c = &Config{}
+	}
+	if len(c.Warnings) > 0 {
+		return nil, fmt.Errorf("配置文件 %s 有 %d 处无法解析（%s），为避免覆盖已中止写入；请先修好再试",
+			path, len(c.Warnings), strings.Join(c.Warnings, "; "))
 	}
 	return c, nil
 }

@@ -256,7 +256,10 @@ func (c *Config) String() string {
 
 // RunWizard 启动交互式向导（标准输入）。
 func RunWizard(savePath string) (*Config, error) {
-	cfg, _ := Load(savePath)
+	cfg, err := Load(savePath)
+	if err != nil || cfg == nil {
+		cfg = &Config{}
+	}
 	reader := bufio.NewReader(os.Stdin)
 	w := &wizard{
 		cfg: cfg,

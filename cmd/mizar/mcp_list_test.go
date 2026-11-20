@@ -13,11 +13,11 @@ func TestMCPListText(t *testing.T) {
 	runtimeMCPRegistry = engine.NewMCPRegistry(nil)
 	defer func() { runtimeMCPRegistry = nil }()
 
-	cfg := &config.Config{MCPServers: []engine.MCPServerConf{
+	servers := []engine.MCPServerConf{
 		{Name: "ones", URL: "http://127.0.0.1:3001/mcp"},
 		{Name: "sqlite", Command: "npx", Args: []string{"-y", "server-sqlite"}, Timeout: 10},
-	}}
-	out := mcpListText(cfg)
+	}
+	out := mcpListText(servers, config.MCPPath())
 	for _, want := range []string{
 		"配置 2 个", "ones", "[http]", "http://127.0.0.1:3001/mcp",
 		"sqlite", "[stdio]", "npx", "args: -y server-sqlite", "timeout=10s",
@@ -37,7 +37,7 @@ func TestMCPListText(t *testing.T) {
 func TestMCPListTextEmpty(t *testing.T) {
 	runtimeMCPRegistry = engine.NewMCPRegistry(nil)
 	defer func() { runtimeMCPRegistry = nil }()
-	out := mcpListText(&config.Config{})
+	out := mcpListText(nil, config.MCPPath())
 	if !strings.Contains(out, "未配置") || !strings.Contains(out, "/mcp add") {
 		t.Fatalf("空配置应提示添加方式：\n%s", out)
 	}

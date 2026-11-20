@@ -233,7 +233,7 @@ db_exec_batch("sqlite3", "/data/app.db", JSON.stringify([
 插件需要 Redis/Kafka/MongoDB/ClickHouse 等长尾能力时，不内置驱动，走 `mcp_call` 调外部 MCP server：
 
 - `mcp_call(server, tool, argsJSON)` → 文本
-- 配置驱动：`config.json` 加 `mcp_servers`（支持 stdio + HTTP 传输）
+- 配置驱动：`~/.mizar/mcp.json` 写 `mcp_servers`（独立文件，与 LLM 渠道配置隔离；支持 stdio + HTTP 传输）
 - 惰性连接 + 复用 + 30s 超时；调用失败返回错误，不阻塞后续
 
 **分层总览**：`db_query`（内置关系型）→ `mcp_call`（外部任意服务），插件按场景选，互不阻塞。内置 3 驱动保持主体轻量，长尾能力全部外置，二进制永不膨胀。
