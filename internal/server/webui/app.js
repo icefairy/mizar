@@ -118,6 +118,11 @@
   let historySaved = "";  // 历史导航前的临时内容
   let curConv = null;  // 当前会话 id
   let convs = [];      // 会话摘要列表
+  // renderedStamp：每个会话「DOM 已渲染到哪一版历史」的 updated_at 戳。
+  // 回前台时用它与服务端比对，决定是否需要重载历史——不能用消息条数：
+  // 服务端 count 含工具过程消息（role=assistant, kind=tool），而 DOM 只为
+  // 用户消息和最终答复生成 .msg，两边永远对不上，会每次切回来都白重载一次。
+  let renderedStamp = Object.create(null);
   // 浏览器标题：保留原有「开阳 Mizar 版本号」，前面加上当前会话主题。
   let baseTitle = "开阳 Mizar";
   function setBaseTitle(t) { baseTitle = t || "开阳 Mizar"; applyBrowserTitle(); }
@@ -676,6 +681,8 @@
     try {
       const j = await api("/web/api/conversation?id=" + encodeURIComponent(id));
       const c = j.conversation;
+      // 记录本次渲染对应的历史版本（竞态：期间用户已切到别的会话则不覆盖）。
+      if (curConv === id) renderedStamp[id] = c.updated_at || "";
       const msgs = c.messages || [];
       // 回放历史：连续的用户消息各起一轮；assistant 作为最终答复；
       // 其余（tool/sys/未知）归入当前轮的「工作过程」。
@@ -754,6 +761,7 @@
         body: JSON.stringify({ mode: mode }),
       });
       curConv = j.conversation.id;
+      renderedStamp[curConv] = j.conversation.updated_at || "";
       await loadConversations(false);
       renderConvList();
       clearLog();
@@ -1137,8 +1145,8 @@
     try { await selectConv(id); } finally { stickBottom = keepStick; updateJumpBtn(); }
   }
   // syncCurrentConv 后台期间会话可能已被跑完（本标签页或其他设备/标签页）：
-  // 最终答复只落在服务端历史里，没有对应「事件」可重放。这里比对消息条数，
-  // 发现变化就重载当前会话，保证切回来看到的是完整结果。
+  // 最终答复只落在服务端历史里，没有对应「事件」可重放。这里比对历史版本
+  // （updated_at），发现变化才重载当前会话，保证切回来看到最新结果且不白闪。
   let syncing = false;
   async function syncCurrentConv() {
     if (syncing || !curConv) return;
@@ -1151,15 +1159,24 @@
       renderConvList();
       const mine = list.find((c) => c.id === curConv);
       if (!mine) return;
-      const shown = log.querySelectorAll(".msg").length;
-      if (mine.count !== shown) await selectConv(curConv);
+      // 历史没变就别重载：重载会先清空 DOM 再等接口返回，长会话能空白一两秒，
+      // 表现为「切回窗口页面闪一下」。updated_at 只在消息追加/压缩时变化。
+      const stamp = mine.updated_at || "";
+      if (renderedStamp[curConv] === stamp) return;
+      await loadConvQuietly(curConv);
     } catch (e) {
     } finally { syncing = false; }
   }
   // 回到前台 / 网络恢复：立即重连并补齐。移动端浏览器从后台唤醒时
   // WS 往往已死但 readyState 仍是 OPEN（假活），这里主动探活。
+  let lastResumeAt = 0;
   function resumeFromBackground() {
     if (!appView || appView.classList.contains("hidden")) return;
+    // visibilitychange 与 focus 会在同一瞬间先后触发；不去抖就会把补齐和
+    // 会话同步跑两遍（页面闪两下，还多发一轮请求）。
+    const now = Date.now();
+    if (now - lastResumeAt < 400) return;
+    lastResumeAt = now;
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
       connectWS();
     }
@@ -1668,7 +1685,14 @@
     saveQueue();
     renderQueueBar();
     input.focus();
-    api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
+    api("/web/api/conversations").then((j) => {
+      convs = j.conversations || []; renderConvList();
+      // 本轮答复已由本页渲染进 DOM，同步标记历史版本，避免回前台时无谓重载。
+      if (curConv === myConv) {
+        const c = convs.find((x) => x.id === myConv);
+        if (c) renderedStamp[myConv] = c.updated_at || "";
+      }
+    }).catch(() => {});
     // 自动标题由服务端异步生成（小模型），稍后再拉一次即可显示新标题
     setTimeout(() => {
       api("/web/api/conversations").then((j) => { convs = j.conversations || []; renderConvList(); }).catch(() => {});
