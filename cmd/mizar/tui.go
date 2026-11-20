@@ -315,6 +315,7 @@ type tuiModel struct {
 	// 上下文占用估算缓存（见 statusBarDirect）：lines 长度不变则估算值不变
 	ctxEst      int
 	ctxEstLines int
+	ctxEstMsgs  int // a.Initial 消息数（缓存键之一；Initial 在 Run 结束后追加）
 
 	// 状态栏行数缓存（见 syncStatusBarHeight）：按宽度算出的显示行数，
 	// 只有变化时才 ResizeItem——每次重绘都调会触发整屏重排。
@@ -562,16 +563,24 @@ func (m *tuiModel) statusBarText() string {
 	if a := m.agent; a != nil && a.Compactor != nil {
 		limit := a.Compactor.ContextWindow - a.Compactor.ReserveTokens
 		if limit > 0 && len(m.lines) > 0 {
-			// 估算结果按「行数」缓存：lines 只在追加时变化（内容不原地改写），
-			// 因此行数不变即结果不变。状态栏在 spinner/流式/bash 输出时被高频重绘
-			// （每 60~100ms 一次），不缓存的话每次都要遍历全部消息重算 EstimateTokens，
-			// 长会话下会把事件循环拖慢，用户看到的就是「输入框卡住」。
-			if m.ctxEstLines != len(m.lines) {
-				est := 0
-				for i := 1; i < len(m.lines); i++ {
-					est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
+			// 估算结果按「消息数 + 行数」缓存：优先用 agent 的真实会话历史
+			// （a.Initial，模型实际看到的消息，工具结果是全文）——显示行里的
+			// 工具结果是截断后的（"→ " + result），按显示行估算会严重低估。
+			// 状态栏在 spinner/流式/bash 输出时被高频重绘（每 60~100ms 一次），
+			// 不缓存的话每次都要遍历全部消息重算 EstimateTokens，长会话下会把
+			// 事件循环拖慢，用户看到的就是「输入框卡住」。
+			msgs := len(a.Initial)
+			if m.ctxEstLines != len(m.lines) || m.ctxEstMsgs != msgs {
+				if msgs > 0 {
+					m.ctxEst = agent.EstimateMessages(a.Initial)
+				} else {
+					est := 0
+					for i := 1; i < len(m.lines); i++ {
+						est += agent.EstimateTokens(agent.Message{Content: m.lines[i].content})
+					}
+					m.ctxEst = est
 				}
-				m.ctxEst, m.ctxEstLines = est, len(m.lines)
+				m.ctxEstLines, m.ctxEstMsgs = len(m.lines), msgs
 			}
 			est := m.ctxEst
 			// 流式正在输出的回复同样计入估算（与任务结束后该消息入 lines 的趋势一致），
