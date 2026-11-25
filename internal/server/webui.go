@@ -250,6 +250,12 @@ func (s *Server) webRoutes() {
 	s.mux.HandleFunc("/web/api/ask", s.webAuth(s.handleWebAskPending))
 	// 设置（模型 + 对话参数）
 	s.mux.HandleFunc("/web/api/settings", s.webAuth(s.handleSettings))
+	// 工作空间（上传文件按会话落盘，Agent 文件工具以该目录为 cwd）
+	s.mux.HandleFunc("/web/api/workspace/root", s.webAuth(s.handleWorkspaceRoot))
+	s.mux.HandleFunc("/web/api/workspace/files", s.webAuth(s.handleWorkspaceFiles))
+	s.mux.HandleFunc("/web/api/workspace/upload", s.webAuth(s.handleWorkspaceUpload))
+	s.mux.HandleFunc("/web/api/workspace/download", s.webAuth(s.handleWorkspaceDownload))
+	s.mux.HandleFunc("/web/api/workspace/file", s.webAuth(s.handleWorkspaceDelete))
 	s.mux.HandleFunc("/web/api/models", s.webAuth(s.handleModelsList))
 	// 供应商收藏夹（多 provider 管理）
 	s.mux.HandleFunc("/web/api/providers", s.webAuth(s.handleWebProviders))
@@ -388,6 +394,8 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 			errJSON(w, http.StatusNotFound, "conversation not found")
 			return
 		}
+		// 联动清理该会话的工作空间目录（只删 <root>/<convID> 单层，删除前校验边界）。
+		s.removeConvWorkspace(id)
 		// 释放该会话的 Agent 实例（2026-11-15 审计修复：agentPool.drop 此前
 		// 零调用 → byConv 只增不减，每个实例都持有 Initial 历史，长期跑内存只涨不落）。
 		if s.pool != nil {
@@ -898,6 +906,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(v.Model) == "" {
 			v.Model = s.agent.Model()
 		}
+		// 工作空间根目录：空=默认；非空必须是可创建/可写的绝对路径。
+		root, rerr := validateWorkspaceRoot(v.WorkspaceRoot)
+		if rerr != nil {
+			errJSON(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		v.WorkspaceRoot = root
 		st.saveSettings(v)
 		// 应用到 LLM 客户端
 		s.applySettings(v)

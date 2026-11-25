@@ -1247,7 +1247,10 @@ func (a *Agent) runOneToolCall(c *callRequest, idx, total int, reply string, msg
 	}
 
 	// 先执行工具（dsh 的 repeat-tool-reminder 也是 post-execute 观察语义）
-	out, err := a.Plugins.Call(c.Tool, c.Args)
+	// 文件类内置工具按本次会话的工作目录解析路径（a.WorkDir 为空时 CallInDir
+	// 退回 Call，CLI/TUI/RPC 行为完全不变）。cwd 是调用参数而非全局状态，
+	// 多会话并发时各走各的目录，不会互相覆盖。
+	out, err := a.Plugins.CallInDir(c.Tool, c.Args, a.WorkDir)
 	q.EndOperation("tool:" + c.Tool)
 	// 工具交换回调：供调用方持久化（会话记录工具调用过程/结果）
 	if a.OnToolExchange != nil {

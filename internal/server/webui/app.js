@@ -20,6 +20,11 @@
   const providerSelect = $("providerSelect"), providerUse = $("providerUse"), providerDel = $("providerDel");
   const providerCurrent = $("providerCurrent"), providerHint = $("providerHint"), providerAdd = $("providerAdd");
   const pvName = $("pvName"), pvURL = $("pvURL"), pvKey = $("pvKey"), pvModel = $("pvModel");
+  // 工作空间：附件按钮 + 上传面板
+  const attachBtn = $("attachBtn"), fileInput = $("fileInput"), wsBtn = $("wsBtn");
+  const wsPanel = $("wsPanel"), wsClose = $("wsClose"), wsFilesEl = $("wsFiles"), wsRootEl = $("wsRoot"),
+    wsUploadBtn = $("wsUploadBtn"), wsFileInput = $("wsFileInput"), wsUploadMsg = $("wsUploadMsg"),
+    wsProgress = $("wsProgress"), wsProgressBar = $("wsProgressBar"), wsDropHint = $("wsDropHint");
 
   let mode = "chat";   // chat | agent
   // busyConv：当前正在跑一轮的会话 id（null=空闲）。用它代替全局 busy，
@@ -658,7 +663,7 @@
         ev.stopPropagation();
         if (!confirm("删除该会话？")) return;
         try { await api("/web/api/conversations?id=" + encodeURIComponent(c.id), { method: "DELETE" }); } catch (e) {}
-        if (c.id === curConv) curConv = null;
+        if (c.id === curConv) { curConv = null; if (wsPanel) wsPanel.classList.add("hidden"); }
         await loadConversations(!curConv);
       });
       convList.appendChild(el);
@@ -737,6 +742,8 @@
         resumeConvIfRunning(id);
       }
       restoreInputDraft();
+      // 工作空间面板开着时跟着切换会话刷新文件列表
+      if (wsPanel && !wsPanel.classList.contains("hidden")) wsRefresh();
       // 切回本会话：若服务端空闲且有本会话排队的消息，立即补发（不再需要等下一轮）
       drainPending();
     } catch (e) { addMsg("error", "错误", e.message); }
@@ -1754,6 +1761,161 @@
     composerToggle.addEventListener("click", () => applyComposerCompact(!isComposerCompact()));
   }
 
+  // ---------- 工作空间（上传 / 列表 / 下载 / 删除） ----------
+  let uploading = false;
+  function fmtSize(n) {
+    if (n == null) return "";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1024 / 1024).toFixed(1) + " MB";
+  }
+  function setProgress(pct) {
+    if (!wsProgress || !wsProgressBar) return;
+    if (pct == null) { wsProgress.classList.add("hidden"); wsProgressBar.style.width = "0"; return; }
+    wsProgress.classList.remove("hidden");
+    wsProgressBar.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  }
+  async function ensureConv() {
+    if (!curConv) await createConv();
+    return curConv;
+  }
+  function uploadFiles(files) {
+    const list = Array.from(files || []).filter((f) => f && typeof f.size === "number");
+    if (!list.length) return;
+    if (uploading) { flashQuick("正在上传，请稍候"); return; }
+    ensureConv().then((conv) => {
+      if (!conv) return;
+      uploading = true;
+      if (attachBtn) attachBtn.disabled = true;
+      if (wsUploadBtn) wsUploadBtn.disabled = true;
+      if (wsUploadMsg) wsUploadMsg.textContent = "上传中…";
+      setProgress(0);
+      const fd = new FormData();
+      list.forEach((f) => fd.append("file", f));
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/web/api/workspace/upload?conversation_id=" + encodeURIComponent(conv));
+      xhr.upload.onprogress = (ev) => {
+        if (!ev.lengthComputable) return;
+        const pct = Math.round(ev.loaded / ev.total * 100);
+        setProgress(pct);
+        if (wsUploadMsg) wsUploadMsg.textContent = "上传中 " + pct + "%";
+      };
+      xhr.onload = () => {
+        uploading = false;
+        if (attachBtn) attachBtn.disabled = false;
+        if (wsUploadBtn) wsUploadBtn.disabled = false;
+        setProgress(null);
+        let j = null;
+        try { j = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
+        if (xhr.status < 200 || xhr.status >= 300 || !j || j.ok !== true) {
+          const msg = (j && (j.error || j.message)) || ("上传失败（HTTP " + xhr.status + "）");
+          if (wsUploadMsg) wsUploadMsg.textContent = "✗ " + msg;
+          flashQuick("上传失败：" + msg);
+          return;
+        }
+        const names = (j.files || []).map((f) => f.name).join("、");
+        if (wsUploadMsg) wsUploadMsg.textContent = "✓ 已上传 " + (j.files || []).length + " 个文件";
+        flashQuick("已上传：" + names);
+        // 与服务器落盘保持一致：历史里已插入一条普通 user 文本，模型下轮能读到。
+        if (conv === curConv && j.notice) addUserMsg(j.notice);
+        wsRefresh();
+        api("/web/api/conversations").then((r) => { convs = r.conversations || []; renderConvList(); }).catch(() => {});
+      };
+      xhr.onerror = () => {
+        uploading = false;
+        if (attachBtn) attachBtn.disabled = false;
+        if (wsUploadBtn) wsUploadBtn.disabled = false;
+        setProgress(null);
+        if (wsUploadMsg) wsUploadMsg.textContent = "✗ 网络错误";
+        flashQuick("上传失败：网络错误");
+      };
+      xhr.send(fd);
+    });
+  }
+  function wsRefresh() {
+    if (!wsPanel || wsPanel.classList.contains("hidden")) return;
+    if (!curConv) {
+      if (wsRootEl) wsRootEl.textContent = "";
+      if (wsFilesEl) wsFilesEl.innerHTML = '<div class="ws-empty">先选择或新建一个会话。</div>';
+      return;
+    }
+    const conv = curConv;
+    api("/web/api/workspace/files?conversation_id=" + encodeURIComponent(conv)).then((j) => {
+      if (conv !== curConv) return;
+      if (wsRootEl) wsRootEl.textContent = j.root || "";
+      const files = j.files || [];
+      if (!files.length) {
+        wsFilesEl.innerHTML = '<div class="ws-empty">还没有文件。点「上传文件」或把文件拖进来。</div>';
+        return;
+      }
+      wsFilesEl.innerHTML = "";
+      files.forEach((f) => {
+        const row = document.createElement("div");
+        row.className = "ws-file";
+        const nameWrap = document.createElement("div");
+        nameWrap.className = "fname";
+        const a = document.createElement("a");
+        a.href = "/web/api/workspace/download?conversation_id=" + encodeURIComponent(conv) + "&name=" + encodeURIComponent(f.name);
+        a.textContent = f.name;
+        a.title = "下载 " + f.name;
+        nameWrap.appendChild(a);
+        const meta = document.createElement("span");
+        meta.className = "fmeta";
+        meta.textContent = fmtSize(f.size);
+        const del = document.createElement("button");
+        del.className = "fdel";
+        del.type = "button";
+        del.textContent = "✕";
+        del.title = "删除";
+        del.addEventListener("click", () => wsDelete(conv, f.name));
+        row.appendChild(nameWrap);
+        row.appendChild(meta);
+        row.appendChild(del);
+        wsFilesEl.appendChild(row);
+      });
+    }).catch((e) => {
+      if (wsFilesEl) wsFilesEl.innerHTML = '<div class="ws-empty">读取失败：' + esc(e.message) + "</div>";
+    });
+  }
+  async function wsDelete(conv, name) {
+    if (!confirm("删除工作空间文件 " + name + "？")) return;
+    try {
+      await api("/web/api/workspace/file?conversation_id=" + encodeURIComponent(conv) + "&name=" + encodeURIComponent(name), { method: "DELETE" });
+      flashQuick("已删除 " + name);
+      wsRefresh();
+    } catch (e) { flashQuick("删除失败：" + e.message); }
+  }
+  function openWsPanel() {
+    if (!wsPanel) return;
+    wsPanel.classList.remove("hidden");
+    wsRefresh();
+  }
+  function closeWsPanel() { if (wsPanel) wsPanel.classList.add("hidden"); }
+  function bindDrop(el) {
+    if (!el) return;
+    el.addEventListener("dragover", (e) => { e.preventDefault(); el.classList.add("drag-over"); });
+    el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+    el.addEventListener("drop", (e) => {
+      e.preventDefault();
+      el.classList.remove("drag-over");
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+    });
+  }
+  if (attachBtn) attachBtn.addEventListener("click", () => fileInput && fileInput.click());
+  if (fileInput) fileInput.addEventListener("change", () => { uploadFiles(fileInput.files); fileInput.value = ""; });
+  if (wsUploadBtn) wsUploadBtn.addEventListener("click", () => wsFileInput && wsFileInput.click());
+  if (wsFileInput) wsFileInput.addEventListener("change", () => { uploadFiles(wsFileInput.files); wsFileInput.value = ""; });
+  if (wsBtn) wsBtn.addEventListener("click", openWsPanel);
+  if (wsClose) wsClose.addEventListener("click", closeWsPanel);
+  if (wsPanel) wsPanel.addEventListener("click", (e) => { if (e.target === wsPanel) closeWsPanel(); });
+  // 粘贴文件（截图/从文件管理器复制）直接上传；纯文本粘贴照常进输入框。
+  input.addEventListener("paste", (e) => {
+    const files = e.clipboardData && e.clipboardData.files;
+    if (files && files.length) { e.preventDefault(); uploadFiles(files); }
+  });
+  bindDrop(composerEl);
+  bindDrop(wsPanel ? wsPanel.querySelector(".ws-card") : null);
+
   sendBtn.addEventListener("click", send);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); return; }
@@ -1817,6 +1979,7 @@
   const setModel = $("setModel"), setThinking = $("setThinking"), setTemp = $("setTemp"),
     setTopp = $("setTopp"), setMaxTokens = $("setMaxTokens"), setSystem = $("setSystem"),
     setMaxHistory = $("setMaxHistory"), setTitleModel = $("setTitleModel"),
+    setWorkspaceRoot = $("setWorkspaceRoot"), wsRootHint = $("wsRootHint"),
     setCacheMiss = $("setCacheMiss"),
     tempVal = $("tempVal"), toppVal = $("toppVal"), modelList = $("modelList"), modelHint = $("modelHint");
   let curSettings = {};
@@ -1829,6 +1992,7 @@
     setMaxTokens.value = curSettings.max_tokens || "";
     setMaxHistory.value = curSettings.max_history || 50;
     setTitleModel.value = curSettings.title_model || "";
+    setWorkspaceRoot.value = curSettings.workspace_root || "";
     setCacheMiss.value = curSettings.show_cache_miss ? "1" : "";
     setSystem.value = curSettings.system || "";
     // 快捷行同步
@@ -1844,8 +2008,16 @@
   function openSettings() {
     api("/web/api/settings").then((j) => { loadSettings(j.settings); setModelTag(j.model); }).catch(() => {});
     loadProviders();
+    // 回显当前生效根目录（留空时显示默认路径，用户才知道会传到哪）
+    api("/web/api/workspace/root").then((j) => {
+      wsRootHint.textContent = j.is_default
+        ? "当前生效：" + j.root + "（默认）"
+        : "当前生效：" + j.root;
+    }).catch(() => {});
     settingsModal.classList.remove("hidden");
   }
+  const wsRootDefaultBtn = $("wsRootDefault");
+  if (wsRootDefaultBtn) wsRootDefaultBtn.addEventListener("click", () => { setWorkspaceRoot.value = ""; });
   settingsBtn.addEventListener("click", openSettings);
   settingsClose.addEventListener("click", () => settingsModal.classList.add("hidden"));
   settingsModal.addEventListener("click", (e) => { if (e.target === settingsModal) settingsModal.classList.add("hidden"); });
@@ -1881,6 +2053,7 @@
       max_tokens: parseInt(setMaxTokens.value || "0", 10) || 0,
       max_history: parseInt(setMaxHistory.value || "50", 10) || 50,
       title_model: setTitleModel.value.trim(),
+      workspace_root: setWorkspaceRoot.value.trim(),
       show_cache_miss: setCacheMiss.value === "1",
       system: setSystem.value,
     };

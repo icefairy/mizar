@@ -75,6 +75,9 @@ type webSettings struct {
 	// TitleModel 自动会话标题提炼用的模型（空 = 用当前主模型）。
 	// 建议填一个免费/小尺寸模型，避免额外费用与延迟。
 	TitleModel string `json:"title_model,omitempty"`
+	// WorkspaceRoot Web 上传文件的工作空间根目录（空 = 默认 ~/.mizar/workspaces/）。
+	// 每个会话的文件落在 <root>/<convID>/，Agent 文件工具以该目录为 cwd。
+	WorkspaceRoot string `json:"workspace_root,omitempty"`
 }
 
 // webStore 会话 + 设置存储（带文件持久化）。

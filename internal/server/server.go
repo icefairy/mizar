@@ -143,7 +143,15 @@ func (s *Server) runLiveFor(convID string) bool {
 // 非 Web 入口（convID 空）返回主实例，行为与改造前一致。
 func (s *Server) agentFor(convID string) *agent.Agent {
 	if s.pool != nil {
-		return s.pool.forConv(convID)
+		a := s.pool.forConv(convID)
+		// 每次取实例都刷新工作目录：根目录可能刚在设置里改过；目录名固定为 convID。
+		// WorkDir 同时用于系统提示与工具 cwd（CallInDir），二者必须一致。
+		if a != nil && convID != "" {
+			if dir, err := s.convWorkspaceDir(convID); err == nil {
+				a.WorkDir = dir
+			}
+		}
+		return a
 	}
 	return s.agent
 }

@@ -49,6 +49,7 @@
       </div>
       <div class="right">
         <span id="modelTag" class="model-tag"></span>
+        <button id="wsBtn" class="ghost" type="button" title="本会话工作空间（上传/下载文件）">📁</button>
         <button id="themeBtn" class="ghost" type="button" title="切换主题">🌙</button>
         <button id="abortBtn" class="ghost hidden" type="button">中止</button>
       </div>
@@ -93,7 +94,9 @@
         <span id="quickMsg" class="quick-msg"></span>
       </div>
       <div class="input-row">
-        <textarea id="input" rows="2" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
+        <button id="attachBtn" class="attach-btn" type="button" title="上传文件到本会话工作空间（也可拖拽/粘贴文件）">📎</button>
+        <input id="fileInput" type="file" multiple hidden>
+        <textarea id="input" rows="2" placeholder="输入消息，Enter 发送 / Shift+Enter 换行（可拖拽/粘贴文件）"></textarea>
         <div class="send-col">
           <label id="queueToggle" class="qtoggle" title="默认打断模式：等待期间发送的消息会注入当前循环纠正它。取消勾选→排队模式：消息排队到本轮结束后再发送。">
             <input id="queueMode" type="checkbox" spellcheck="false">
@@ -197,6 +200,15 @@
       </label>
 
       <label class="field">
+        <span>工作空间根目录</span>
+        <div class="row">
+          <input id="setWorkspaceRoot" type="text" placeholder="留空 = ~/.mizar/workspaces" spellcheck="false">
+          <button id="wsRootDefault" class="ghost" type="button">用默认</button>
+        </div>
+        <small id="wsRootHint" class="hint">上传的文件按会话存放在 &lt;根目录&gt;/&lt;会话ID&gt;/，Agent 以该目录为工作目录。必须是服务器上的绝对路径。</small>
+      </label>
+
+      <label class="field">
         <span>系统提示词</span>
         <textarea id="setSystem" rows="3" placeholder="留空使用默认"></textarea>
       </label>
@@ -204,6 +216,27 @@
     <div class="modal-foot">
       <span id="settingsMsg" class="hint"></span>
       <button id="settingsSave" class="primary" type="button">保存并应用</button>
+    </div>
+  </div>
+</div>
+
+<!-- 本会话工作空间：文件列表 + 上传（拖拽/多选）+ 下载/删除 -->
+<div id="wsPanel" class="modal hidden">
+  <div class="modal-card ws-card">
+    <div class="modal-head">
+      <h2>本会话工作空间</h2>
+      <button id="wsClose" class="ghost" type="button">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="wsRoot" class="ws-root"></div>
+      <div class="ws-actions">
+        <button id="wsUploadBtn" class="ghost" type="button">⬆ 上传文件</button>
+        <input id="wsFileInput" type="file" multiple hidden>
+        <span id="wsUploadMsg" class="hint"></span>
+      </div>
+      <div id="wsProgress" class="ws-progress hidden"><div id="wsProgressBar"></div></div>
+      <div id="wsFiles" class="ws-files"></div>
+      <div id="wsDropHint" class="ws-drop">把文件拖到这里上传（支持多选）</div>
     </div>
   </div>
 </div>

@@ -28,6 +28,9 @@ type Tool struct {
 	PluginFile  string // 来源插件文件
 	// Run 在引擎内执行；args 是字符串参数。
 	Run func(args string) (string, error)
+	// RunInDir 可选：需要「按调用方指定工作目录」执行的内置工具填这个（见 Manager.CallInDir）。
+	// 为空时 CallInDir 退回 Run，JS 插件工具因此零改动。
+	RunInDir func(cwd, args string) (string, error)
 	// Terminate 声明：工具执行成功后以返回值作为最终回答，不再发起 follow-up LLM 调用
 	// （对齐 pi 0.69.0 的 `terminate: true`）。适合“任务到此结束”类工具（如 exit_plan_mode、
 	// 自定义 finish 工具）。执行失败时忽略此声明——错误需回填给模型让它纠正。
@@ -719,6 +722,15 @@ func (m *Manager) SetOnToolCall(fn func(name string)) {
 
 // Call 执行工具（带超时）。
 func (m *Manager) Call(name, args string) (string, error) {
+	return m.CallInDir(name, args, "")
+}
+
+// CallInDir 与 Call 同构，但把 cwd 作为「本次调用」的参数传给工具（per-call cwd）。
+//
+// 为什么 cwd 必须是参数而不是 Manager 字段：Manager 是进程级共享的，多个 Web
+// 会话并发运行时若把 cwd 存到 m.cwd 会互相覆盖，又退回全局状态陷阱。
+// 工具没填 RunInDir（JS 插件工具、非文件类内置工具）时退回 Run，行为不变。
+func (m *Manager) CallInDir(name, args, cwd string) (string, error) {
 	t, ok := m.Get(name)
 	if !ok {
 		return "", fmt.Errorf("tool %q not found（若刚创建了实现该工具的插件文件，请先调用 reload_plugins 工具加载后再试"+"；/xxx 斜杠命令不能作为工具调用）", name)
@@ -743,7 +755,13 @@ func (m *Manager) Call(name, args string) (string, error) {
 				ch <- res{"", fmt.Errorf("tool %q panicked: %v", name, r)}
 			}
 		}()
-		out, err := t.Run(args)
+		var out string
+		var err error
+		if cwd != "" && t.RunInDir != nil {
+			out, err = t.RunInDir(cwd, args)
+		} else {
+			out, err = t.Run(args)
+		}
 		ch <- res{out, err}
 	}()
 	// NoTimeout 工具（如 ask_user_question）不设上限，一直等到 Run 返回。

@@ -54,75 +54,78 @@ func All(skillsDir string, onPluginFileChanged func(path string) string) []plugi
 // toolBash 执行 shell 命令（对齐 pi 的 bash 工具：timeout 可选，无默认超时）。
 // 需要限制执行时间时，由模型自行传 timeout 或在命令前加 `timeout` 命令。
 func toolBash() plugins.Tool {
-	return plugins.Tool{
-		Name:        "bash",
-		Description: bashToolDescription(),
-		Run: func(args string) (string, error) {
-			var p struct {
-				Command string `json:"command"`
-				Timeout int    `json:"timeout"`
+	run, runInDir := dualRun(func(cwd, args string) (string, error) {
+		var p struct {
+			Command string `json:"command"`
+			Timeout int    `json:"timeout"`
+		}
+		if err := json.Unmarshal([]byte(args), &p); err != nil || p.Command == "" {
+			return "", fmt.Errorf("bash: args {command} required")
+		}
+		// 跨平台 shell 选择：Unix bash/sh，Windows PowerShell(pwsh/5.1)→cmd。
+		// pi-lens-ignore: go-command-injection (bash tool is designed to execute shell commands)
+		cmd := shell.Command(p.Command)
+		// per-call 工作目录：Web 会话按 <workspace>/<convID> 执行；cwd 为空保持进程 cwd。
+		if cwd != "" {
+			if err := os.MkdirAll(cwd, 0o755); err == nil {
+				cmd.Dir = cwd
 			}
-			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Command == "" {
-				return "", fmt.Errorf("bash: args {command} required")
-			}
-			// 跨平台 shell 选择：Unix bash/sh，Windows PowerShell(pwsh/5.1)→cmd。
-			// pi-lens-ignore: go-command-injection (bash tool is designed to execute shell commands)
-			cmd := shell.Command(p.Command)
-			// 内嵌 Zig 工具链：已释放时把其目录前置到子进程 PATH，
-			// 让 `zig build-exe ...` 直接可用，不必每次写绝对路径。
-			cmd.Env = zigboot.Env(os.Environ())
-			// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化（平台抽象）
-			setupProcessGroup(cmd)
-			// 增量输出：边跑边回调给 UI（对齐 pi 0.73.0）；回调为 nil 时退化为纯累计
-			out := newStreamWriter(bashStreamFn(), bashStreamMinInterval)
-			cmd.Stdout = out
-			cmd.Stderr = out
-			if err := cmd.Start(); err != nil {
-				return "", err
-			}
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
-			// 命令结束（无论成败/超时）后 Flush 尾部输出，保证最后一段不丢
-			defer out.Flush()
-			if p.Timeout > 0 {
-				select {
-				case err := <-done:
-					if err != nil {
-						return out.String(), err
-					}
-				case <-time.After(time.Duration(p.Timeout) * time.Second):
-					_ = killProcessTree(cmd)
-					return out.String(), fmt.Errorf("bash: timeout after %ds", p.Timeout)
+		}
+		// 内嵌 Zig 工具链：已释放时把其目录前置到子进程 PATH，
+		// 让 `zig build-exe ...` 直接可用，不必每次写绝对路径。
+		cmd.Env = zigboot.Env(os.Environ())
+		// 设置进程组：超时 kill 时杀掉整个进程树（含子进程），防孤儿化（平台抽象）
+		setupProcessGroup(cmd)
+		// 增量输出：边跑边回调给 UI（对齐 pi 0.73.0）；回调为 nil 时退化为纯累计
+		out := newStreamWriter(bashStreamFn(), bashStreamMinInterval)
+		cmd.Stdout = out
+		cmd.Stderr = out
+		if err := cmd.Start(); err != nil {
+			return "", err
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		// 命令结束（无论成败/超时）后 Flush 尾部输出，保证最后一段不丢
+		defer out.Flush()
+		if p.Timeout > 0 {
+			select {
+			case err := <-done:
+				if err != nil {
+					return out.String(), err
 				}
-			} else {
-				// 默认 60s 超时，防止命令无限阻塞
-				select {
-				case err := <-done:
-					if err != nil {
-						return out.String(), err
-					}
-				case <-time.After(60 * time.Second):
-					_ = killProcessTree(cmd)
-					return out.String(), fmt.Errorf("bash: timeout after 60s (default)")
-				}
+			case <-time.After(time.Duration(p.Timeout) * time.Second):
+				_ = killProcessTree(cmd)
+				return out.String(), fmt.Errorf("bash: timeout after %ds", p.Timeout)
 			}
-			// PowerShell 会把重定向到管道的错误流序列化成 CLIXML，先清理成纯文本。
-			full := shell.CleanOutput(out.String())
-			// 输出截断（对齐 pi truncateHead）：50KB / 2000 行双限，保留头部（bash 输出按时间顺序看头部最有意义）
-			truncated, show, truncBy, totalLines, totalBytes := truncateOutput(full)
-			if truncated {
-				path, werr := dumpToTemp(full)
-				if werr != nil {
-					return fmt.Sprintf("truncated (%s): showing %d of %d lines / %d of %d bytes (temp dump failed: %v)",
-						truncBy, show, totalLines, bashMaxBytes, totalBytes, werr), nil
+		} else {
+			// 默认 60s 超时，防止命令无限阻塞
+			select {
+			case err := <-done:
+				if err != nil {
+					return out.String(), err
 				}
-				warn := fmt.Sprintf("truncated (%s): showing %d of %d lines / %d of %d bytes. Full output: %s",
-					truncBy, show, totalLines, bashMaxBytes, totalBytes, path)
-				return warn, nil
+			case <-time.After(60 * time.Second):
+				_ = killProcessTree(cmd)
+				return out.String(), fmt.Errorf("bash: timeout after 60s (default)")
 			}
-			return strings.TrimSpace(full), nil
-		},
-	}
+		}
+		// PowerShell 会把重定向到管道的错误流序列化成 CLIXML，先清理成纯文本。
+		full := shell.CleanOutput(out.String())
+		// 输出截断（对齐 pi truncateHead）：50KB / 2000 行双限，保留头部（bash 输出按时间顺序看头部最有意义）
+		truncated, show, truncBy, totalLines, totalBytes := truncateOutput(full)
+		if truncated {
+			path, werr := dumpToTemp(full)
+			if werr != nil {
+				return fmt.Sprintf("truncated (%s): showing %d of %d lines / %d of %d bytes (temp dump failed: %v)",
+					truncBy, show, totalLines, bashMaxBytes, totalBytes, werr), nil
+			}
+			warn := fmt.Sprintf("truncated (%s): showing %d of %d lines / %d of %d bytes. Full output: %s",
+				truncBy, show, totalLines, bashMaxBytes, totalBytes, path)
+			return warn, nil
+		}
+		return strings.TrimSpace(full), nil
+	})
+	return plugins.Tool{Name: "bash", Description: bashToolDescription(), Run: run, RunInDir: runInDir}
 }
 
 // bashToolDescription 工具描述。

@@ -240,6 +240,11 @@ ws.on("message", (raw) => {
 | GET | `/web/api/settings` | — | `{"settings":{...},"model":"..."}` |
 | POST | `/web/api/settings` | `{model,thinking,temperature,top_p,max_tokens,system}` | `{"ok":true,"settings":{...},"model":"..."}` |
 | GET | `/web/api/models` | — | `{"models":[...],"current":"..."}`（拉上游清单） |
+| GET | `/web/api/workspace/root` | — | `{"root","default","is_default"}`（工作空间根目录） |
+| GET | `/web/api/workspace/files?conversation_id=<id>` | — | `{"files":[{name,size,mod}],"root"}` |
+| POST | `/web/api/workspace/upload?conversation_id=<id>` | multipart：`file`（可多份） | `{"ok":true,"files":[{name,saved_as,size}],"notice"}` |
+| GET | `/web/api/workspace/download?conversation_id=<id>&name=<file>` | — | 文件字节（`Content-Disposition: attachment`） |
+| DELETE | `/web/api/workspace/file?conversation_id=<id>&name=<file>` | — | `{"ok":true}` |
 | GET | `/web/ws` | WebSocket | 同 `/ws` 事件流（cookie 鉴权） |
 
 #### 示例：普通对话 vs Agent 模式
@@ -447,6 +452,11 @@ POST   /web/api/abort
 GET    /web/api/settings
 POST   /web/api/settings
 GET    /web/api/models
+GET    /web/api/workspace/root
+GET    /web/api/workspace/files?conversation_id=
+POST   /web/api/workspace/upload?conversation_id=   # multipart: file（可多份）
+GET    /web/api/workspace/download?conversation_id=&name=
+DELETE /web/api/workspace/file?conversation_id=&name=
 
 # stdio（非 HTTP）
 mizar --lsp-server                     # LSP server

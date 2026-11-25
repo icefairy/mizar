@@ -1,5 +1,13 @@
 # Mizar Web UI · 文件上传与工作空间规划
 
+> **工作目录策略（2026-11-25 确认）：始终隔离** —— 所有 Web 会话的 Agent WorkDir
+> 固定为 `<root>/<convID>`，文件工具与 bash 不再访问 mizar 仓库；上传文件是 Web
+> Agent 唯一的工作素材来源。非 Web 入口（CLI/TUI/RPC）cwd 为空，行为不变。
+>
+> **落地状态（2026-11-25）：WS-0 ~ WS-3 已实现**。后端见 `internal/server/workspace.go`，
+> 工具层 per-call cwd 见 `internal/plugins/loader.go`（`CallInDir`）与 `internal/builtins/workspace.go`
+> （`resolvePath`），前端在 `internal/server/webui/{index.html,app.js,style.css}`。
+>
 > v2.0 ｜ 2026-11-14 13:55 ｜ 目标仓库 `/data/codes/mizar`（Go 单二进制，Web UI 走 `//go:embed`）
 >
 > 需求：Web UI 是 **B/S 架构**，客户端（浏览器）要能把**本地文件上传到运行 Mizar 的服务器磁盘**；

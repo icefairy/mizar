@@ -1,3 +1,17 @@
+## [未发布] — 2026-11-25 Web UI 文件上传与 per-conv 工作空间
+
+### ✨ 新增
+
+- **Web UI 文件上传**：输入框 📎 / 拖拽 / 粘贴文件上传到运行 Mizar 的服务器磁盘；
+  顶栏 📁 打开「本会话工作空间」面板，可列文件、下载、删除，上传带进度条。
+- **按会话隔离的工作空间**：文件落在 `<root>/<convID>/`，根目录默认
+  `~/.mizar/workspaces/`（开箱可用），设置面板可改成其它绝对路径；删除会话联动清理目录。
+- **文件工具 per-call cwd**：`plugins.Tool` 新增可选 `RunInDir`，`Manager.CallInDir`
+  把会话目录作为参数传给工具（不是全局 cwd，跨会话并发互不干扰）；
+  `read`/`write`/`edit`/`ls`/`grep`/`find`/`repo_map`/`bash` 都锚到该目录，
+  `../` 越界被拒。非 Web 入口 cwd 为空，行为完全不变。
+- 5 个新端点：`/web/api/workspace/{root,files,upload,download,file}`（见 `docs/api.md`）。
+
 ## [v0.8.12] — 2026-11-20 MCP 配置独立成文件 + 配置写回防覆盖
 
 ### 🐛 修复

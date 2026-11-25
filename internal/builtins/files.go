@@ -189,114 +189,116 @@ func isDocumentFile(path string) bool {
 // 支持文本文件 + 文档格式（PDF/DOCX/XLSX）。
 // 文件大小预检 >10MB 拒绝全量读，防止内存不可预估消耗。
 func toolRead() plugins.Tool {
-	return plugins.Tool{
-		Name:        "read",
-		Description: "Read a text file. Args: {path: string, offset?: number(1-indexed), limit?: number(lines)}. Returns content with line numbers, truncated at 2000 lines/50KB with a continue hint. Files over 10MB are rejected. Supports PDF, DOCX, XLSX.",
-		Run: func(args string) (string, error) {
-			var p struct {
-				Path   string `json:"path"`
-				Offset int    `json:"offset"`
-				Limit  int    `json:"limit"`
-			}
-			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
-				return "", fmt.Errorf("read: args {path} required")
-			}
-			// 图片读取（P-7）：多模态网关可用时，图片文件作为视觉附件随下一条
-			// 消息发送（不入 tool result 文本），返回一句说明即可。
-			if mime := agent.ImageMIME(p.Path); mime != "" && agent.ImageVisionEnabled() {
-				if fi, serr := os.Stat(p.Path); serr == nil && !fi.IsDir() && fi.Size() <= agent.MaxImageBytes {
-					if b, rerr := os.ReadFile(p.Path); rerr == nil {
-						if agent.PushPendingImage(agent.PendingImage{Path: p.Path, MIME: mime, Base64: base64.StdEncoding.EncodeToString(b)}) {
-							return fmt.Sprintf("🖼 已读取图片 %s（%s, %d 字节），作为视觉附件随下一条消息发送", p.Path, mime, len(b)), nil
-						}
-						return "", fmt.Errorf("read: 本轮图片附件已达上限，请分多轮读取")
+	const desc = "Read a text file. Args: {path: string, offset?: number(1-indexed), limit?: number(lines)}. Returns content with line numbers, truncated at 2000 lines/50KB with a continue hint. Files over 10MB are rejected. Supports PDF, DOCX, XLSX."
+	run, runInDir := dualRun(func(cwd, args string) (string, error) {
+		var p struct {
+			Path   string `json:"path"`
+			Offset int    `json:"offset"`
+			Limit  int    `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
+			return "", fmt.Errorf("read: args {path} required")
+		}
+		var rerr error
+		if p.Path, rerr = resolvePath(cwd, p.Path); rerr != nil {
+			return "", fmt.Errorf("read: %w", rerr)
+		}
+		// 图片读取（P-7）：多模态网关可用时，图片文件作为视觉附件随下一条
+		// 消息发送（不入 tool result 文本），返回一句说明即可。
+		if mime := agent.ImageMIME(p.Path); mime != "" && agent.ImageVisionEnabled() {
+			if fi, serr := os.Stat(p.Path); serr == nil && !fi.IsDir() && fi.Size() <= agent.MaxImageBytes {
+				if b, rerr := os.ReadFile(p.Path); rerr == nil {
+					if agent.PushPendingImage(agent.PendingImage{Path: p.Path, MIME: mime, Base64: base64.StdEncoding.EncodeToString(b)}) {
+						return fmt.Sprintf("🖼 已读取图片 %s（%s, %d 字节），作为视觉附件随下一条消息发送", p.Path, mime, len(b)), nil
 					}
+					return "", fmt.Errorf("read: 本轮图片附件已达上限，请分多轮读取")
 				}
 			}
+		}
 
-			// 大小预检：>10MB 拒绝，防 OOM
-			fi, err := os.Stat(p.Path)
-			if err != nil {
-				return "", err
-			}
-			if fi.Size() > readMaxFileBytes {
-				return "", fmt.Errorf("read: %s is %.1fMB (limit %dMB); use grep/find to search, or bash: sed -n / head -c to read slices",
-					p.Path, float64(fi.Size())/(1024*1024), readMaxFileBytes/(1024*1024))
-			}
+		// 大小预检：>10MB 拒绝，防 OOM
+		fi, err := os.Stat(p.Path)
+		if err != nil {
+			return "", err
+		}
+		if fi.Size() > readMaxFileBytes {
+			return "", fmt.Errorf("read: %s is %.1fMB (limit %dMB); use grep/find to search, or bash: sed -n / head -c to read slices",
+				p.Path, float64(fi.Size())/(1024*1024), readMaxFileBytes/(1024*1024))
+		}
 
-			// 文档格式走专用解析器
-			if isDocumentFile(p.Path) {
-				switch strings.ToLower(filepath.Ext(p.Path)) {
-				case ".pdf":
-					text, err := utils.ExtractPDF(p.Path)
-					if err != nil {
-						return "", fmt.Errorf("read PDF: %w", err)
-					}
-					return text, nil
-				case ".docx":
-					text, err := utils.ExtractDOCX(p.Path)
-					if err != nil {
-						return "", fmt.Errorf("read DOCX: %w", err)
-					}
-					return text, nil
-				case ".xlsx":
-					text, err := utils.ExtractXLSX(p.Path)
-					if err != nil {
-						return "", fmt.Errorf("read XLSX: %w", err)
-					}
-					return text, nil
+		// 文档格式走专用解析器
+		if isDocumentFile(p.Path) {
+			switch strings.ToLower(filepath.Ext(p.Path)) {
+			case ".pdf":
+				text, err := utils.ExtractPDF(p.Path)
+				if err != nil {
+					return "", fmt.Errorf("read PDF: %w", err)
 				}
+				return text, nil
+			case ".docx":
+				text, err := utils.ExtractDOCX(p.Path)
+				if err != nil {
+					return "", fmt.Errorf("read DOCX: %w", err)
+				}
+				return text, nil
+			case ".xlsx":
+				text, err := utils.ExtractXLSX(p.Path)
+				if err != nil {
+					return "", fmt.Errorf("read XLSX: %w", err)
+				}
+				return text, nil
 			}
+		}
 
-			b, err := os.ReadFile(p.Path)
-			if err != nil {
-				return "", err
+		b, err := os.ReadFile(p.Path)
+		if err != nil {
+			return "", err
+		}
+		lines := strings.Split(string(b), "\n")
+		total := len(lines)
+		start, end := 0, total
+		if p.Offset > 0 {
+			start = p.Offset - 1
+		}
+		if p.Limit > 0 {
+			end = start + p.Limit
+			if end > total {
+				end = total
 			}
-			lines := strings.Split(string(b), "\n")
-			total := len(lines)
-			start, end := 0, total
-			if p.Offset > 0 {
-				start = p.Offset - 1
+		}
+		if start >= total {
+			start = total - 1
+		}
+		if start < 0 {
+			start = 0
+		}
+		// 行数限
+		if end-start > readMaxLines {
+			end = start + readMaxLines
+		}
+		// 拼接显示，同时按字节限（50KB）截断
+		var sb strings.Builder
+		byteUsed := 0
+		shown := 0
+		for i := start; i < end; i++ {
+			line := fmt.Sprintf("%d|%s\n", i+1, lines[i])
+			byteUsed += len(line)
+			if byteUsed > readMaxBytes {
+				break
 			}
-			if p.Limit > 0 {
-				end = start + p.Limit
-				if end > total {
-					end = total
-				}
-			}
-			if start >= total {
-				start = total - 1
-			}
-			if start < 0 {
-				start = 0
-			}
-			// 行数限
-			if end-start > readMaxLines {
-				end = start + readMaxLines
-			}
-			// 拼接显示，同时按字节限（50KB）截断
-			var sb strings.Builder
-			byteUsed := 0
-			shown := 0
-			for i := start; i < end; i++ {
-				line := fmt.Sprintf("%d|%s\n", i+1, lines[i])
-				byteUsed += len(line)
-				if byteUsed > readMaxBytes {
-					break
-				}
-				sb.WriteString(line)
-				shown++
-			}
-			truncated := end < total || byteUsed > readMaxBytes
-			var head strings.Builder
-			if truncated {
-				fmt.Fprintf(&head, "%d lines (total %d, truncated). Use offset=%d to continue.\n", shown, total, start+shown+1)
-			} else {
-				fmt.Fprintf(&head, "%d lines (total %d)\n", shown, total)
-			}
-			return strings.TrimRight(head.String()+sb.String(), "\n"), nil
-		},
-	}
+			sb.WriteString(line)
+			shown++
+		}
+		truncated := end < total || byteUsed > readMaxBytes
+		var head strings.Builder
+		if truncated {
+			fmt.Fprintf(&head, "%d lines (total %d, truncated). Use offset=%d to continue.\n", shown, total, start+shown+1)
+		} else {
+			fmt.Fprintf(&head, "%d lines (total %d)\n", shown, total)
+		}
+		return strings.TrimRight(head.String()+sb.String(), "\n"), nil
+	})
+	return plugins.Tool{Name: "read", Description: desc, Run: run, RunInDir: runInDir}
 }
 
 // notifyPluginChanged 若配置了回调则触发（写入的是插件文件时回调内部自行判断并重载），
@@ -315,176 +317,182 @@ func notifyPluginChanged(cb func(path string) string, path string) string {
 // toolWrite 写文件（对齐 pi 的 write：path + content，自动建父目录）。
 // 写入插件目录内的 .ts/.js 文件时自动触发插件热重载。
 func toolWrite(onPluginFileChanged func(path string) string) plugins.Tool {
-	return plugins.Tool{
-		Name:        "write",
-		Description: "Write content to a file (creates parent dirs, overwrites). Writing a .ts/.js file inside the plugin dir auto-reloads plugins. Args: {path: string, content: string}.",
-		Run: func(args string) (string, error) {
-			var p struct {
-				Path    string `json:"path"`
-				Content string `json:"content"`
-			}
-			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
-				return "", fmt.Errorf("write: args {path, content} required")
-			}
-			if dir := filepath.Dir(p.Path); dir != "." {
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					return "", err
-				}
-			}
-			if err := os.WriteFile(p.Path, []byte(p.Content), 0o644); err != nil {
+	const desc = "Write content to a file (creates parent dirs, overwrites). Writing a .ts/.js file inside the plugin dir auto-reloads plugins. Args: {path: string, content: string}."
+	run, runInDir := dualRun(func(cwd, args string) (string, error) {
+		var p struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
+			return "", fmt.Errorf("write: args {path, content} required")
+		}
+		var rerr error
+		if p.Path, rerr = resolvePath(cwd, p.Path); rerr != nil {
+			return "", fmt.Errorf("write: %w", rerr)
+		}
+		if dir := filepath.Dir(p.Path); dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("wrote %d bytes to %s", len(p.Content), p.Path) + notifyPluginChanged(onPluginFileChanged, p.Path), nil
-		},
-	}
+		}
+		if err := os.WriteFile(p.Path, []byte(p.Content), 0o644); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("wrote %d bytes to %s", len(p.Content), p.Path) + notifyPluginChanged(onPluginFileChanged, p.Path), nil
+	})
+	return plugins.Tool{Name: "write", Description: desc, Run: run, RunInDir: runInDir}
 }
 
 // toolEdit 精准替换（对齐 pi 的 edit：path + oldText + newText，可多组 edits）。
 // 编辑插件目录内的 .ts/.js 文件时自动触发插件热重载。
 func toolEdit(onPluginFileChanged func(path string) string) plugins.Tool {
-	return plugins.Tool{
-		Name:        "edit",
-		Description: "Edit a file with targeted replacements. Args: {path: string, oldText: string, newText: string} or {path: string, edits: [{oldText, newText}]}. oldText must be unique. Returns diff summary.",
-		Run: func(args string) (string, error) {
-			var p struct {
-				Path    string `json:"path"`
+	const desc = "Edit a file with targeted replacements. Args: {path: string, oldText: string, newText: string} or {path: string, edits: [{oldText, newText}]}. oldText must be unique. Returns diff summary."
+	run, runInDir := dualRun(func(cwd, args string) (string, error) {
+		var p struct {
+			Path    string `json:"path"`
+			OldText string `json:"oldText"`
+			NewText string `json:"newText"`
+			Edits   []struct {
 				OldText string `json:"oldText"`
 				NewText string `json:"newText"`
-				Edits   []struct {
-					OldText string `json:"oldText"`
-					NewText string `json:"newText"`
-				} `json:"edits"`
+			} `json:"edits"`
+		}
+		if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
+			return "", fmt.Errorf("edit: args {path} required")
+		}
+		var rerr error
+		if p.Path, rerr = resolvePath(cwd, p.Path); rerr != nil {
+			return "", fmt.Errorf("edit: %w", rerr)
+		}
+		b, err := os.ReadFile(p.Path)
+		if err != nil {
+			return "", err
+		}
+		content := string(b)
+		// BOM 剥离 + 行尾检测（保真写回）
+		lineEnding := detectLineEndings(content)
+		if strings.HasPrefix(content, "\xef\xbb\xbf") || string(b[:3]) == string(bomUTF8) {
+			content = content[1:] // 剥去 BOM
+			b = b[3:]
+		}
+		edits := p.Edits
+		if len(edits) == 0 && p.OldText != "" {
+			edits = []struct {
+				OldText string `json:"oldText"`
+				NewText string `json:"newText"`
+			}{{OldText: p.OldText, NewText: p.NewText}}
+		}
+		if len(edits) == 0 {
+			return "", fmt.Errorf("edit: oldText or edits required")
+		}
+		// 从后往前应用，防前面 edit 改变 offset 导致后面错配（对齐 pi 的多编辑倒序）
+		type replacement struct {
+			start   int
+			end     int
+			newText string
+		}
+		var reps []replacement
+		fuzzyUsed := false
+		for _, e := range edits {
+			if e.OldText == "" {
+				continue
 			}
-			if err := json.Unmarshal([]byte(args), &p); err != nil || p.Path == "" {
-				return "", fmt.Errorf("edit: args {path} required")
+			// 先精确匹配
+			idx := strings.Index(content, e.OldText)
+			count := strings.Count(content, e.OldText)
+			if idx >= 0 && count == 1 {
+				reps = append(reps, replacement{start: idx, end: idx + len(e.OldText), newText: e.NewText})
+				continue
 			}
-			b, err := os.ReadFile(p.Path)
-			if err != nil {
+			// 精确匹配失败 → 模糊匹配（NFKC + 智能引号/破折号归一化）
+			fuzzyContent := normalizeForFuzzyMatch(content)
+			fuzzyOld := normalizeForFuzzyMatch(e.OldText)
+			fuzzyIdx := strings.Index(fuzzyContent, fuzzyOld)
+			if fuzzyIdx < 0 {
+				return "", fmt.Errorf("edit: oldText %q not found (exact + fuzzy)", truncate(e.OldText, 50))
+			}
+			fuzzyCount := strings.Count(fuzzyContent, fuzzyOld)
+			if fuzzyCount != 1 {
+				return "", fmt.Errorf("edit: oldText %q appears %d times in fuzzy match (must be unique)", truncate(e.OldText, 50), fuzzyCount)
+			}
+			// 模糊匹配成功：用归一化后的 oldText 长度计算替换范围
+			fuzzyUsed = true
+			reps = append(reps, replacement{start: fuzzyIdx, end: fuzzyIdx + len(fuzzyOld), newText: e.NewText})
+		}
+		if len(reps) == 0 {
+			return "", fmt.Errorf("edit: no edits applied")
+		}
+		// 按位置降序替换，避免偏移错乱
+		sort.Slice(reps, func(i, j int) bool { return reps[i].start > reps[j].start })
+		for _, r := range reps {
+			content = content[:r.start] + r.newText + content[r.end:]
+		}
+		warn := ""
+		if fuzzyUsed {
+			warn = " (fuzzy match used: Unicode normalization applied)"
+		}
+		if err := os.WriteFile(p.Path, []byte(content), 0o644); err != nil {
+			return "", err
+		}
+		// 若原始文件有 BOM 或 CRLF，写回时补上（保真）
+		if strings.HasPrefix(string(b), string(bomUTF8)) || lineEnding == "\r\n" {
+			// 重建带 BOM/CRLF 的内容
+			final := content
+			if lineEnding == "\r\n" && !strings.Contains(content, "\r\n") {
+				final = strings.ReplaceAll(content, "\n", "\r\n")
+			}
+			if strings.HasPrefix(string(b), string(bomUTF8)) {
+				final = string(bomUTF8) + final
+			}
+			if err := os.WriteFile(p.Path, []byte(final), 0o644); err != nil {
 				return "", err
 			}
-			content := string(b)
-			// BOM 剥离 + 行尾检测（保真写回）
-			lineEnding := detectLineEndings(content)
-			if strings.HasPrefix(content, "\xef\xbb\xbf") || string(b[:3]) == string(bomUTF8) {
-				content = content[1:] // 剥去 BOM
-				b = b[3:]
-			}
-			edits := p.Edits
-			if len(edits) == 0 && p.OldText != "" {
-				edits = []struct {
-					OldText string `json:"oldText"`
-					NewText string `json:"newText"`
-				}{{OldText: p.OldText, NewText: p.NewText}}
-			}
-			if len(edits) == 0 {
-				return "", fmt.Errorf("edit: oldText or edits required")
-			}
-			// 从后往前应用，防前面 edit 改变 offset 导致后面错配（对齐 pi 的多编辑倒序）
-			type replacement struct {
-				start   int
-				end     int
-				newText string
-			}
-			var reps []replacement
-			fuzzyUsed := false
-			for _, e := range edits {
-				if e.OldText == "" {
-					continue
-				}
-				// 先精确匹配
-				idx := strings.Index(content, e.OldText)
-				count := strings.Count(content, e.OldText)
-				if idx >= 0 && count == 1 {
-					reps = append(reps, replacement{start: idx, end: idx + len(e.OldText), newText: e.NewText})
-					continue
-				}
-				// 精确匹配失败 → 模糊匹配（NFKC + 智能引号/破折号归一化）
-				fuzzyContent := normalizeForFuzzyMatch(content)
-				fuzzyOld := normalizeForFuzzyMatch(e.OldText)
-				fuzzyIdx := strings.Index(fuzzyContent, fuzzyOld)
-				if fuzzyIdx < 0 {
-					return "", fmt.Errorf("edit: oldText %q not found (exact + fuzzy)", truncate(e.OldText, 50))
-				}
-				fuzzyCount := strings.Count(fuzzyContent, fuzzyOld)
-				if fuzzyCount != 1 {
-					return "", fmt.Errorf("edit: oldText %q appears %d times in fuzzy match (must be unique)", truncate(e.OldText, 50), fuzzyCount)
-				}
-				// 模糊匹配成功：用归一化后的 oldText 长度计算替换范围
-				fuzzyUsed = true
-				reps = append(reps, replacement{start: fuzzyIdx, end: fuzzyIdx + len(fuzzyOld), newText: e.NewText})
-			}
-			if len(reps) == 0 {
-				return "", fmt.Errorf("edit: no edits applied")
-			}
-			// 按位置降序替换，避免偏移错乱
-			sort.Slice(reps, func(i, j int) bool { return reps[i].start > reps[j].start })
-			for _, r := range reps {
-				content = content[:r.start] + r.newText + content[r.end:]
-			}
-			warn := ""
-			if fuzzyUsed {
-				warn = " (fuzzy match used: Unicode normalization applied)"
-			}
-			if err := os.WriteFile(p.Path, []byte(content), 0o644); err != nil {
-				return "", err
-			}
-			// 若原始文件有 BOM 或 CRLF，写回时补上（保真）
-			if strings.HasPrefix(string(b), string(bomUTF8)) || lineEnding == "\r\n" {
-				// 重建带 BOM/CRLF 的内容
-				final := content
-				if lineEnding == "\r\n" && !strings.Contains(content, "\r\n") {
-					final = strings.ReplaceAll(content, "\n", "\r\n")
-				}
-				if strings.HasPrefix(string(b), string(bomUTF8)) {
-					final = string(bomUTF8) + final
-				}
-				if err := os.WriteFile(p.Path, []byte(final), 0o644); err != nil {
-					return "", err
-				}
-			}
-			return fmt.Sprintf("applied %d edit(s) to %s%s", len(reps), p.Path, warn) + notifyPluginChanged(onPluginFileChanged, p.Path), nil
-		},
-	}
+		}
+		return fmt.Sprintf("applied %d edit(s) to %s%s", len(reps), p.Path, warn) + notifyPluginChanged(onPluginFileChanged, p.Path), nil
+	})
+	return plugins.Tool{Name: "edit", Description: desc, Run: run, RunInDir: runInDir}
 }
 
 // toolLS 列目录（对齐 pi 的 ls：path + limit）。
 func toolLS() plugins.Tool {
-	return plugins.Tool{
-		Name:        "ls",
-		Description: "List directory entries. Args: {path?: string, limit?: number(default 500)}. Directories suffixed with /.",
-		Run: func(args string) (string, error) {
-			var p struct {
-				Path  string `json:"path"`
-				Limit int    `json:"limit"`
+	const desc = "List directory entries. Args: {path?: string, limit?: number(default 500)}. Directories suffixed with /."
+	run, runInDir := dualRun(func(cwd, args string) (string, error) {
+		var p struct {
+			Path  string `json:"path"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(args), &p); err != nil {
+			return "", err
+		}
+		if p.Path == "" {
+			p.Path = "."
+		}
+		var rerr error
+		if p.Path, rerr = resolvePath(cwd, p.Path); rerr != nil {
+			return "", fmt.Errorf("ls: %w", rerr)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 500
+		}
+		entries, err := os.ReadDir(p.Path)
+		if err != nil {
+			return "", err
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() {
+				name += "/"
 			}
-			if err := json.Unmarshal([]byte(args), &p); err != nil {
-				return "", err
-			}
-			if p.Path == "" {
-				p.Path = "."
-			}
-			if p.Limit <= 0 {
-				p.Limit = 500
-			}
-			entries, err := os.ReadDir(p.Path)
-			if err != nil {
-				return "", err
-			}
-			names := make([]string, 0, len(entries))
-			for _, e := range entries {
-				name := e.Name()
-				if e.IsDir() {
-					name += "/"
-				}
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			if len(names) > p.Limit {
-				names = names[:p.Limit]
-			}
-			return fmt.Sprintf("%d entries:\n%s", len(entries), strings.Join(names, "\n")), nil
-		},
-	}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		if len(names) > p.Limit {
+			names = names[:p.Limit]
+		}
+		return fmt.Sprintf("%d entries:\n%s", len(entries), strings.Join(names, "\n")), nil
+	})
+	return plugins.Tool{Name: "ls", Description: desc, Run: run, RunInDir: runInDir}
 }
 
 func truncate(s string, n int) string {
