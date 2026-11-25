@@ -279,16 +279,23 @@ func (t *StdioTransport) Close() error {
 
 // HTTPTransport 通过 HTTP POST JSON-RPC 通信。
 type HTTPTransport struct {
-	url    string
-	client *http.Client
+	url     string
+	headers map[string]string
+	client  *http.Client
 }
 
 // NewHTTPTransport 创建 HTTP 传输。
 func NewHTTPTransport(url string, timeout time.Duration) *HTTPTransport {
+	return NewHTTPTransportWithHeaders(url, timeout, nil)
+}
+
+// NewHTTPTransportWithHeaders 创建带附加请求头的 HTTP 传输
+// （用于 Authorization 等鉴权头）。
+func NewHTTPTransportWithHeaders(url string, timeout time.Duration, headers map[string]string) *HTTPTransport {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-	return &HTTPTransport{url: url, client: &http.Client{Timeout: timeout}}
+	return &HTTPTransport{url: url, headers: headers, client: &http.Client{Timeout: timeout}}
 }
 
 // Call 实现 Transport。
@@ -303,6 +310,9 @@ func (t *HTTPTransport) Call(ctx context.Context, req rpcRequest) (json.RawMessa
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range t.headers {
+		httpReq.Header.Set(k, v)
+	}
 	resp, err := t.client.Do(httpReq)
 	if err != nil {
 		return nil, err

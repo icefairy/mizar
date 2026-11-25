@@ -27,6 +27,8 @@ type MCPServerConf struct {
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	URL     string   `json:"url,omitempty"`
+	// Headers HTTP 传输附加请求头（如 Authorization: Bearer ...）。
+	Headers map[string]string `json:"headers,omitempty"`
 	// Timeout 单次调用超时（秒），默认 30。
 	Timeout int `json:"timeout,omitempty"`
 }
@@ -37,17 +39,18 @@ type MCPServerConf struct {
 //   - args 写成以空格分隔的字符串
 func (s *MCPServerConf) UnmarshalJSON(data []byte) error {
 	type alias struct {
-		Name    string          `json:"name"`
-		Command string          `json:"command"`
-		Args    json.RawMessage `json:"args"`
-		URL     string          `json:"url"`
-		Timeout json.RawMessage `json:"timeout"`
+		Name    string            `json:"name"`
+		Command string            `json:"command"`
+		Args    json.RawMessage   `json:"args"`
+		URL     string            `json:"url"`
+		Headers map[string]string `json:"headers"`
+		Timeout json.RawMessage   `json:"timeout"`
 	}
 	var a alias
 	if err := json.Unmarshal(data, &a); err != nil {
 		return err
 	}
-	s.Name, s.Command, s.URL = a.Name, a.Command, a.URL
+	s.Name, s.Command, s.URL, s.Headers = a.Name, a.Command, a.URL, a.Headers
 	s.Args, s.Timeout = nil, 0
 	if len(a.Args) > 0 && string(a.Args) != "null" {
 		var arr []string
@@ -244,7 +247,7 @@ func (r *MCPRegistry) get(name string, ctx context.Context) (*mcpClient, error) 
 	var tr mcp.Transport
 	var err error
 	if conf.URL != "" {
-		tr = mcp.NewHTTPTransport(conf.URL, r.timeout)
+		tr = mcp.NewHTTPTransportWithHeaders(conf.URL, r.timeout, conf.Headers)
 	} else if conf.Command != "" {
 		cmdArgs := append([]string{}, conf.Args...)
 		tr, err = mcp.NewStdioTransport(ctx, conf.Command, cmdArgs...)
