@@ -9,6 +9,7 @@
 |---|---|---|---|
 | OpenAI 兼容 | `/v1/models`、`/v1/chat/completions` | Bearer Token | 任意 OpenAI SDK 直接接入 |
 | JSON-RPC 2.0 | `/rpc` | Bearer Token | 编程式调用 agent（run/steer/abort…） |
+| MCP server | `/mcp` | Bearer Token（必须非空） | 把工具暴露给 MCP 客户端（见 `docs/mcp-server.md`） |
 | WebSocket | `/ws` | Bearer Token | 实时事件流 + 中途纠正 |
 | Web UI | `/web/`、`/web/api/*`、`/web/ws` | Cookie 会话 | 浏览器界面（多会话/模型/参数/流式） |
 | 管理 | `/admin/status`、`/admin/switch` | Bearer Token | 运行时开关服务 |
@@ -419,6 +420,9 @@ curl -X POST http://127.0.0.1:3003/ext/hello -H "Authorization: Bearer ***" \
 # OpenAI 兼容（Bearer）
 GET    /v1/models
 POST   /v1/chat/completions            # stream=true 走 SSE
+
+# MCP server（Bearer，且 --token 必须非空）
+POST   /mcp                            # initialize / ping / tools/list / tools/call
 
 # JSON-RPC 2.0（Bearer）
 POST   /rpc                            # agent.run/steer/abort/running, tools.list, system.ping, 插件自定义

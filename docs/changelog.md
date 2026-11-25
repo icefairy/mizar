@@ -1,3 +1,16 @@
+## [未发布] — 2026-11-25 Mizar 可作为 HTTP MCP Server
+
+### ✨ 新增
+
+- **`POST /mcp`（MCP Streamable HTTP）**：把已注册的内置 + 插件工具暴露给
+  Claude Desktop / CodeBuddy / Cursor 等 MCP 客户端，支持 `initialize`、`ping`、
+  `tools/list`、`tools/call`；通知返回 202，未知方法 `-32601`。
+- **强制 `--token`**：MCP 客户端没有 cookie 登录通道，token 为空时 `/mcp` 直接 403；
+  工具执行目录为服务端启动工作目录（`--workdir`）。
+- **`upload_file` 内置工具**：`{path, content, encoding?: text|base64}`，支持二进制
+  （base64 自动忽略空白）、自动建父目录、越界拒绝；MCP 客户端用它上传文件。
+- 使用说明见 `docs/mcp-server.md`；`/admin/routes` 与 OpenAPI 已登记该端点。
+
 ## [未发布] — 2026-11-25 Web UI 文件上传与 per-conv 工作空间
 
 ### ✨ 新增

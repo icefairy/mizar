@@ -11,6 +11,7 @@
 //	| write  | path, content                                   | 写文件             |
 //	| edit   | path, oldText, newText                          | 精准替换（可多次） |
 //	| ls     | path, limit                                     | 列目录             |
+//	| upload_file | path, content, encoding(text/base64)        | 从内容创建文件     |
 //
 // 每个工具 Run(args string) 接收 JSON 参数（与插件 tool_* 一致）。
 package builtins
@@ -37,6 +38,7 @@ func All(skillsDir string, onPluginFileChanged func(path string) string) []plugi
 		toolFind(),
 		toolRead(),
 		toolWrite(onPluginFileChanged),
+		toolUploadFile(),
 		toolEdit(onPluginFileChanged),
 		toolLS(),
 		toolRepoMap(),

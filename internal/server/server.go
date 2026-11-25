@@ -343,6 +343,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/v1/chat/completions", s.auth(s.handleChat))
 	// JSON-RPC 2.0
 	s.mux.HandleFunc("/rpc", s.auth(s.handleJSONRPC))
+	// MCP server（把工具暴露给外部 MCP 客户端；强制要求 --token）
+	s.mux.HandleFunc("/mcp", s.auth(s.handleMCP))
 	// 插件 RPC 的 REST 直达（/ext/<name>，Bearer 鉴权）
 	s.mux.HandleFunc("/ext/", s.auth(s.handleExtRPC))
 	// WebSocket

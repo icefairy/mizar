@@ -375,6 +375,7 @@ Unix 有 bracketed paste，粘贴本来就是整段处理，不受影响。
 - **纯函数**：`time` / `uuid` / `base64` / `sha256` / `path` / `url`
 - **Token 计数**：`count_tokens`
 - **MCP 调用**：`mcp_call` 调用外部 MCP 服务器（配置在独立的 `~/.mizar/mcp.json`）
+- **MCP 服务端**：`--serve --token` 后 `POST /mcp` 把 Mizar 的工具暴露给 Claude/CodeBuddy/Cursor 等 MCP 客户端（见 [`docs/mcp-server.md`](docs/mcp-server.md)）
 
 ### 4. 插件系统
 - **热重载**：修改 `.ts` / `.js` 文件后自动生效，无需重启

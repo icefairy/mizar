@@ -19,6 +19,8 @@ import (
 // 协议常量
 const (
 	JSONRPCVersion = "2.0"
+	// ProtocolVersion 本实现支持的 MCP 协议版本（客户端/服务端共用）。
+	ProtocolVersion = "2025-03-26"
 	// 方法
 	MethodInitialize               = "initialize"
 	MethodToolsList                = "tools/list"
@@ -109,7 +111,7 @@ func (c *Client) Initialize(ctx context.Context, tr Transport) error {
 	id := c.nextID
 	c.mu.Unlock()
 	params := map[string]any{
-		"protocolVersion": "2025-03-26",
+		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"clientInfo": map[string]any{
 			"name":    c.name,

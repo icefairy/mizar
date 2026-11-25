@@ -47,6 +47,9 @@ var routeTable = []RouteMeta{
 	// JSON-RPC 2.0（Bearer）
 	{Group: "rpc", Method: "POST", Path: "/rpc", Handler: "handleJSONRPC", Auth: "bearer", EnabledByService: "jsonrpc",
 		Summary: "JSON-RPC 2.0：agent.run/steer/abort/running、tools.list、system.ping、插件 rpc_*"},
+	// MCP server（Bearer；要求 token 非空）
+	{Group: "mcp", Method: "POST", Path: "/mcp", Handler: "handleMCP", Auth: "bearer",
+		Summary: "MCP server（Streamable HTTP）：initialize / ping / tools/list / tools/call"},
 	// WebSocket（Bearer）
 	{Group: "ws", Method: "GET", Path: "/ws", Handler: "handleWS", Auth: "bearer", EnabledByService: "ws",
 		Summary: "WebSocket 实时事件流 + 中途纠正"},
